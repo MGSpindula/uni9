@@ -1,90 +1,61 @@
-import * as THREE from "three";
-import { Raycast } from "./Raycast";
-
 export class Input {
 
-    constructor(camera, scene, registry, selection) {
+    constructor(element = window) {
 
-        this.raycast = new Raycast(
-            camera,
-            scene
-        );
+        this.element = element;
+        this.listeners = new Map();
 
-        this.registry = registry;
+        this.handlers = {
+            MouseMove: event => this.emit("MouseMove", event),
+            MouseEnter: event => this.emit("MouseEnter", event),
+            MouseLeave: event => this.emit("MouseLeave", event),
+            Click: event => this.emit("Click", event)
+        };
 
-        this.selection = selection;
-
-        window.addEventListener(
-            "mousemove",
-            (event) => this.hover(event)
-        );
-
-        window.addEventListener(
-            "click",
-            (event) => this.click(event)
-        );
+        element.addEventListener("mousemove", this.handlers.MouseMove);
+        element.addEventListener("mouseenter", this.handlers.MouseEnter);
+        element.addEventListener("mouseleave", this.handlers.MouseLeave);
+        element.addEventListener("click", this.handlers.Click);
 
     }
 
-    hover(event) {
+    on(eventName, listener) {
 
-        const hit = this.raycast.getHit(
+        if (!this.listeners.has(eventName)) {
 
-            event,
-
-            this.registry
-
-        );
-
-        if (
-
-            !hit ||
-
-            !hit.entity.canInteract()
-
-        ) {
-
-            this.selection.clear();
-
-            document.body.style.cursor =
-                "default";
-
-            return;
+            this.listeners.set(eventName, new Set());
 
         }
 
-        this.selection.setHovered(
+        this.listeners.get(eventName).add(listener);
 
-            hit.entity,
-
-            hit.object
-
-        );
-
-        document.body.style.cursor =
-            "pointer";
+        return () => this.off(eventName, listener);
 
     }
 
-    click(event) {
+    off(eventName, listener) {
 
-        const hit = this.raycast.getHit(
+        this.listeners.get(eventName)?.delete(listener);
 
-            event,
+    }
 
-            this.registry
+    emit(eventName, event) {
 
-        );
+        for (const listener of this.listeners.get(eventName) ?? []) {
 
-        if (!hit || !hit.entity.canInteract()) {
-
-            return;
+            listener(event);
 
         }
 
-        hit.entity.interact(
-            hit.object
-        );
+    }
+
+    dispose() {
+
+        this.element.removeEventListener("mousemove", this.handlers.MouseMove);
+        this.element.removeEventListener("mouseenter", this.handlers.MouseEnter);
+        this.element.removeEventListener("mouseleave", this.handlers.MouseLeave);
+        this.element.removeEventListener("click", this.handlers.Click);
+        this.listeners.clear();
 
     }
 

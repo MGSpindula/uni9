@@ -47,20 +47,35 @@ export class Scene {
 
         this.registry = new EntityRegistry();
 
-        this.selection = new SelectionManager();
+        this.selection = new SelectionManager(
+            this.camera,
+            this.scene,
+            this.registry,
+            this.renderer.renderer.domElement
+        );
 
         this.createLights();
 
         this.createObjects();
 
-        this.input = new Input(
+        this.input = new Input(this.renderer.renderer.domElement);
 
-            this.camera,
-            this.scene,
-            this.registry,
-            this.selection
+        this.input.on("MouseMove", event => {
 
-        );
+            const isHovering = this.selection.handleMouseMove(event);
+            this.renderer.renderer.domElement.style.cursor =
+                isHovering ? "pointer" : "default";
+
+        });
+
+        this.input.on("MouseLeave", () => {
+
+            this.selection.clearHover();
+            this.renderer.renderer.domElement.style.cursor = "default";
+
+        });
+
+        this.input.on("Click", event => this.selection.handleClick(event));
 
         this.postProcessing =
             new PostProcessing(
@@ -132,8 +147,6 @@ export class Scene {
     }
 
     add(object) {
-
-        console.log(object);
 
         this.objects.push(object);
 

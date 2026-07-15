@@ -58,6 +58,12 @@ export class Entity {
 
     }
 
+    unregister(registry) {
+
+        registry.unregister(this);
+
+    }
+
     // -----------------------------
     // Effects
     // -----------------------------

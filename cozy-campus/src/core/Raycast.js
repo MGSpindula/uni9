@@ -2,10 +2,11 @@ import * as THREE from "three";
 
 export class Raycast {
 
-    constructor(camera, scene) {
+    constructor(camera, scene, element = null) {
 
         this.camera = camera;
         this.scene = scene;
+        this.element = element;
 
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
@@ -14,11 +15,18 @@ export class Raycast {
 
     updateMouse(event) {
 
+        const rect = this.element?.getBoundingClientRect() ?? {
+            left: 0,
+            top: 0,
+            width: window.innerWidth,
+            height: window.innerHeight
+        };
+
         this.mouse.x =
-            (event.clientX / window.innerWidth) * 2 - 1;
+            ((event.clientX - rect.left) / rect.width) * 2 - 1;
 
         this.mouse.y =
-            -(event.clientY / window.innerHeight) * 2 + 1;
+            -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
     }
 

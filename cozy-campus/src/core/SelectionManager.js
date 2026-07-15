@@ -1,11 +1,17 @@
+import { Raycast } from "./Raycast";
+
 export class SelectionManager {
 
-    constructor() {
+    constructor(camera, scene, registry, element) {
 
+        this.raycast = new Raycast(camera, scene, element);
+        this.registry = registry;
         this.effects = [];
 
         this.entity = null;
         this.object = null;
+        this.selectedEntity = null;
+        this.selectedObject = null;
 
     }
 
@@ -15,21 +21,52 @@ export class SelectionManager {
 
     }
 
+    removeEffect(effect) {
+
+        this.effects = this.effects.filter(item => item !== effect);
+
+    }
+
+    handleMouseMove(event) {
+
+        const hit = this.raycast.getHit(event, this.registry);
+
+        if (!hit || !hit.entity.canInteract()) {
+
+            this.clearHover();
+            return false;
+
+        }
+
+        this.setHovered(hit.entity, hit.object);
+        return true;
+
+    }
+
+    handleClick(event) {
+
+        const hit = this.raycast.getHit(event, this.registry);
+
+        if (!hit || !hit.entity.canInteract()) {
+
+            return false;
+
+        }
+
+        hit.entity.interact(hit.object);
+        return true;
+
+    }
+
     setHovered(entity, object) {
 
-        if (
-
-            entity === this.entity &&
-
-            object === this.object
-
-        ) {
+        if (entity === this.entity && object === this.object) {
 
             return;
 
         }
 
-        this.clear();
+        this.clearHover();
 
         this.entity = entity;
         this.object = object;
@@ -44,7 +81,7 @@ export class SelectionManager {
 
     }
 
-    clear() {
+    clearHover() {
 
         if (!this.entity) {
 
@@ -52,24 +89,23 @@ export class SelectionManager {
 
         }
 
-        this.entity.unhover(
-            this.object
-        );
+        this.entity.unhover(this.object);
 
         for (const effect of this.effects) {
 
-            effect.unhover(
-
-                this.entity,
-
-                this.object
-
-            );
+            effect.unhover(this.entity, this.object);
 
         }
 
         this.entity = null;
         this.object = null;
+
+    }
+
+    // Backward-compatible name while callers migrate to clearHover().
+    clear() {
+
+        this.clearHover();
 
     }
 
@@ -82,6 +118,20 @@ export class SelectionManager {
     getObject() {
 
         return this.object;
+
+    }
+
+    select(entity = this.entity, object = this.object) {
+
+        this.selectedEntity = entity;
+        this.selectedObject = object;
+
+    }
+
+    clearSelection() {
+
+        this.selectedEntity = null;
+        this.selectedObject = null;
 
     }
 

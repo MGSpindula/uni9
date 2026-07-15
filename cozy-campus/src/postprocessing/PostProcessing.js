@@ -58,6 +58,8 @@ export class PostProcessing {
 
         this.effects.push(effect);
 
+        effect.initialize();
+
         this.composer.insertPass(
 
             effect.getPass(),
@@ -65,6 +67,16 @@ export class PostProcessing {
             this.composer.passes.length - 1
 
         );
+
+    }
+
+    removeEffect(effect) {
+
+        if (!this.effects.includes(effect)) return;
+
+        this.effects = this.effects.filter(item => item !== effect);
+        this.composer.removePass(effect.getPass());
+        effect.dispose();
 
     }
 
