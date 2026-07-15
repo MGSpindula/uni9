@@ -1,0 +1,16 @@
+{
+  "forceInclude": [
+    "cozy-campus\\src\\assets\\hero.png",
+    "cozy-campus\\src\\assets\\javascript.svg",
+    "cozy-campus\\src\\assets\\vite.svg",
+    "cozy-campus\\src\\main.js",
+    "cozy-campus\\src\\objects\\Cube.js",
+    "cozy-campus\\src\\objects\\Cylinder.js",
+    "cozy-campus\\src\\objects\\Floor.js",
+    "cozy-campus\\src\\objects\\Sphere.js",
+    "cozy-campus\\src\\Renderer.js",
+    "cozy-campus\\src\\Scene.js",
+    "cozy-campus\\src\\style.css"
+  ],
+  "forceExclude": []
+}
