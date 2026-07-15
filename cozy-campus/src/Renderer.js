@@ -27,6 +27,10 @@ export class Renderer {
 
     resize() {
 
+        this.renderer.setPixelRatio(
+            window.devicePixelRatio
+        );
+
         this.renderer.setSize(
             window.innerWidth,
             window.innerHeight

@@ -31,9 +31,11 @@ export class Cube extends Entity {
 
         this.makeInteractable();
 
+        this.enableOutline();
+
     }
 
-    hover(mesh) {
+    onHover(mesh) {
 
         mesh.material.emissive.set(0x444444);
 
@@ -42,7 +44,7 @@ export class Cube extends Entity {
 
     }
 
-    unhover(mesh) {
+    onUnhover(mesh) {
 
         mesh.material.emissive.set(0x000000);
 
@@ -51,7 +53,7 @@ export class Cube extends Entity {
 
     }
 
-    interact(mesh) {
+    onInteract(mesh) {
 
         this.disableInteraction();
 

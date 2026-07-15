@@ -12,14 +12,37 @@ export class PostProcessing {
         this.scene = scene;
         this.camera = camera;
 
+        const renderTarget = new THREE.WebGLRenderTarget(
+
+            window.innerWidth,
+            window.innerHeight,
+
+            {
+                samples: 4
+            }
+
+        );
+
         this.composer =
-            new EffectComposer(renderer);
+            new EffectComposer(
+                renderer,
+                renderTarget
+            );
+
+        this.composer.setPixelRatio(window.devicePixelRatio);
+
+        this.composer.setSize(
+            window.innerWidth,
+            window.innerHeight
+        );
 
         this.renderPass =
             new RenderPass(scene, camera);
 
         this.outputPass =
             new OutputPass();
+
+        this.effects = [];
 
         this.composer.addPass(
             this.renderPass
@@ -31,11 +54,13 @@ export class PostProcessing {
 
     }
 
-    addPass(pass) {
+    addEffect(effect) {
+
+        this.effects.push(effect);
 
         this.composer.insertPass(
 
-            pass,
+            effect.getPass(),
 
             this.composer.passes.length - 1
 
@@ -51,10 +76,15 @@ export class PostProcessing {
 
     resize(width, height) {
 
-        this.composer.setSize(
-            width,
-            height
-        );
+        this.composer.setPixelRatio(window.devicePixelRatio);
+
+        this.composer.setSize(width, height);
+
+        for (const effect of this.effects) {
+
+            effect.resize(width, height);
+
+        }
 
     }
 

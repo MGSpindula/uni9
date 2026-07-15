@@ -30,6 +30,10 @@ export class Entity {
 
         this.interactableObjects = [];
 
+        this.effects = [];
+
+        this.outline = false;
+
     }
 
     makeInteractable(object = this.object3D) {
@@ -51,6 +55,41 @@ export class Entity {
             registry.register(this, object);
 
         }
+
+    }
+
+    // -----------------------------
+    // Effects
+    // -----------------------------
+
+    addEffect(effect) {
+
+        this.effects.push(effect);
+
+    }
+
+    removeEffect(effect) {
+
+        this.effects =
+            this.effects.filter(e => e !== effect);
+
+    }
+
+    enableOutline() {
+
+        this.outline = true;
+
+    }
+
+    disableOutline() {
+
+        this.outline = false;
+
+    }
+
+    hasOutline() {
+
+        return this.outline;
 
     }
 
@@ -173,16 +212,46 @@ export class Entity {
 
     hover(object) {
 
+        for (const effect of this.effects) {
+
+            effect.hover(this, object);
+
+        }
+
+        this.onHover(object);
+
+    }
+
+
+    onHover(object) {
+
     }
 
     unhover(object) {
+
+        for (const effect of this.effects) {
+
+            effect.unhover(this, object);
+
+        }
+
+        this.onUnhover(object);
+
+    }
+
+    onUnhover(object) {
 
     }
 
     interact(object) {
 
+        this.onInteract(object);
+
     }
 
+    onInteract(object) {
+
+    }
 
     tween(options) {
 

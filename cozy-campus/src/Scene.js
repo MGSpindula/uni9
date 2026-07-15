@@ -3,7 +3,9 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 import { Input } from "./core/Input";
-import { PostProcessing } from "./PostProcessing";
+import { PostProcessing } from "./postprocessing/PostProcessing";
+import { OutlineEffect } from "./postprocessing/OutlineEffect";
+
 import { EntityRegistry } from "./core/EntityRegistry";
 import { SelectionManager } from "./core/SelectionManager";
 
@@ -68,6 +70,22 @@ export class Scene {
                 this.camera
 
             );
+
+        this.outlineEffect =
+            new OutlineEffect(
+
+                this.scene,
+                this.camera
+
+            );
+
+        this.postProcessing.addEffect(
+            this.outlineEffect
+        );
+
+        this.selection.addEffect(
+            this.outlineEffect
+        );
 
         window.addEventListener(
             "resize",

@@ -14,9 +14,6 @@ export class Input {
 
         this.selection = selection;
 
-        this.hoveredEntity = null;
-        this.hoveredObject = null;
-
         window.addEventListener(
             "mousemove",
             (event) => this.hover(event)
@@ -39,57 +36,33 @@ export class Input {
 
         );
 
-        if (!hit || !hit.entity.canInteract()) {
+        if (
 
-            if (this.hoveredEntity) {
+            !hit ||
 
-                this.hoveredEntity.unhover(
-                    this.hoveredObject
-                );
+            !hit.entity.canInteract()
 
-                this.selection.hover(
-                    this.hoveredObject
-                );
+        ) {
 
-                this.hoveredEntity = null;
-                this.hoveredObject = null;
+            this.selection.clear();
 
-            }
-
-            this.selection.hover(null);
-
-            document.body.style.cursor = "default";
+            document.body.style.cursor =
+                "default";
 
             return;
 
         }
 
-        if (
+        this.selection.setHovered(
 
-            hit.entity !== this.hoveredEntity ||
+            hit.entity,
 
-            hit.object !== this.hoveredObject
+            hit.object
 
-        ) {
+        );
 
-            if (this.hoveredEntity) {
-
-                this.hoveredEntity.unhover(
-                    this.hoveredObject
-                );
-
-            }
-
-            this.hoveredEntity = hit.entity;
-            this.hoveredObject = hit.object;
-
-            this.hoveredEntity.hover(
-                this.hoveredObject
-            );
-
-        }
-
-        document.body.style.cursor = "pointer";
+        document.body.style.cursor =
+            "pointer";
 
     }
 

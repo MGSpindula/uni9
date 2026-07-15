@@ -2,25 +2,86 @@ export class SelectionManager {
 
     constructor() {
 
-        this.outlinePass = null;
+        this.effects = [];
+
+        this.entity = null;
+        this.object = null;
 
     }
 
-    setOutlinePass(outlinePass) {
+    addEffect(effect) {
 
-        this.outlinePass = outlinePass;
+        this.effects.push(effect);
 
     }
 
-    hover(object) {
+    setHovered(entity, object) {
 
-        if (!this.outlinePass) {
+        if (
+
+            entity === this.entity &&
+
+            object === this.object
+
+        ) {
 
             return;
 
         }
 
-        this.outlinePass.selectedObjects = object ? [object] : [];
+        this.clear();
+
+        this.entity = entity;
+        this.object = object;
+
+        entity.hover(object);
+
+        for (const effect of this.effects) {
+
+            effect.hover(entity, object);
+
+        }
+
+    }
+
+    clear() {
+
+        if (!this.entity) {
+
+            return;
+
+        }
+
+        this.entity.unhover(
+            this.object
+        );
+
+        for (const effect of this.effects) {
+
+            effect.unhover(
+
+                this.entity,
+
+                this.object
+
+            );
+
+        }
+
+        this.entity = null;
+        this.object = null;
+
+    }
+
+    getEntity() {
+
+        return this.entity;
+
+    }
+
+    getObject() {
+
+        return this.object;
 
     }
 
