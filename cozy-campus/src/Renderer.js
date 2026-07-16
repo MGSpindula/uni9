@@ -1,10 +1,10 @@
-// Renderer.js
-
 import * as THREE from "three";
 
-
 export class Renderer {
+
     constructor() {
+
+        // Low-level WebGL renderer. Scene owns the higher-level render pipeline.
         this.renderer = new THREE.WebGLRenderer({
             antialias: true
         });
@@ -24,6 +24,10 @@ export class Renderer {
             () => this.resize()
         );
     }
+
+    // -----------------------------
+    // Render lifecycle
+    // -----------------------------
 
     resize() {
 

@@ -2,7 +2,10 @@ export class EntityRegistry {
 
     constructor() {
 
+        // Object3D -> Entity lookup used after a raycast.
         this.map = new WeakMap();
+
+        // Entity -> Object3D collection used to unregister an entity at once.
         this.objectsByEntity = new Map();
 
     }
@@ -20,6 +23,10 @@ export class EntityRegistry {
         this.objectsByEntity.get(entity).add(object);
 
     }
+
+    // -----------------------------
+    // Registration
+    // -----------------------------
 
     unregister(entity, object = null) {
 
@@ -44,6 +51,10 @@ export class EntityRegistry {
         }
 
     }
+
+    // -----------------------------
+    // Lookup
+    // -----------------------------
 
     get(object) {
 

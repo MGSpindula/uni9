@@ -8,8 +8,13 @@ export class Entity {
 
         this.name = name;
 
-        // Root Three.js object representing this entity.
+        // Root transform representing the entity in the world.
+        // Navigation, physics, collisions and multiplayer state should use this node.
         this.object3D = null;
+
+        // Optional visual child of object3D. Procedural/model animations should target
+        // this node so they do not compete with gameplay movement on object3D.
+        this.visual = null;
 
         // Whether this entity updates every frame.
         // Set to false to "pause" the entity without removing it.
@@ -30,11 +35,21 @@ export class Entity {
 
         this.interactableObjects = [];
 
+        // Optional local approach points used before an interaction executes.
+        this.interactionPoints = [];
+        // Actors currently engaged with this entity. The meaning is defined by
+        // the subclass: sitting, standing on, leaning on, holding, operating, etc.
+        this.interactingActors = new Set();
+
         this.effects = [];
 
         this.outline = false;
 
     }
+
+    // -----------------------------
+    // Registry
+    // -----------------------------
 
     makeInteractable(object = this.object3D) {
 
@@ -158,6 +173,15 @@ export class Entity {
     // Interaction
     // -----------------------------
 
+    addInteractionPoint(point) {
+
+        point.attach(this);
+        this.interactionPoints.push(point);
+
+        return point;
+
+    }
+
     enableInteraction() {
 
         this.interactable = true;
@@ -249,15 +273,85 @@ export class Entity {
 
     }
 
-    interact(object) {
+    pointerInteract(object, hit = null) {
 
-        this.onInteract(object);
+        // Entry point used exclusively by mouse/pointer selection.
+        return this.onPointerInteract(object, hit);
+
+    }
+
+    onPointerInteract(object, hit) {
 
     }
 
-    onInteract(object) {
+    performInteraction() {
+
+        // Internal 3D/entity behavior. Subclasses decide when and how to run it;
+        // navigation arrival must not implicitly simulate another mouse event.
 
     }
+
+    beginInteraction(actor, point = null) {
+
+        if (actor) this.interactingActors.add(actor);
+
+        this.performInteraction(actor, point);
+
+    }
+
+    prepareInteraction(
+        actor,
+        approachPoint,
+        targetPoint,
+        onComplete = null
+    ) {
+
+        // Transition executed at the approach point before the actor moves to
+        // the final point. A subclass may tween now and later wait for a bone
+        // animation such as sitting, reaching, picking up or leaning.
+        this.onPrepareInteraction(
+            actor,
+            approachPoint,
+            targetPoint,
+            onComplete
+        );
+
+    }
+
+    onPrepareInteraction(actor, approachPoint, targetPoint, onComplete) {
+
+        onComplete?.();
+
+    }
+
+    endInteraction(actor, point = null) {
+
+        // Counterpart of performInteraction() for persistent uses such as
+        // sitting, holding or operating an object.
+        this.interactingActors.delete(actor);
+        this.onInteractionEnded(actor, point);
+
+    }
+
+    onInteractionEnded(actor, point) {
+
+    }
+
+    isInteractingWith(actor) {
+
+        return this.interactingActors.has(actor);
+
+    }
+
+    hasInteractingActors() {
+
+        return this.interactingActors.size > 0;
+
+    }
+
+    // -----------------------------
+    // Animation
+    // -----------------------------
 
     tween(options) {
 
@@ -276,6 +370,17 @@ export class Entity {
         this.tweens.push(tween);
 
         return tween;
+
+    }
+
+    cancelTweens(object, properties = null) {
+
+        const propertySet = properties ? new Set(properties) : null;
+
+        this.tweens = this.tweens.filter(tween =>
+            tween.object !== object ||
+            (propertySet && !propertySet.has(tween.property))
+        );
 
     }
 
@@ -351,6 +456,10 @@ export class Entity {
         }
 
     }
+
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
 
     update(delta) {
 

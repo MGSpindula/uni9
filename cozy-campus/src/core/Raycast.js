@@ -4,6 +4,7 @@ export class Raycast {
 
     constructor(camera, scene, element = null) {
 
+        // Camera and scene used to cast rays into the Three.js world.
         this.camera = camera;
         this.scene = scene;
         this.element = element;
@@ -12,6 +13,10 @@ export class Raycast {
         this.mouse = new THREE.Vector2();
 
     }
+
+    // -----------------------------
+    // Pointer coordinates
+    // -----------------------------
 
     updateMouse(event) {
 
@@ -63,7 +68,8 @@ export class Raycast {
         return {
 
             entity,
-            object
+            object,
+            point: hits[0].point
 
         };
 

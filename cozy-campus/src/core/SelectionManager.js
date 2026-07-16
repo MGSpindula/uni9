@@ -4,16 +4,26 @@ export class SelectionManager {
 
     constructor(camera, scene, registry, element) {
 
+        // Raycast and registry resolve a Three.js object back to its Entity.
         this.raycast = new Raycast(camera, scene, element);
         this.registry = registry;
+
+        // Effects that react to the currently hovered object.
         this.effects = [];
 
+        // Hover is transient: it follows the pointer.
         this.entity = null;
         this.object = null;
+
+        // Selection is persistent and independent from hover.
         this.selectedEntity = null;
         this.selectedObject = null;
 
     }
+
+    // -----------------------------
+    // Effects
+    // -----------------------------
 
     addEffect(effect) {
 
@@ -26,6 +36,10 @@ export class SelectionManager {
         this.effects = this.effects.filter(item => item !== effect);
 
     }
+
+    // -----------------------------
+    // Input events
+    // -----------------------------
 
     handleMouseMove(event) {
 
@@ -53,10 +67,15 @@ export class SelectionManager {
 
         }
 
-        hit.entity.interact(hit.object);
-        return true;
+        // Selection resolves the hit only. PlayerController decides how mouse
+        // input becomes a gameplay or InteractionSystem command.
+        return hit;
 
     }
+
+    // -----------------------------
+    // Hover
+    // -----------------------------
 
     setHovered(entity, object) {
 
@@ -120,6 +139,10 @@ export class SelectionManager {
         return this.object;
 
     }
+
+    // -----------------------------
+    // Selection
+    // -----------------------------
 
     select(entity = this.entity, object = this.object) {
 

@@ -12,6 +12,7 @@ export class PostProcessing {
         this.scene = scene;
         this.camera = camera;
 
+        // Composer owns the render pipeline and its intermediate target.
         const renderTarget = new THREE.WebGLRenderTarget(
 
             window.innerWidth,
@@ -36,6 +37,7 @@ export class PostProcessing {
             window.innerHeight
         );
 
+        // Scene is rendered first; custom effects stay before the output pass.
         this.renderPass =
             new RenderPass(scene, camera);
 
@@ -70,6 +72,10 @@ export class PostProcessing {
 
     }
 
+    // -----------------------------
+    // Effects
+    // -----------------------------
+
     removeEffect(effect) {
 
         if (!this.effects.includes(effect)) return;
@@ -79,6 +85,10 @@ export class PostProcessing {
         effect.dispose();
 
     }
+
+    // -----------------------------
+    // Render lifecycle
+    // -----------------------------
 
     render(delta) {
 

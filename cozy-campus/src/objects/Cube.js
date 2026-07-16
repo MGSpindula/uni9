@@ -1,7 +1,7 @@
 import * as THREE from "three";
+import { AnimationPresets } from "../core/AnimationPresets";
 import { Entity } from "../core/Entity";
 import { EntityState } from "../core/EntityState";
-import { Tween } from "../core/Tween";
 
 export class Cube extends Entity {
 
@@ -35,6 +35,10 @@ export class Cube extends Entity {
 
     }
 
+    // -----------------------------
+    // Interaction hooks
+    // -----------------------------
+
     onHover(mesh) {
 
         mesh.material.emissive.set(0x444444);
@@ -53,7 +57,13 @@ export class Cube extends Entity {
 
     }
 
-    onInteract(mesh) {
+    onPointerInteract(mesh) {
+
+        this.performInteraction(mesh);
+
+    }
+
+    performInteraction(mesh) {
 
         this.disableInteraction();
 
@@ -85,23 +95,24 @@ export class Cube extends Entity {
 
     }
 
+    // -----------------------------
+    // Animation
+    // -----------------------------
+
     changeRotationSpeed(speed, duration = 0.5) {
 
-        this.tween({
-
+        AnimationPresets.to(this, {
             object: this,
             property: "rotationSpeed",
-
-            from: this.rotationSpeed,
             to: speed,
-
-            duration: duration,
-
-            easing: Tween.easeOutQuad
-
+            duration
         });
 
     }
+
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
 
 
     update(delta) {

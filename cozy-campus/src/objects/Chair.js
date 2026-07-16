@@ -1,7 +1,9 @@
 import * as THREE from "three";
+import { AnimationPresets } from "../core/AnimationPresets";
 import { Entity } from "../core/Entity";
 import { EntityState } from "../core/EntityState";
 import { Tween } from "../core/Tween";
+import { InteractionPoint } from "../navigation/InteractionPoint";
 
 export class Chair extends Entity {
 
@@ -10,131 +12,78 @@ export class Chair extends Entity {
         super("Chair");
 
         this.cooldown = 0;
+        this.seatHeight = 1;
+        this.seatTransitionDuration = 0.50;
 
-        this.setState(EntityState.IDLE);
-
+        // This static prop does not need a separate visual child yet: its root is also
+        // its visual hierarchy. Add one before using cosmetic animations while it moves.
         this.object3D = new THREE.Group();
-
         this.legsGroup = new THREE.Group();
 
-        this.object3D.add(
-            this.legsGroup
-        );
+        this.object3D.add(this.legsGroup);
+        this.object3D.position.set(5, 0, -1);
+        this.object3D.rotateOnAxis(new THREE.Vector3(0, 1, 0), -Math.PI / 4);
 
         this.createSeat();
         this.createBack();
         this.createLegs();
+        this.createInteractionPoints();
 
-
-        this.object3D.position.set(0, 0, 2);
+        this.enableOutline();
 
     }
 
+    // -----------------------------
+    // Construction
+    // -----------------------------
 
     createSeat() {
 
         this.seat = new THREE.Mesh(
-
-            new THREE.BoxGeometry(
-                1.5,
-                0.2,
-                1.5
-            ),
-
-            new THREE.MeshStandardMaterial({
-                color: 0x8b4513
-            })
-
+            new THREE.BoxGeometry(1.5, 0.2, 1.5),
+            new THREE.MeshStandardMaterial({ color: 0x8b4513 })
         );
 
         this.seat.name = "Seat";
-
         this.seat.position.y = 1;
-
         this.seat.castShadow = true;
 
         this.object3D.add(this.seat);
-
         this.makeInteractable(this.seat);
 
     }
 
-
     createBack() {
 
         this.back = new THREE.Mesh(
-
-            new THREE.BoxGeometry(
-                1.5,
-                1.8,
-                0.2
-            ),
-
-            new THREE.MeshStandardMaterial({
-                color: 0x8b4513
-            })
-
+            new THREE.BoxGeometry(1.5, 1.8, 0.2),
+            new THREE.MeshStandardMaterial({ color: 0x8b4513 })
         );
 
-        this.back.position.set(
-            0,
-            1.8,
-            -0.65
-        );
-
+        this.back.position.set(0, 1.8, -0.65);
         this.back.castShadow = true;
 
         this.object3D.add(this.back);
 
     }
 
-
     createLegs() {
 
-        const geometry =
-            new THREE.BoxGeometry(
-                0.15,
-                1,
-                0.15
-            );
-
-
-        const material =
-            new THREE.MeshStandardMaterial({
-                color: 0x4b2500
-            });
-
-
-        const positions = [
-            [-0.6, 0.5, -0.6],
-            [0.6, 0.5, -0.6],
-            [-0.6, 0.5, 0.6],
-            [0.6, 0.5, 0.6]
+        const geometry = new THREE.BoxGeometry(0.15, 1, 0.15);
+        const material = new THREE.MeshStandardMaterial({ color: 0x4b2500 });
+        const legs = [
+            ["FrontLeftLeg", -0.6, 0.5, -0.6],
+            ["FrontRightLeg", 0.6, 0.5, -0.6],
+            ["BackLeftLeg", -0.6, 0.5, 0.6],
+            ["BackRightLeg", 0.6, 0.5, 0.6]
         ];
 
-        const legNames = [
-            "FrontLeftLeg",
-            "FrontRightLeg",
-            "BackLeftLeg",
-            "BackRightLeg"
-        ];
+        for (const [name, x, y, z] of legs) {
 
-        this.legs = [];
+            const leg = new THREE.Mesh(geometry, material);
 
-
-        for (let i = 0; i < positions.length; i++) {
-
-            const leg = new THREE.Mesh(
-                geometry,
-                material
-            );
-
-            leg.name = legNames[i];
-
-            leg.position.set(
-                ...positions[i]
-            );
-
+            leg.name = name;
+            leg.position.set(x, y, z);
             leg.castShadow = true;
 
             this.legsGroup.add(leg);
@@ -143,72 +92,181 @@ export class Chair extends Entity {
 
     }
 
-    hover(mesh) {
+    createInteractionPoints() {
 
-        mesh.material.emissive.set(0x444444);
-        this.tweenScale(
+        // Local position in front of the chair. Blender empties will eventually
+        // provide this transform without changing the navigation code.
+        //
+        // Manual navigation options:
+        // accessible: false                         -> exclude this point.
+        // connectTo: "west-1"                      -> force a node connection.
+        // connectTo: ["west-1", "west-exit"]      -> force projection on an edge.
+        this.approachPoint = this.addInteractionPoint(
+            new InteractionPoint("chair-01:approach", {
+                position: new THREE.Vector3(0, 0, 1.5),
+                rotationY: Math.PI,
+                maxConnectionDistance: 2.5,
+                metadata: { action: "sit" }
+            })
+        );
 
-            this.object3D.scale,
-
-            undefined,
-
-            new THREE.Vector3(1.2, 1.2, 1.2),
-
-            0.5,
-
-            Tween.easeOutBack
+        // This second empty represents being at/in the chair. It is reached
+        // through approachPoint, but occupies a different navigation resource.
+        this.seatPoint = this.addInteractionPoint(
+            new InteractionPoint("chair-01:seat", {
+                position: new THREE.Vector3(0, 0, 0),
+                rotationY: 0,
+                via: this.approachPoint,
+                metadata: { action: "sit" }
+            })
         );
 
     }
 
-    unhover(mesh) {
+    // -----------------------------
+    // Interaction hooks
+    // -----------------------------
+
+    onHover(mesh) {
+
+        mesh.material.emissive.set(0x444444);
+
+        AnimationPresets.scaleTo(this, {
+            target: this.object3D,
+            to: new THREE.Vector3(1.2, 1.2, 1.2),
+            duration: 0.5,
+            easing: Tween.easeOutBack
+        });
+
+    }
+
+    onUnhover(mesh) {
 
         mesh.material.emissive.set(0x000000);
 
         if (!this.isState(EntityState.COOLDOWN)) {
 
-            this.tweenScale(
-
-                this.object3D.scale,
-
-                undefined,
-
-                new THREE.Vector3(1, 1, 1),
-
-                0.5,
-
-                Tween.easeOutBack
-            );
+            AnimationPresets.scaleTo(this, {
+                target: this.object3D,
+                to: new THREE.Vector3(1, 1, 1),
+                duration: 0.5,
+                easing: Tween.easeOutBack
+            });
 
         }
 
     }
 
-    interact(mesh) {
+    onPointerInteract() {
 
-        if (!this.isState(EntityState.IDLE)) {
+        if (!this.isState(EntityState.IDLE)) return;
 
+        // Immediate mouse feedback belongs here: bounce, glow, sound, UI, etc.
+        // It confirms the click but does not mean that the Player has reached
+        // or started using the chair yet.
+
+        return this.createUseRequest();
+
+    }
+
+    createUseRequest() {
+
+        // PlayerController submits this after a click. NPC behavior can submit
+        // the exact same object through InteractionSystem without using mouse.
+        // interactionSystem.request({
+        //     actor: npc,
+        //     target: chair,
+        //     ...chair.createUseRequest()
+        // });
+        return {
+            point: this.seatPoint,
+            action: ({ actor, point }) =>
+                this.beginInteraction(actor, point)
+        };
+
+    }
+
+    performInteraction(actor = null) {
+
+        console.log(
+            `[Entity Interaction] ${actor?.name ?? "An actor"} uses Chair.`
+        );
+
+        this.disableInteraction();
+        this.setState(EntityState.DISABLED);
+
+        // This method runs after arrival, when the entity is actually using the
+        // chair. The same distinction applies to picking up, opening or holding
+        // other objects. It can:
+        // - change EntityState;
+        // - play visual or skeletal animations;
+        // - enable/disable interaction or collision;
+        // - change materials, lights, sounds or other entity properties;
+        // - notify other gameplay systems that the chair action occurred.
+        // It does not represent a mouse event and may also be called by scripts,
+        // NPC behavior, quests or other internal game systems. External usage:
+        // Player and NPCs arrive through the same callback, so both receive
+        // this height change. A future sitting animation replaces these direct
+        // y assignments here, not in PlayerController or NPC behavior.
+
+    }
+
+    onPrepareInteraction(actor, approachPoint, targetPoint, onComplete) {
+
+        if (!actor) {
+
+            onComplete?.();
             return;
 
         }
 
-        this.disableInteraction();
-
-        this.setState(EntityState.COOLDOWN);
-
-        this.cooldown = 5;
-
-        this.animateColors();
-        this.animateLeg();
-        this.animateJump();
-        this.animateScale();
+        // This starts at approachPoint and finishes before navigation advances
+        // to seatPoint. Replace this tween with a bone animation later, keeping
+        // onComplete as the signal that the final positional step may begin.
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "y",
+            to: this.seatHeight,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeOutCubic,
+            onComplete
+        });
 
     }
+
+    onInteractionEnded(actor) {
+
+        if (actor) {
+
+            // AnimationPresets replaces any existing tween on this same y
+            // property, so leaving halfway through sitting reverses smoothly.
+            AnimationPresets.to(actor, {
+                object: actor.object3D.position,
+                property: "y",
+                to: 0,
+                duration: this.seatTransitionDuration,
+                easing: Tween.easeInOutQuad
+            });
+
+        }
+
+        if (!this.hasInteractingActors()) {
+
+            this.enableInteraction();
+            this.setState(EntityState.IDLE);
+
+        }
+
+    }
+
+    // -----------------------------
+    // Animations
+    // -----------------------------
 
     animateColors() {
 
         const red = new THREE.Color(0xff0000);
-        const duration = 2
+        const duration = 2;
 
         this.tweenColor(this.seat.material.color, undefined, red, duration);
         this.tweenColor(this.back.material.color, undefined, red, duration);
@@ -225,127 +283,67 @@ export class Chair extends Entity {
 
         const leg = this.object3D.getObjectByName("FrontLeftLeg");
 
-        this.tween({
-
+        AnimationPresets.to(this, {
             object: leg.rotation,
             property: "z",
-
-            from: leg.rotation.z,
             to: 0.5,
-
-            duration: 0.5,
-
-            easing: Tween.easeOutQuad
-
+            duration: 0.5
         });
 
     }
 
     animateJump() {
 
-        this.tween({
-
-            object: this.object3D.position,
-            property: "y",
-
-            from: this.object3D.position.y,
-            to: 3,
-
-            duration: 1,
-
-            easing: Tween.easeOutCubic,
-
-            onComplete: () => {
-
-                this.tween({
-
-                    object: this.object3D.position,
-                    property: "y",
-
-                    from: this.object3D.position.y,
-                    to: 0,
-
-                    duration: 1,
-
-                    easing: Tween.easeInCubic
-
-                });
-
-            }
-
+        AnimationPresets.jump(this, {
+            target: this.object3D,
+            height: 3,
+            upDuration: 1,
+            downDuration: 1
         });
 
     }
 
-    animateScale() {
+    animateBounce() {
 
-        this.tweenScale(
-
-            this.object3D.scale,
-
-            undefined,
-
-            new THREE.Vector3(1.2, 1.2, 1.2),
-
-            0.5,
-
-            Tween.easeOutBack,
-
-            () => {
-
-                this.tweenScale(
-
-                    this.object3D.scale,
-
-                    undefined,
-
-                    new THREE.Vector3(1, 1, 1),
-
-                    0.5,
-
-                    Tween.easeInOutQuad
-
-                );
-
-            }
-
-        );
+        AnimationPresets.scaleBounce(this, {
+            target: this.object3D,
+            multiplier: 1.2,
+            outDuration: 0.5,
+            returnDuration: 0.5
+        });
 
     }
+
+    // -----------------------------
+    // State hooks
+    // -----------------------------
 
     onStateChanged(previous, current) {
 
         console.log(previous, "->", current);
 
-        switch (current) {
-
-            case EntityState.IDLE:
-
-                break;
-
-            case EntityState.COOLDOWN:
-
-                break;
-
-        }
-
     }
+
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
 
     update(delta) {
 
         super.update(delta);
 
-        if (this.isState(EntityState.COOLDOWN)) {
+        // Optional cooldown pattern kept as a reference. To use it, set the
+        // entity to COOLDOWN and assign this.cooldown when an action starts.
+        // The current chair uses DISABLED while an actor occupies seatPoint,
+        // so this block remains inactive during normal sitting.
+        if (!this.isState(EntityState.COOLDOWN)) return;
 
-            this.cooldown -= delta;
+        this.cooldown -= delta;
 
-            if (this.cooldown <= 0) {
+        if (this.cooldown <= 0) {
 
-                this.enableInteraction();
-
-                this.setState(EntityState.IDLE);
-
-            }
+            this.enableInteraction();
+            this.setState(EntityState.IDLE);
 
         }
 

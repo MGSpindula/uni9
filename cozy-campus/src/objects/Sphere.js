@@ -27,6 +27,10 @@ export class Sphere extends Entity {
 
     }
 
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
+
     update() {
 
     }

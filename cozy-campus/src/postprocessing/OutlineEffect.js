@@ -25,12 +25,13 @@ export class OutlineEffect extends Effect {
 
         );
 
+        // Default outline appearance. Subclasses/callers can override pass values.
         this.pass.edgeStrength = 3;
         this.pass.edgeThickness = 1;
         this.pass.edgeGlow = 0;
         this.pass.pulsePeriod = 0;
         this.pass.visibleEdgeColor.set(0xffffff);
-        this.pass.hiddenEdgeColor.set(0x190a05);
+        this.pass.hiddenEdgeColor.set(0xffffff);
 
     }
 
@@ -39,6 +40,10 @@ export class OutlineEffect extends Effect {
         this.pass.selectedObjects = objects;
 
     }
+
+    // -----------------------------
+    // Configuration
+    // -----------------------------
 
     setColor(visible, hidden = visible) {
 
@@ -82,6 +87,10 @@ export class OutlineEffect extends Effect {
         this.pass.selectedObjects = [];
 
     }
+
+    // -----------------------------
+    // Hover effect
+    // -----------------------------
 
     disable() {
 

@@ -2,10 +2,15 @@ export class Effect {
 
     constructor() {
 
+        // Three.js post-processing pass owned by this effect.
         this.pass = null;
         this.enabled = true;
 
     }
+
+    // -----------------------------
+    // Lifecycle hooks
+    // -----------------------------
 
     initialize() {
 
@@ -24,6 +29,10 @@ export class Effect {
     resize(width, height) {
 
     }
+
+    // -----------------------------
+    // State
+    // -----------------------------
 
     enable() {
 

@@ -30,6 +30,10 @@ export class Tween {
 
     }
 
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
+
     update(delta) {
 
         if (this.finished) {
@@ -73,7 +77,9 @@ export class Tween {
     }
 
 
-    // Quadratic
+    // -----------------------------
+    // Easing functions: Quadratic
+    // -----------------------------
 
     static easeInQuad(t) {
 
@@ -96,7 +102,9 @@ export class Tween {
     }
 
 
-    // Cubic
+    // -----------------------------
+    // Easing functions: Cubic
+    // -----------------------------
 
     static easeInCubic(t) {
 
@@ -119,7 +127,9 @@ export class Tween {
     }
 
 
-    // Quartic
+    // -----------------------------
+    // Easing functions: Quartic
+    // -----------------------------
 
     static easeInQuart(t) {
 
@@ -142,7 +152,9 @@ export class Tween {
     }
 
 
-    // Quintic
+    // -----------------------------
+    // Easing functions: Quintic
+    // -----------------------------
 
     static easeInQuint(t) {
 
@@ -165,7 +177,9 @@ export class Tween {
     }
 
 
-    // Sine
+    // -----------------------------
+    // Easing functions: Sine
+    // -----------------------------
 
     static easeInSine(t) {
 
@@ -186,7 +200,9 @@ export class Tween {
     }
 
 
-    // Exponential
+    // -----------------------------
+    // Easing functions: Exponential
+    // -----------------------------
 
     static easeInExpo(t) {
 
@@ -216,7 +232,9 @@ export class Tween {
     }
 
 
-    // Circular
+    // -----------------------------
+    // Easing functions: Circular
+    // -----------------------------
 
     static easeInCirc(t) {
 
@@ -239,7 +257,9 @@ export class Tween {
     }
 
 
-    // Back (overshoots)
+    // -----------------------------
+    // Easing functions: Back (overshoots)
+    // -----------------------------
 
     static easeInBack(t) {
 

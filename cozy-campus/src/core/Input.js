@@ -2,7 +2,10 @@ export class Input {
 
     constructor(element = window) {
 
+        // Element that receives the browser input events (usually the canvas).
         this.element = element;
+
+        // Event name -> registered listeners.
         this.listeners = new Map();
 
         this.handlers = {
@@ -18,6 +21,10 @@ export class Input {
         element.addEventListener("click", this.handlers.Click);
 
     }
+
+    // -----------------------------
+    // Event subscriptions
+    // -----------------------------
 
     on(eventName, listener) {
 
@@ -48,6 +55,10 @@ export class Input {
         }
 
     }
+
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
 
     dispose() {
 

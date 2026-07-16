@@ -12,3 +12,120 @@ canvas {
     display: block;
 
 }
+
+.navigation-debug {
+
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    z-index: 1000;
+
+    width: min(420px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+
+    overflow: auto;
+
+    color: #f4f7ff;
+    background: rgba(16, 22, 32, 0.94);
+
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+
+    font: 13px/1.3 system-ui, sans-serif;
+
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+
+}
+
+.navigation-debug header {
+
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+
+    padding: 10px 12px;
+
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+
+}
+
+.navigation-debug-content {
+
+    padding: 8px;
+
+}
+
+.navigation-debug.collapsed .navigation-debug-content {
+
+    display: none;
+
+}
+
+.navigation-debug h3 {
+
+    margin: 8px 4px 6px;
+
+    color: #9fb5d9;
+
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+
+}
+
+.navigation-debug-row {
+
+    display: grid;
+    grid-template-columns: minmax(100px, 1fr) auto auto auto;
+    gap: 6px;
+    align-items: center;
+
+    padding: 5px 4px;
+
+}
+
+.navigation-debug-name {
+
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+
+}
+
+.navigation-debug button {
+
+    padding: 4px 7px;
+
+    color: #eef3ff;
+    background: #28364d;
+
+    border: 1px solid #405574;
+    border-radius: 5px;
+
+    cursor: pointer;
+
+}
+
+.navigation-debug button:hover {
+
+    background: #354968;
+
+}
+
+.navigation-debug-status {
+
+    min-width: 56px;
+    padding: 2px 5px;
+
+    border-radius: 4px;
+
+    text-align: center;
+
+}
+
+.navigation-debug-status.free { background: #284a79; }
+.navigation-debug-status.blocked { background: #9b2633; }
+.navigation-debug-status.occupied { background: #9a530b; }
+.navigation-debug-status.reserved { background: #177b91; }
+.navigation-debug-status.inaccessible { background: #555b66; }
+.navigation-debug-status.passable { background: #4f6b2b; }

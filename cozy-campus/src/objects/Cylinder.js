@@ -28,6 +28,10 @@ export class Cylinder extends Entity {
 
     }
 
+    // -----------------------------
+    // Lifecycle
+    // -----------------------------
+
 
     update() {
 
