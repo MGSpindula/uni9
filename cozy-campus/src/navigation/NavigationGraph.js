@@ -6,6 +6,7 @@ export class NavigationGraph {
         this.selectionRadius = selectionRadius;
         this.invalidNodeIds = new Set();
         this.validationErrors = [];
+        this.activeConnections = new Set();
 
     }
 
@@ -558,6 +559,7 @@ export class NavigationGraph {
         lane.occupants.add(agent);
         connection.reservations.delete(agent);
         connection.occupants.add(agent);
+        this.activeConnections.add(connection);
 
         return true;
 
@@ -677,6 +679,12 @@ export class NavigationGraph {
 
         this.releaseResource(connection, agent);
 
+        if (connection.occupants.size === 0) {
+
+            this.activeConnections.delete(connection);
+
+        }
+
     }
 
     releaseResource(resource, agent) {
@@ -728,6 +736,12 @@ export class NavigationGraph {
                 }
 
                 this.releaseResource(connection, agent);
+
+                if (connection.occupants.size === 0) {
+
+                    this.activeConnections.delete(connection);
+
+                }
 
             }
 

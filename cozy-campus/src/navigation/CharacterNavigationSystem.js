@@ -2,6 +2,8 @@ import { EntityState } from "../core/EntityState";
 import { AnimationPresets } from "../core/AnimationPresets";
 import { Tween } from "../core/Tween";
 import { NavigationNodeMode } from "./NavigationNodeMode";
+import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
+import { InteractionNavigation } from "./InteractionNavigation";
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
@@ -13,7 +15,8 @@ export class CharacterNavigationSystem {
         this.helper = helper;
         this.onChanged = onChanged;
         this.contexts = new Map();
-        this.activeEncounters = [];
+        this.traffic = new NavigationTrafficSystem(this);
+        this.interactions = new InteractionNavigation(this);
 
     }
 
@@ -88,16 +91,13 @@ export class CharacterNavigationSystem {
     unregisterActor(actor) {
 
         const context = this.contexts.get(actor);
-
         if (!context) return;
 
         this.graph.releaseAgent(actor);
         this.releaseClearanceRequests(actor);
         this.finishActiveInteraction(context);
         this.connector.releaseAgent(actor);
-        this.activeEncounters = this.activeEncounters.filter(encounter =>
-            encounter.first !== actor && encounter.second !== actor
-        );
+        this.traffic.unregister(actor);
         this.contexts.delete(actor);
         this.refresh();
 
@@ -128,7 +128,7 @@ export class CharacterNavigationSystem {
     }
 
     // -----------------------------
-    // Commands shared by Player and NPCs
+    // Commands
     // -----------------------------
 
     moveToClosestNode(actor, position) {
@@ -141,9 +141,7 @@ export class CharacterNavigationSystem {
 
         if (!candidate) {
 
-            console.log(
-                `[Navigation] No reachable node for ${actor.name}.`
-            );
+            console.log(`[Navigation] No reachable node for ${actor.name}.`);
             return false;
 
         }
@@ -156,7 +154,6 @@ export class CharacterNavigationSystem {
         context.blockedElapsed = null;
         context.recoveryPending = false;
         this.cancelPendingParking(context);
-
         this.prepareOrigin(context, candidate.originId);
 
         const waypoints = [
@@ -164,10 +161,7 @@ export class CharacterNavigationSystem {
                 context.interactionPoint,
                 candidate.originId
             ),
-            ...this.createTraversalWaypoints(
-                context,
-                candidate.plan.nodeIds
-            )
+            ...this.createTraversalWaypoints(context, candidate.plan.nodeIds)
         ];
         const traversal = actor.navigation.getTraversalState();
         const alreadyThere =
@@ -199,31 +193,26 @@ export class CharacterNavigationSystem {
 
         const context = this.requireContext(actor);
 
-        if (context.clearanceRequesters.size > 0) return false;
+        if (context.clearanceRequesters.size > 0 ||
+            !point.accessible ||
+            !this.connector.connect(point)) return false;
 
-        if (!point.accessible || !this.connector.connect(point)) return false;
-
-        const directRoute = this.createDirectConnectionRoute(actor, point);
+        const directRoute = this.interactions.createDirectConnectionRoute(actor, point);
 
         if (directRoute) {
 
             if (!this.connector.reserveRoutePoints(directRoute, actor)) {
-
                 return false;
-
             }
 
-            this.beginInteractionRoute(context, point, onArrive);
+            this.interactions.beginRoute(context, point, onArrive);
             this.helper?.highlightInteractionPoint(point.id);
             actor.followWaypoints(directRoute.waypoints);
-
             return true;
 
         }
 
         const routes = this.getOrigins(context)
-            // When interrupted in the middle of an edge, rejoin the graph at
-            // the nearest reachable endpoint before considering the approach.
             .sort((first, second) => first.accessCost - second.accessCost)
             .map(origin => ({
                 origin,
@@ -233,94 +222,24 @@ export class CharacterNavigationSystem {
 
         if (routes.length === 0) return false;
 
-        // Route cost must not select the farther endpoint merely because it is
-        // globally shorter. Finishing the current edge is a separate rule.
         const candidate = routes[0];
 
         if (!this.connector.reserveRoutePoints(candidate.route, actor)) {
-
             return false;
-
         }
 
         this.prepareOrigin(context, candidate.origin.id);
-
-        this.beginInteractionRoute(context, point, onArrive);
-
+        this.interactions.beginRoute(context, point, onArrive);
         this.helper?.highlightInteractionPoint(point.id);
         actor.followWaypoints([
             ...this.connector.createExitWaypoints(
                 context.interactionPoint,
                 candidate.origin.id
             ),
-            ...this.omitCurrentNodeWaypoint(
-                context,
-                candidate.route.waypoints
-            )
+            ...this.omitCurrentNodeWaypoint(context, candidate.route.waypoints)
         ]);
 
         return true;
-
-    }
-
-    beginInteractionRoute(context, point, onArrive) {
-
-        context.pendingPosition = null;
-        context.nodeMode = NavigationNodeMode.TRANSIT;
-        context.destinationId = null;
-        context.pendingInteraction = { point, onArrive };
-        context.retryElapsed = 0;
-        context.blockedElapsed = null;
-        context.recoveryPending = false;
-        this.cancelPendingParking(context);
-
-    }
-
-    createDirectConnectionRoute(actor, point) {
-
-        const traversal = actor.navigation.getTraversalState();
-
-        if (!traversal.currentConnection) return null;
-
-        const accessPoint = point.via ?? point;
-        const access = this.connector.connect(accessPoint);
-        const currentIds = [
-            traversal.currentConnection.fromId,
-            traversal.currentConnection.toId
-        ];
-        const usesCurrentConnection =
-            access?.nodeIds?.length === 2 &&
-            currentIds.every(id => access.nodeIds.includes(id));
-
-        if (!usesCurrentConnection) return null;
-
-        const waypoints = [];
-
-        // Keep this marker even when the actor already sits on the projection:
-        // reaching it releases the occupied graph connection topologically.
-        waypoints.push({
-            id: null,
-            position: access.projectedPosition.clone(),
-            leavingGraph: true
-        });
-
-        if (accessPoint !== point) {
-
-            waypoints.push({
-                id: null,
-                position: accessPoint.getWorldPosition(),
-                interactionPoint: accessPoint
-            });
-
-        }
-
-        waypoints.push({
-            id: null,
-            position: point.getWorldPosition(),
-            interactionPoint: point
-        });
-
-        return { waypoints };
 
     }
 
@@ -346,9 +265,7 @@ export class CharacterNavigationSystem {
 
         return candidates.reduce((best, current) =>
             current.accessCost + current.plan.cost <
-            best.accessCost + best.plan.cost
-                ? current
-                : best
+            best.accessCost + best.plan.cost ? current : best
         );
 
     }
@@ -381,9 +298,7 @@ export class CharacterNavigationSystem {
         const traversal = actor.navigation.getTraversalState();
 
         if (traversal.currentNodeId) {
-
             return [{ id: traversal.currentNodeId, accessCost: 0 }];
-
         }
 
         if (!traversal.currentConnection) return [];
@@ -411,9 +326,7 @@ export class CharacterNavigationSystem {
 
         if (!interactionPoint) {
 
-            const traversal = actor.navigation.getTraversalState();
-
-            if (!traversal.currentConnection) return;
+            if (!actor.navigation.getTraversalState().currentConnection) return;
 
             this.graph.releaseReservations(actor);
             this.graph.reserveNode(originId, actor);
@@ -428,138 +341,43 @@ export class CharacterNavigationSystem {
 
     }
 
+    createTraversalWaypoints(context, nodeIds) {
+
+        const traversal = context.actor.navigation.getTraversalState();
+        const startsAtCurrentNode =
+            !context.interactionPoint &&
+            traversal.currentNodeId === nodeIds[0];
+
+        return this.graph.createWaypoints(
+            startsAtCurrentNode ? nodeIds.slice(1) : nodeIds
+        );
+
+    }
+
+    omitCurrentNodeWaypoint(context, waypoints) {
+
+        const traversal = context.actor.navigation.getTraversalState();
+        const startsAtCurrentNode =
+            !context.interactionPoint &&
+            traversal.currentNodeId === waypoints[0]?.id;
+
+        return startsAtCurrentNode ? waypoints.slice(1) : waypoints;
+
+    }
+
     // -----------------------------
-    // Traversal and occupancy
+    // Traffic facade
     // -----------------------------
 
     tryStartConnection(actor, fromId, toId) {
 
-        const context = this.requireContext(actor);
-
-        const laneIndex = this.graph.reserveConnectionLane(
-            fromId,
-            toId,
-            actor
-        );
-
-        if (laneIndex === null) return false;
-
-        this.requestImmediateNodeClearance(toId, actor);
-
-        if (!this.graph.reserveNode(toId, actor)) {
-
-            const reciprocal = this.graph.hasReciprocalLaneReservation(
-                fromId,
-                toId,
-                actor
-            );
-
-            if (!reciprocal) {
-
-                const connection = this.graph.requireConnection(fromId, toId);
-
-                // Keep only a multi-lane head-on intention. It lets an actor at
-                // the opposite endpoint announce that it is leaving. A parked
-                // actor has no reciprocal intention and remains impassable.
-                if (!connection.passingAllowed ||
-                    connection.lanes.length < 2) {
-
-                    this.graph.releaseConnection(fromId, toId, actor);
-
-                }
-
-                return false;
-
-            }
-
-        }
-
-        // All traffic resources are secured. The logical root may start moving
-        // now while the parked visual blends directly back onto the graph axis.
-        this.centerActorForDeparture(context);
-
-        this.graph.occupyConnectionLane(
-            fromId,
-            toId,
-            actor,
-            laneIndex
-        );
-        this.graph.releaseNode(fromId, actor);
-
-        this.refresh();
-
-        return true;
+        return this.traffic.tryStartConnection(actor, fromId, toId);
 
     }
 
-    tryEnterConnectionFromInteraction(actor, { fromId, toId }) {
+    tryEnterConnectionFromInteraction(actor, entry) {
 
-        const traversal = actor.navigation.getTraversalState();
-
-        if (traversal.currentConnection) return true;
-
-        const laneIndex = this.graph.reserveConnectionLane(
-            fromId,
-            toId,
-            actor
-        );
-
-        if (laneIndex === null) return false;
-
-        if (!this.graph.reserveNode(toId, actor)) {
-
-            this.graph.releaseConnection(fromId, toId, actor);
-            return false;
-
-        }
-
-        this.graph.occupyConnectionLane(
-            fromId,
-            toId,
-            actor,
-            laneIndex
-        );
-        actor.navigation.beginConnection(fromId, toId);
-        this.centerActorForDeparture(this.requireContext(actor));
-        this.refresh();
-
-        return true;
-
-    }
-
-    moveVisualToConnectionLane(actor, fromId, toId, laneIndex) {
-
-        if (!actor.visual) return;
-
-        AnimationPresets.to(actor, {
-            object: actor.visual.position,
-            property: "x",
-            to: this.graph.getConnectionLaneOffset(
-                fromId,
-                toId,
-                laneIndex
-            ),
-            duration: 0.25,
-            easing: Tween.easeInOutQuad
-        });
-
-    }
-
-    moveVisualToCenter(actor) {
-
-        if (!actor.visual || Math.abs(actor.visual.position.x) <= 0.001) {
-
-            return;
-
-        }
-
-        AnimationPresets.to(actor, {
-            object: actor.visual.position,
-            property: "x",
-            to: 0,
-            duration: 0.35,
-            easing: Tween.easeInOutQuad
-        });
+        return this.traffic.tryEnterFromInteraction(actor, entry);
 
     }
 
@@ -567,97 +385,7 @@ export class CharacterNavigationSystem {
 
         const { actor } = context;
 
-        if (waypoint.leavingGraph) {
-
-            const traversal = actor.navigation.getTraversalState();
-            const nodeId = traversal.currentNodeId;
-
-            if (nodeId) this.graph.releaseNode(nodeId, actor);
-
-            if (traversal.currentConnection) {
-
-                this.graph.releaseConnection(
-                    traversal.currentConnection.fromId,
-                    traversal.currentConnection.toId,
-                    actor
-                );
-                actor.navigation.leaveConnection();
-
-            }
-
-            this.refresh();
-            return;
-
-        }
-
-        if (waypoint.leavingInteraction) {
-
-            if (context.interactionPoint) {
-
-                this.leaveInteractionPoint(context);
-
-            }
-
-            this.refresh();
-            return;
-
-        }
-
-        if (waypoint.interactionPoint) {
-
-            if (context.interactionPoint !== waypoint.interactionPoint) {
-
-                if (context.interactionPoint) {
-
-                    this.leaveInteractionPoint(context);
-
-                }
-
-                this.connector.occupyPoint(waypoint.interactionPoint, actor);
-                context.interactionPoint = waypoint.interactionPoint;
-
-            }
-
-            const interaction = context.pendingInteraction;
-
-            if (!context.preparingInteraction &&
-                interaction?.point.via === waypoint.interactionPoint) {
-
-                context.preparingInteraction = true;
-                actor.pause();
-
-                interaction.point.entity?.prepareInteraction(
-                    actor,
-                    waypoint.interactionPoint,
-                    interaction.point,
-                    () => {
-
-                        context.preparingInteraction = false;
-                        actor.resume();
-
-                    }
-                );
-
-            }
-
-            if (interaction?.point === waypoint.interactionPoint) {
-
-                context.pendingInteraction = null;
-                actor.object3D.rotation.y =
-                    waypoint.interactionPoint.getWorldRotationY();
-                interaction.onArrive?.();
-                context.activeInteraction = {
-                    target: waypoint.interactionPoint.entity,
-                    point: waypoint.interactionPoint
-                };
-
-            }
-
-            this.refresh();
-            return;
-
-        }
-
+        if (this.interactions.handleWaypoint(context, waypoint)) return;
         if (!waypoint.id) return;
 
         if (context.interactionPoint) {
@@ -788,33 +516,6 @@ export class CharacterNavigationSystem {
 
     }
 
-    createTraversalWaypoints(context, nodeIds) {
-
-        const traversal = context.actor.navigation.getTraversalState();
-        const startsAtCurrentNode =
-            !context.interactionPoint &&
-            traversal.currentNodeId === nodeIds[0];
-
-        // currentNodeId is topological ownership, not necessarily the actor's
-        // world position. A resting actor may be beside that node, so targeting
-        // it again would force an unwanted return to center before departure.
-        return this.graph.createWaypoints(
-            startsAtCurrentNode ? nodeIds.slice(1) : nodeIds
-        );
-
-    }
-
-    omitCurrentNodeWaypoint(context, waypoints) {
-
-        const traversal = context.actor.navigation.getTraversalState();
-        const startsAtCurrentNode =
-            !context.interactionPoint &&
-            traversal.currentNodeId === waypoints[0]?.id;
-
-        return startsAtCurrentNode ? waypoints.slice(1) : waypoints;
-
-    }
-
     requestImmediateNodeClearance(nodeId, requestingActor) {
 
         for (const occupant of this.graph.getNodeOccupants(nodeId)) {
@@ -921,7 +622,7 @@ export class CharacterNavigationSystem {
 
     update(delta) {
 
-        this.updateTrafficAvoidance();
+        this.traffic.update();
 
         for (const context of this.contexts.values()) {
 
@@ -1003,153 +704,6 @@ export class CharacterNavigationSystem {
             context.clearanceRequesters.delete(requestingActor);
 
         }
-
-    }
-
-    updateTrafficAvoidance() {
-
-        const observedPairs = [];
-        const visitedConnections = new Set();
-
-        for (const node of this.graph.nodes.values()) {
-
-            for (const connection of node.connections.values()) {
-
-                if (visitedConnections.has(connection)) continue;
-
-                visitedConnections.add(connection);
-
-                const forward = [];
-                const reverse = [];
-
-                for (const lane of connection.lanes) {
-
-                    for (const actor of lane.occupants) {
-
-                        const direction = lane.directions.get(actor);
-                        const entry = { actor, laneIndex: lane.index, direction };
-
-                        if (direction?.fromId === connection.fromId) {
-
-                            forward.push(entry);
-
-                        } else if (direction) {
-
-                            reverse.push(entry);
-
-                        }
-
-                    }
-
-                }
-
-                for (const first of forward) {
-
-                    for (const second of reverse) {
-
-                        observedPairs.push({ connection, first, second });
-
-                    }
-
-                }
-
-            }
-
-        }
-
-        for (const pair of observedPairs) {
-
-            const existing = this.activeEncounters.find(encounter =>
-                encounter.connection === pair.connection &&
-                encounter.first === pair.first.actor &&
-                encounter.second === pair.second.actor
-            );
-            const distance = this.getPlanarActorDistance(
-                pair.first.actor,
-                pair.second.actor
-            );
-            const crossed = this.haveActorsCrossed(pair);
-
-            if (!existing && !crossed && distance <= 2.5) {
-
-                this.activeEncounters.push({
-                    connection: pair.connection,
-                    first: pair.first.actor,
-                    second: pair.second.actor,
-                    crossed: false
-                });
-                this.moveVisualToConnectionLane(
-                    pair.first.actor,
-                    pair.first.direction.fromId,
-                    pair.first.direction.toId,
-                    pair.first.laneIndex
-                );
-                this.moveVisualToConnectionLane(
-                    pair.second.actor,
-                    pair.second.direction.fromId,
-                    pair.second.direction.toId,
-                    pair.second.laneIndex
-                );
-
-            } else if (existing && crossed) {
-
-                existing.crossed = true;
-
-            }
-
-        }
-
-        this.activeEncounters = this.activeEncounters.filter(encounter => {
-
-            const pair = observedPairs.find(candidate =>
-                candidate.connection === encounter.connection &&
-                candidate.first.actor === encounter.first &&
-                candidate.second.actor === encounter.second
-            );
-            const finished = !pair || (
-                encounter.crossed &&
-                this.getPlanarActorDistance(
-                    encounter.first,
-                    encounter.second
-                ) >= 1.2
-            );
-
-            if (finished) {
-
-                this.moveVisualToCenter(encounter.first);
-                this.moveVisualToCenter(encounter.second);
-
-            }
-
-            return !finished;
-
-        });
-
-    }
-
-    haveActorsCrossed({ connection, first, second }) {
-
-        const from = this.graph.requireNode(connection.fromId).position;
-        const to = this.graph.requireNode(connection.toId).position;
-        const directionX = to.x - from.x;
-        const directionZ = to.z - from.z;
-        const forwardProgress =
-            (first.actor.object3D.position.x - from.x) * directionX +
-            (first.actor.object3D.position.z - from.z) * directionZ;
-        const reverseProgress =
-            (second.actor.object3D.position.x - from.x) * directionX +
-            (second.actor.object3D.position.z - from.z) * directionZ;
-
-        return forwardProgress >= reverseProgress;
-
-    }
-
-    getPlanarActorDistance(first, second) {
-
-        const deltaX = first.object3D.position.x - second.object3D.position.x;
-        const deltaZ = first.object3D.position.z - second.object3D.position.z;
-
-        return Math.hypot(deltaX, deltaZ);
 
     }
 
@@ -1291,3 +845,9 @@ export class CharacterNavigationSystem {
     }
 
 }
+
+
+
+
+
+
