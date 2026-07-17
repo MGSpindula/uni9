@@ -351,7 +351,17 @@ export class Character extends Entity {
             followSurface: waypoint.airborne !== true
         });
 
-        if (!reached) return;
+        if (!reached) {
+
+            if (this.locomotion.isBlockedBySlope()) {
+
+                this.pause();
+
+            }
+
+            return;
+
+        }
 
         // Position and facing are both part of arriving at authored animation
         // marks such as approach, seat and dwell spots. The callback runs only
