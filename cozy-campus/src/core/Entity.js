@@ -324,6 +324,31 @@ export class Entity {
 
     }
 
+    prepareInteractionExit(
+        actor,
+        point,
+        approachPoint,
+        onComplete = null
+    ) {
+
+        // Runs before navigation leaves a persistent interaction. The object
+        // may play a stand-up, release or turn-around clip and must signal when
+        // the actor is ready to travel back through the approach point.
+        this.onPrepareInteractionExit(
+            actor,
+            point,
+            approachPoint,
+            onComplete
+        );
+
+    }
+
+    onPrepareInteractionExit(actor, point, approachPoint, onComplete) {
+
+        onComplete?.();
+
+    }
+
     endInteraction(actor, point = null) {
 
         // Counterpart of performInteraction() for persistent uses such as

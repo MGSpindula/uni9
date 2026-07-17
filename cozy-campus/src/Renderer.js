@@ -5,8 +5,9 @@ export class Renderer {
     constructor() {
 
         // Low-level WebGL renderer. Scene owns the higher-level render pipeline.
+        // antialias disabled: PostProcessing.renderTarget já usa MSAA 4x
         this.renderer = new THREE.WebGLRenderer({
-            antialias: true
+            antialias: false
         });
         this.renderer.shadowMap.enabled = true;
         this.renderer.setSize(

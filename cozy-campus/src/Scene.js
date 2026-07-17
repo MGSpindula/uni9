@@ -18,11 +18,18 @@ import { Player } from "./characters/Player";
 import { PlayerController } from "./characters/PlayerController";
 import { NPC } from "./characters/NPC";
 import { NPCController } from "./characters/NPCController";
+import { CharacterGrounding } from "./characters/CharacterGrounding";
 import { NavigationGraph } from "./navigation/NavigationGraph";
 import { NavigationGraphHelper } from "./navigation/NavigationGraphHelper";
 import { NavigationConnector } from "./navigation/NavigationConnector";
 import { CharacterNavigationSystem } from "./navigation/CharacterNavigationSystem";
-import { NavigationDebugPanel } from "./debug/NavigationDebugPanel";
+import { DwellSpotRegistry } from "./navigation/DwellSpotRegistry";
+import { CharacterDebugPanel } from "./debug/CharacterDebugPanel";
+import { PerformanceDebugPanel } from "./debug/PerformanceDebugPanel";
+import {
+    configureCozyCampusDwellSpots,
+    configureCozyCampusNavigation
+} from "./levels/CozyCampusNavigation";
 
 export class Scene {
 
@@ -76,7 +83,11 @@ export class Scene {
 
         if (import.meta.env.DEV) {
 
-            this.createNavigationDebugPanel();
+            this.createCharacterDebugPanel();
+            this.performanceDebugPanel = new PerformanceDebugPanel();
+            // EffectComposer renders several passes. Disabling the automatic
+            // reset lets the performance panel report their combined cost.
+            this.renderer.renderer.info.autoReset = false;
 
         }
 
@@ -167,7 +178,7 @@ export class Scene {
 
         sun.shadow.camera.updateProjectionMatrix();
 
-        sun.shadow.mapSize.set(2048, 2048);
+        sun.shadow.mapSize.set(1024, 1024);
         sun.shadow.bias = -0.0001;
 
         this.scene.add(sun);
@@ -179,6 +190,11 @@ export class Scene {
     createObjects() {
 
         this.floor = new Floor();
+        this.characterGrounding = new CharacterGrounding(
+            this.floor.walkableSurfaces
+        );
+        this.characterNavigation.setGrounding(this.characterGrounding);
+        this.characterGrounding.validateGraph(this.navigationGraph);
         this.player = new Player();
 
         this.registerCharacter(this.player, {
@@ -209,20 +225,55 @@ export class Scene {
         this.add(this.chair);
         this.registerNavigationInteractions(this.chair);
 
-        this.npc = new NPC("Orange NPC");
-        this.add(this.npc);
-        this.registerCharacter(this.npc, {
-            spawnId: "east-exit"
+        // Crowd test: every NPC uses the same CharacterNavigationSystem and
+        // NPCController. Names/colors exist only to make collision and queue
+        // logs easy to follow while all three compete for lanes and the chair.
+        const npcConfigurations = [
+            {
+                name: "Orange NPC",
+                color: 0xff8a2a,
+                spawnId: "east-exit"
+            }, {
+                name: "Green NPC",
+                color: 0x58b86b,
+                spawnId: "west-2"
+            }, {
+                name: "Purple NPC",
+                color: 0x9b6bd3,
+                spawnId: "north-1"
+            }
+        ];
+
+        this.npcs = npcConfigurations.map(configuration => {
+
+            const npc = new NPC(configuration.name, {
+                color: configuration.color
+            });
+
+            this.add(npc);
+            this.registerCharacter(npc, {
+                spawnId: configuration.spawnId
+            });
+
+            const controller = new NPCController({
+                npc,
+                chair: this.chair,
+                graph: this.navigationGraph,
+                navigationSystem: this.characterNavigation,
+                interactionSystem: this.interactionSystem
+            });
+
+            this.controllers.push(controller);
+            return npc;
+
         });
 
-        this.npcController = new NPCController({
-            npc: this.npc,
-            chair: this.chair,
-            graph: this.navigationGraph,
-            navigationSystem: this.characterNavigation,
-            interactionSystem: this.interactionSystem
-        });
-        this.controllers.push(this.npcController);
+        // Temporary compatibility aliases for console experiments made while
+        // the prototype had a single NPC.
+        this.npc = this.npcs[0];
+        this.npcController = this.controllers.find(controller =>
+            controller.npc === this.npc
+        );
 
     }
 
@@ -232,63 +283,12 @@ export class Scene {
             // A floor click selects a node only inside this visible radius.
             selectionRadius: 1.25
         });
-
-        // Edit these positions to reshape the manual path. Circulation nodes
-        // are passable while occupied. Use { exclusive: true } only for a node
-        // that physically cannot be crossed by two actors.
-        // Example: ["narrow-door", position, { exclusive: true }]
-        const nodes = [
-            ["spawn", new THREE.Vector3(0, 0, -5)],
-            ["north-1", new THREE.Vector3(-2, 0, -2)],
-            ["north-2", new THREE.Vector3(2, 0, -2)],
-            ["junction", new THREE.Vector3(0, 0, 0)],
-            ["west-exit", new THREE.Vector3(-7, 0, 6)],
-            ["west-1", new THREE.Vector3(-1, 0, 5)],
-            ["west-2", new THREE.Vector3(-4, 0, 8)],
-            ["west-3", new THREE.Vector3(-7, 0, 1)],
-            ["east-exit", new THREE.Vector3(5, 0, 4)]
-        ];
-
-        for (const [id, position, metadata = {}] of nodes) {
-
-            this.navigationGraph.addNode(id, position, metadata);
-
-        }
-
-        // Circulation edges default to two lanes. Character roots remain on the
-        // graph centerline; their visuals receive the reserved lane offset.
-        const connect = (fromId, toId, options = {}) =>
-            this.navigationGraph.connect(fromId, toId, {
-                lanes: 2,
-                // Current characters have radius 0.45 plus personal space.
-                laneWidth: 1,
-                capacityPerLane: 1,
-                passingAllowed: true,
-                ...options
-            });
-
-        connect("spawn", "north-1");
-        connect("spawn", "north-2");
-
-        // A narrow/indivisible connection: actors cannot pass side by side.
-        connect("spawn", "junction", {
-            lanes: 1,
-            laneWidth: 0,
-            passingAllowed: false
-        });
-
-        connect("north-1", "junction");
-        connect("north-1", "west-exit");
-        connect("north-1", "west-3");
-        connect("north-2", "junction");
-        connect("junction", "west-1");
-        connect("west-1", "west-exit");
-        connect("west-1", "west-2");
-        connect("west-1", "west-3");
-        connect("west-2", "west-exit");
-        connect("west-3", "west-exit");
-        connect("junction", "west-exit");
-        connect("junction", "east-exit");
+        configureCozyCampusNavigation(this.navigationGraph);
+        this.dwellSpots = new DwellSpotRegistry(this.navigationGraph);
+        configureCozyCampusDwellSpots(
+            this.dwellSpots,
+            this.navigationGraph
+        );
 
         if (!this.navigationGraph.isValid()) {
 
@@ -303,22 +303,16 @@ export class Scene {
             this.navigationGraph
         );
         this.navigationHelper = new NavigationGraphHelper(this.navigationGraph, {
-            connector: this.navigationConnector
+            connector: this.navigationConnector,
+            dwellSpots: this.dwellSpots
         });
         this.characterNavigation = new CharacterNavigationSystem({
             graph: this.navigationGraph,
             connector: this.navigationConnector,
-            helper: this.navigationHelper,
-            onChanged: () => this.refreshNavigationDebugPanel()
+            dwellSpots: this.dwellSpots
         });
         this.scene.add(this.navigationHelper);
         this.navigationHelper.highlightNode("spawn");
-
-        this.setNavigationConnectionBlocked(
-            "spawn",
-            "junction",
-            true
-        );
 
     }
 
@@ -331,6 +325,7 @@ export class Scene {
         // Player and NPCs use this same registration. Example:
         // this.registerCharacter(librarian, { spawnId: "library-entry" });
         // Their controllers differ, but navigation and interaction do not.
+        character.setGrounding(this.characterGrounding);
         this.characterNavigation.registerActor(character, { spawnId });
         this.interactionSystem.registerActor(character, request =>
             this.characterNavigation.moveToInteractionPoint(
@@ -352,38 +347,32 @@ export class Scene {
 
         }
 
-        this.navigationHelper.refresh();
+        if (this.navigationHelper?.isVisible) {
+
+            this.navigationHelper.refresh();
+
+        }
 
     }
 
-    createNavigationDebugPanel() {
+    createCharacterDebugPanel() {
 
-        this.navigationDebugPanel = new NavigationDebugPanel({
-            graph: this.navigationGraph,
-            connector: this.navigationConnector,
-            setNodeBlocked: (id, blocked) =>
-                this.setNavigationNodeBlocked(id, blocked),
-            setConnectionBlocked: (fromId, toId, blocked) =>
-                this.setNavigationConnectionBlocked(fromId, toId, blocked),
-            occupyNode: (id, occupant) =>
-                this.occupyNavigationNode(id, occupant),
-            releaseNode: (id, occupant) =>
-                this.releaseNavigationNode(id, occupant),
-            occupyConnection: (fromId, toId, occupant) =>
-                this.occupyNavigationConnection(fromId, toId, occupant),
-            releaseConnection: (fromId, toId, occupant) =>
-                this.releaseNavigationConnection(fromId, toId, occupant),
-            occupyInteractionPoint: (id, occupant) =>
-                this.occupyNavigationInteractionPoint(id, occupant),
-            releaseInteractionPoint: (id, occupant) =>
-                this.releaseNavigationInteractionPoint(id, occupant)
+        this.characterDebugPanel = new CharacterDebugPanel({
+            getRows: () => [this.player, ...(this.npcs ?? [])].map(actor => {
+
+                const navigation = this.characterNavigation
+                    .getActorDebugState(actor);
+                const controller = this.controllers.find(candidate =>
+                    candidate.npc === actor
+                );
+
+                return {
+                    ...navigation,
+                    behavior: controller?.state ?? "player input"
+                };
+
+            })
         });
-
-    }
-
-    refreshNavigationDebugPanel() {
-
-        this.navigationDebugPanel?.render();
 
     }
 
@@ -410,9 +399,25 @@ export class Scene {
 
     onNavigationTopologyChanged() {
 
-        this.navigationHelper?.refresh();
-        this.refreshNavigationDebugPanel();
+        if (this.navigationHelper?.isVisible) {
+
+            this.navigationHelper.refresh();
+
+        }
+
         this.characterNavigation?.topologyChanged();
+
+    }
+
+    setNavigationHelperVisible(visible) {
+
+        this.navigationHelper?.setVisible(visible);
+
+    }
+
+    toggleNavigationHelper() {
+
+        this.navigationHelper?.toggleVisible();
 
     }
 
@@ -462,9 +467,6 @@ export class Scene {
 
         const occupied = this.navigationGraph.occupyNode(id, occupant);
 
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
-
         return occupied;
 
     }
@@ -472,8 +474,6 @@ export class Scene {
     releaseNavigationNode(id, occupant) {
 
         this.navigationGraph.releaseNode(id, occupant);
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
 
     }
 
@@ -485,9 +485,6 @@ export class Scene {
             occupant
         );
 
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
-
         return occupied;
 
     }
@@ -495,8 +492,6 @@ export class Scene {
     releaseNavigationConnection(fromId, toId, occupant) {
 
         this.navigationGraph.releaseConnection(fromId, toId, occupant);
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
 
     }
 
@@ -506,9 +501,6 @@ export class Scene {
         const occupied = point
             ? this.navigationConnector.occupyPoint(point, occupant)
             : false;
-
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
 
         return occupied;
 
@@ -520,8 +512,6 @@ export class Scene {
 
         if (point) this.navigationConnector.releasePoint(point, occupant);
 
-        this.navigationHelper.refresh();
-        this.refreshNavigationDebugPanel();
 
     }
 
@@ -536,7 +526,15 @@ export class Scene {
 
             previous = now;
 
+            const updateStarted = performance.now();
             this.update(delta);
+            const updateFinished = performance.now();
+
+            if (this.performanceDebugPanel) {
+
+                this.renderer.renderer.info.reset();
+
+            }
 
             this.renderer.render(
 
@@ -545,6 +543,16 @@ export class Scene {
                 delta
 
             );
+
+            const renderFinished = performance.now();
+
+            this.performanceDebugPanel?.record({
+                now: renderFinished,
+                frame: renderFinished - now,
+                update: updateFinished - updateStarted,
+                render: renderFinished - updateFinished,
+                renderer: this.renderer.renderer
+            });
 
             requestAnimationFrame(loop);
 
@@ -555,5 +563,3 @@ export class Scene {
     }
 
 }
-
-

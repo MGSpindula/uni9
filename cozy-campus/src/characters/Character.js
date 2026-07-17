@@ -4,6 +4,8 @@ import { EntityState } from "../core/EntityState";
 import { Navigation } from "../navigation/Navigation";
 import { AnimationController } from "./AnimationController";
 import { Locomotion } from "./Locomotion";
+import { AnimationPresets } from "../core/AnimationPresets";
+import { Tween } from "../core/Tween";
 
 export class Character extends Entity {
 
@@ -15,16 +17,43 @@ export class Character extends Entity {
         // NPC behavior only differ in where their commands come from.
         this.object3D = new THREE.Group();
         this.visual = null;
+        this.forwardHelper = null;
 
         this.navigation = new Navigation();
+        this.traversalType = "flat";
         this.locomotion = new Locomotion(this.object3D);
         this.animation = null;
+        this.grounding = null;
+
+        // Most autonomous characters must clear a destination that has no
+        // authored dwell spot. Player enables this override because direct
+        // control may intentionally leave them standing anywhere.
+        this.canDwellWithoutSpot = false;
 
         this.waypointReachedHandler = null;
         this.segmentRequestedHandler = null;
         this.localPointRequestedHandler = null;
         this.localConnectionRequestedHandler = null;
+        this.departureRequestedHandler = null;
         this.navigationCancelledHandler = null;
+        this.movementGuard = null;
+
+        // Slightly smaller than the primitive mesh: adjacent lanes should be
+        // used confidently, while genuine body overlap is still prevented.
+        this.collisionRadius = 0.36;
+        // Actors whose roots differ more than this are on separate vertical
+        // layers and must not block or push one another in the XZ circle solver.
+        this.collisionHeight = 1.2;
+        // Navigation owns two different things: the current route and the
+        // actor's intent. A route may be cancelled/rebuilt by traffic or
+        // collision recovery without silently discarding the requested target.
+        // Autonomous controllers may opt into "replaceable" so their behavior
+        // can abandon a failed task and choose another one after a timeout.
+        this.navigationIntentPolicy = "persistent";
+        this.navigationCapabilities = {
+            maxSlope: THREE.MathUtils.degToRad(35),
+            stairs: true
+        };
 
     }
 
@@ -79,9 +108,53 @@ export class Character extends Entity {
 
     }
 
+    setGrounding(grounding) {
+
+        this.grounding = grounding;
+
+    }
+
+    addForwardHelper({
+        height = 2,
+        length = 0.9,
+        color = 0xffff00
+    } = {}) {
+
+        if (this.forwardHelper) {
+
+            this.object3D.remove(this.forwardHelper);
+
+        }
+
+        // Locomotion rotates object3D with lookAt(), whose local forward axis
+        // for a regular Object3D is +Z. Keep this helper on the root so visual
+        // animation never changes the direction it is reporting.
+        this.forwardHelper = new THREE.ArrowHelper(
+            new THREE.Vector3(0, 0, 1),
+            new THREE.Vector3(0, height, 0),
+            length,
+            color,
+            0.28,
+            0.16
+        );
+        this.forwardHelper.name = `${this.name}:ForwardHelper`;
+        this.forwardHelper.line.raycast = () => {};
+        this.forwardHelper.cone.raycast = () => {};
+        this.object3D.add(this.forwardHelper);
+
+        return this.forwardHelper;
+
+    }
+
     setLocalConnectionRequestedHandler(handler) {
 
         this.localConnectionRequestedHandler = handler;
+
+    }
+
+    setDepartureRequestedHandler(handler) {
+
+        this.departureRequestedHandler = handler;
 
     }
 
@@ -123,6 +196,104 @@ export class Character extends Entity {
 
     }
 
+    setMovementGuard(handler) {
+
+        this.movementGuard = handler;
+
+    }
+
+    // -----------------------------
+    // Navigation presentation hooks
+    // -----------------------------
+
+    performDwellSpotSearch({ nodeId, spot, onComplete = null }) {
+
+        console.log(
+            `[DwellSpot] ${this.name} looks around at "${nodeId}" ` +
+            `before choosing "${spot.id}".`
+        );
+
+        // Prototype for a future bone animation: look to one side, scan the
+        // other side, then restore the original facing. Override this method
+        // in a character class when an AnimationMixer clip becomes available.
+        const initialRotation = this.object3D.rotation.y;
+
+        AnimationPresets.to(this, {
+            object: this.object3D.rotation,
+            property: "y",
+            to: initialRotation + 0.55,
+            duration: 0.35,
+            easing: Tween.easeInOutQuad,
+            onComplete: () => AnimationPresets.to(this, {
+                object: this.object3D.rotation,
+                property: "y",
+                to: initialRotation - 0.55,
+                duration: 0.55,
+                easing: Tween.easeInOutQuad,
+                onComplete: () => AnimationPresets.to(this, {
+                    object: this.object3D.rotation,
+                    property: "y",
+                    to: initialRotation,
+                    duration: 0.35,
+                    easing: Tween.easeInOutQuad,
+                    onComplete
+                })
+            })
+        });
+
+    }
+
+    performDwellEntry(spot, onComplete = null) {
+
+        console.log(`[DwellSpot] ${this.name} enters "${spot.id}".`);
+        AnimationPresets.scaleBounce(this, {
+            target: this.visual,
+            multiplier: 1.035,
+            outDuration: 0.1,
+            returnDuration: 0.12,
+            onComplete
+        });
+
+    }
+
+    performDwellExit(spot, onComplete = null) {
+
+        console.log(`[DwellSpot] ${this.name} exits "${spot.id}".`);
+
+        if (!this.visual) {
+
+            onComplete?.();
+            return;
+
+        }
+
+        const initialRootRotation = this.object3D.rotation.y;
+
+        // The cylinder is symmetrical and its forward arrow belongs to
+        // object3D, so this visible mock rotates the root while navigation is
+        // paused. A future bone clip should replace this presentation hook.
+        AnimationPresets.to(this, {
+            object: this.object3D.rotation,
+            property: "y",
+            to: initialRootRotation + Math.PI,
+            // Deliberately slow enough to read the complete 180° turn.
+            duration: 0.65,
+            easing: Tween.easeInOutQuad,
+            onComplete: () => {
+
+                onComplete?.();
+            }
+        });
+
+        AnimationPresets.scaleBounce(this, {
+            target: this.visual,
+            multiplier: 0.975,
+            outDuration: 0.07,
+            returnDuration: 0.09
+        });
+
+    }
+
     // -----------------------------
     // Lifecycle
     // -----------------------------
@@ -131,27 +302,89 @@ export class Character extends Entity {
 
         super.update(delta);
         this.updateMovement(delta);
-        this.animation?.update(delta);
+        this.grounding?.update(this);
+        this.animation?.update(delta, this.locomotion.getMotionState());
 
     }
 
     updateMovement(delta) {
 
+        this.locomotion.beginFrame();
+
+        let waypoint = this.navigation.getCurrentWaypoint();
+
+        // Collision avoidance is an out-of-route locomotion maneuver. It must
+        // keep updating while the original Navigation/Bézier is suspended.
+        if (this.movementGuard &&
+            !this.movementGuard(waypoint?.position ?? null, delta)) {
+
+            this.setState(EntityState.WAITING);
+            return;
+
+        }
+
         if (this.navigation.isPaused()) return;
 
-        const waypoint = this.navigation.getCurrentWaypoint();
+        // The collision guard may have rebuilt the remaining Bézier while
+        // resolving an avoidance. Never consume the stale waypoint reference
+        // captured before that callback.
+        waypoint = this.navigation.getCurrentWaypoint();
 
         if (!waypoint || !this.prepareTraversalTo(waypoint)) return;
 
-        const reached = this.locomotion.moveTo(waypoint.position, delta);
+        if (this.isState(EntityState.WAITING)) {
+
+            this.setState(EntityState.WALKING);
+
+        }
+
+        const reached = this.locomotion.moveTo(waypoint.position, delta, {
+            rotate: !waypoint.preserveFacing,
+            // Every ordinary walk is surface-following: route owns XZ and
+            // Grounding owns Y. Only explicit jump/fly waypoints are airborne.
+            //
+            // Use { airborne: true } when Navigation must control XYZ itself,
+            // for example during a jump, flight, fall or authored traversal
+            // that intentionally leaves the ground. Do NOT use it for slopes,
+            // stairs or hills: those remain attached to walkable geometry and
+            // must let CharacterGrounding determine their physical height.
+            followSurface: waypoint.airborne !== true
+        });
 
         if (!reached) return;
+
+        // Position and facing are both part of arriving at authored animation
+        // marks such as approach, seat and dwell spots. The callback runs only
+        // after the smooth locomotion rotation has also finished.
+        if (waypoint.arrivalDirection &&
+            !this.locomotion.alignToDirection(
+                waypoint.arrivalDirection,
+                delta
+            )) return;
 
         const completedConnection = waypoint.id
             ? this.navigation.reachNode(waypoint.id)
             : null;
 
-        this.waypointReachedHandler?.(waypoint, completedConnection);
+        const completedRouteRevision = this.navigation.getRouteRevision();
+
+        const waypointAccepted = this.waypointReachedHandler?.(
+            waypoint,
+            completedConnection
+        );
+
+        // Arrival ownership can change while the actor is on the connection.
+        // Keep this waypoint current until its node can actually be occupied.
+        if (waypointAccepted === false) return;
+
+        // The callback is allowed to create a follow-up route. Advancing here
+        // would skip its first waypoint, possibly asking NavigationGraph for a
+        // connection between non-neighbouring nodes.
+        if (this.navigation.getRouteRevision() !== completedRouteRevision) {
+
+            return;
+
+        }
 
         const result = this.navigation.advance();
 
@@ -169,21 +402,68 @@ export class Character extends Entity {
 
             }
 
+        } else if (waypoint.id) {
+
+            // advance() has selected a different waypoint. Prepare that next
+            // segment now, without recursively preparing the completed node.
+            const nextWaypoint = this.navigation.getCurrentWaypoint();
+
+            if (nextWaypoint && nextWaypoint !== waypoint) {
+
+                this.prepareTraversalTo(nextWaypoint);
+
+            }
+
         }
 
     }
 
     prepareTraversalTo(waypoint) {
 
-        if (waypoint.connectionEntry) {
+        if (waypoint.departureDirection &&
+            !waypoint.departureDirectionApplied) {
 
-            const allowed = this.localConnectionRequestedHandler?.(
-                waypoint.connectionEntry
+            // Departure poses are authored as the exact opposite of entry.
+            // Apply this to the logical root before Locomotion or any Bézier
+            // sample can reuse the old facing. A future animation may hide the
+            // instantaneous logical turn on the visual/bone layer.
+            const direction = waypoint.departureDirection;
+
+            this.object3D.lookAt(
+                this.object3D.position.x + direction.x,
+                this.object3D.position.y,
+                this.object3D.position.z + direction.z
+            );
+            waypoint.departureDirectionApplied = true;
+
+        }
+
+        if (waypoint.departureRequest) {
+
+            const allowed = this.departureRequestedHandler?.(
+                waypoint.departureRequest,
+                waypoint
             ) ?? true;
 
             if (!allowed) {
 
-                this.pause();
+                this.pauseIfRouteUnchanged(waypoint);
+                return false;
+
+            }
+
+        }
+
+        if (waypoint.connectionEntry) {
+
+            const allowed = this.localConnectionRequestedHandler?.(
+                waypoint.connectionEntry,
+                waypoint
+            ) ?? true;
+
+            if (!allowed) {
+
+                this.pauseIfRouteUnchanged(waypoint);
                 return false;
 
             }
@@ -192,13 +472,23 @@ export class Character extends Entity {
 
         if (waypoint.interactionPoint) {
 
+            waypoint.preserveFacing ??=
+                waypoint.interactionPoint.metadata.preserveFacing === true;
+
+            if (!waypoint.preserveFacing) {
+
+                waypoint.arrivalDirection ??=
+                    waypoint.interactionPoint.getWorldDirection();
+
+            }
+
             const allowed = this.localPointRequestedHandler?.(
                 waypoint.interactionPoint
             ) ?? true;
 
             if (!allowed) {
 
-                this.pause();
+                this.pauseIfRouteUnchanged(waypoint);
                 return false;
 
             }
@@ -225,12 +515,13 @@ export class Character extends Entity {
 
         const allowed = this.segmentRequestedHandler?.(
             traversal.currentNodeId,
-            waypoint.id
+            waypoint.id,
+            waypoint
         ) ?? true;
 
         if (!allowed) {
 
-            this.pause();
+            this.pauseIfRouteUnchanged(waypoint);
             return false;
 
         }
@@ -241,6 +532,19 @@ export class Character extends Entity {
         );
 
         return true;
+
+    }
+
+    pauseIfRouteUnchanged(requestedWaypoint) {
+
+        // Traffic handlers return false both for a real wait and after they
+        // insert curve samples before the requested waypoint. Only the former
+        // should pause navigation.
+        if (this.navigation.getCurrentWaypoint() === requestedWaypoint) {
+
+            this.pause();
+
+        }
 
     }
 

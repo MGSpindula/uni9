@@ -14,6 +14,9 @@ export class NPCController {
         this.elapsed = 0;
         this.idleDuration = 1.5;
         this.sittingDuration = 5;
+        this.chairRetryDuration = 5;
+        this.chairRetryRemaining = 0;
+        this.chairUnavailableRevision = null;
 
     }
 
@@ -22,6 +25,20 @@ export class NPCController {
     // -----------------------------
 
     update(delta) {
+
+        if (this.chairUnavailableRevision !== null &&
+            this.chairUnavailableRevision !== this.graph.revision) {
+
+            // A topology edit may have restored access to the chair.
+            this.chairUnavailableRevision = null;
+            this.chairRetryRemaining = 0;
+
+        }
+
+        this.chairRetryRemaining = Math.max(
+            0,
+            this.chairRetryRemaining - delta
+        );
 
         if (this.chair.isInteractingWith(this.npc)) {
 
@@ -43,13 +60,35 @@ export class NPCController {
             this.npc.isState(EntityState.WAITING) ||
             this.npc.isState(EntityState.STOPPING)) return;
 
+        // A previously accepted chair route may become structurally blocked.
+        // Navigation abandons it after its timeout; the NPC then resumes its
+        // normal routine instead of requesting the same chair forever.
+        if (this.state === "moving-to-chair") {
+
+            this.state = "idle";
+            this.elapsed = 0;
+            this.chairRetryRemaining = this.chairRetryDuration;
+            this.chairUnavailableRevision = this.graph.revision;
+            console.log(
+                `[NPC] ${this.npc.name} abandons the chair until ` +
+                `navigation topology changes.`
+            );
+            this.moveToRandomNode();
+            return;
+
+        }
+
         this.elapsed += delta;
 
         if (this.elapsed < this.idleDuration) return;
 
         this.elapsed = 0;
 
-        if (this.tryUseChair()) return;
+        const mayRetryChair =
+            this.chairUnavailableRevision === null &&
+            this.chairRetryRemaining <= 0;
+
+        if (mayRetryChair && this.tryUseChair()) return;
 
         this.moveToRandomNode();
 
@@ -65,7 +104,21 @@ export class NPCController {
             ...this.chair.createUseRequest()
         });
 
-        if (accepted) this.state = "moving-to-chair";
+        if (accepted) {
+
+            this.state = "moving-to-chair";
+            this.chairUnavailableRevision = null;
+
+        } else {
+
+            this.chairRetryRemaining = this.chairRetryDuration;
+            this.chairUnavailableRevision = this.graph.revision;
+            console.log(
+                `[NPC] ${this.npc.name} postpones the chair until ` +
+                `navigation topology changes.`
+            );
+
+        }
 
         return accepted;
 

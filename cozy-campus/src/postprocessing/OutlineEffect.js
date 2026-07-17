@@ -33,11 +33,14 @@ export class OutlineEffect extends Effect {
         this.pass.visibleEdgeColor.set(0xffffff);
         this.pass.hiddenEdgeColor.set(0xffffff);
 
+        this.hasSelection = false;
+
     }
 
     setObjects(objects) {
 
         this.pass.selectedObjects = objects;
+        this.hasSelection = objects && objects.length > 0;
 
     }
 
@@ -73,6 +76,7 @@ export class OutlineEffect extends Effect {
         }
 
         this.pass.selectedObjects = [object];
+        this.hasSelection = true;
 
     }
 
@@ -85,6 +89,7 @@ export class OutlineEffect extends Effect {
         }
 
         this.pass.selectedObjects = [];
+        this.hasSelection = false;
 
     }
 

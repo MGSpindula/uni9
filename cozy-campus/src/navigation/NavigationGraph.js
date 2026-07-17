@@ -6,7 +6,8 @@ export class NavigationGraph {
         this.selectionRadius = selectionRadius;
         this.invalidNodeIds = new Set();
         this.validationErrors = [];
-        this.activeConnections = new Set();
+        this.activeLaneCurves = new Map();
+        this.revision = 0;
 
     }
 
@@ -58,13 +59,16 @@ export class NavigationGraph {
                 (metadata.exclusive ? 1 : Infinity),
             occupants: new Set(),
             reservations: new Set(),
+            // Soft commitments used only by circulation. They must not make a
+            // non-exclusive node impassable like an authored hard reservation.
+            transitReservations: new Set(),
             restingAgents: new Set(),
-            idleAssignments: new Map(),
             metadata: { ...metadata },
             connections: new Map()
         };
 
         this.nodes.set(id, node);
+        this.revision++;
 
         return node;
 
@@ -94,13 +98,23 @@ export class NavigationGraph {
 
     setNodePosition(id, position) {
 
-        this.requireNode(id).position.copy(position);
+        const node = this.requireNode(id);
+
+        if (node.position.equals(position)) return;
+
+        node.position.copy(position);
+        this.revision++;
 
     }
 
     setNodeBlocked(id, blocked = true) {
 
-        this.requireNode(id).blocked = blocked;
+        const node = this.requireNode(id);
+
+        if (node.blocked === blocked) return;
+
+        node.blocked = blocked;
+        this.revision++;
 
     }
 
@@ -117,11 +131,9 @@ export class NavigationGraph {
     connect(fromId, toId, {
         bidirectional = true,
         metadata = {},
-        capacity = null,
-        lanes = 1,
-        laneWidth = 1,
-        capacityPerLane = 1,
-        passingAllowed = false
+        // Global spacing between the centers of lanes A and B. Override with
+        // graph.connect(fromId, toId, { laneWidth: ... }) for one connection.
+        laneWidth = 0.9
     } = {}) {
 
         const from = this.getNode(fromId);
@@ -136,16 +148,18 @@ export class NavigationGraph {
             return null;
 
         }
-        const laneCount = Math.max(1, Math.floor(lanes));
+        const delta = to.position.clone().sub(from.position);
+        const horizontalDistance = Math.hypot(delta.x, delta.z);
+        const slopeAngle = Math.atan2(
+            Math.abs(delta.y),
+            horizontalDistance || Number.EPSILON
+        );
         const resource = {
             fromId,
             toId,
             blocked: false,
-            capacity: capacity ?? laneCount * capacityPerLane,
             laneWidth,
-            capacityPerLane,
-            passingAllowed,
-            lanes: Array.from({ length: laneCount }, (_, index) => ({
+            lanes: Array.from({ length: 2 }, (_, index) => ({
                 index,
                 occupants: new Set(),
                 reservations: new Set(),
@@ -153,12 +167,19 @@ export class NavigationGraph {
             })),
             occupants: new Set(),
             reservations: new Set(),
-            metadata: { ...metadata }
+            metadata: {
+                traversal: "flat",
+                slopeAngle,
+                rise: delta.y,
+                ...metadata
+            }
         };
 
         from.connections.set(toId, resource);
 
         if (bidirectional) to.connections.set(fromId, resource);
+
+        this.revision++;
 
         return resource;
 
@@ -211,7 +232,12 @@ export class NavigationGraph {
 
     setConnectionBlocked(fromId, toId, blocked = true) {
 
-        this.requireConnection(fromId, toId).blocked = blocked;
+        const connection = this.requireConnection(fromId, toId);
+
+        if (connection.blocked === blocked) return;
+
+        connection.blocked = blocked;
+        this.revision++;
 
     }
 
@@ -287,21 +313,6 @@ export class NavigationGraph {
 
     }
 
-    isNodeExclusive(id) {
-
-        return this.requireNode(id).exclusive;
-
-    }
-
-    isNodeOccupied(id, excludingAgent = null) {
-
-        return this.hasOtherUsers(
-            this.requireNode(id).occupants,
-            excludingAgent
-        );
-
-    }
-
     getNodeOccupants(id) {
 
         return [...this.requireNode(id).occupants];
@@ -316,33 +327,6 @@ export class NavigationGraph {
             toId,
             agent
         ) !== null;
-
-    }
-
-    isConnectionOccupied(fromId, toId, excludingAgent = null) {
-
-        return this.hasOtherUsers(
-            this.requireConnection(fromId, toId).occupants,
-            excludingAgent
-        );
-
-    }
-
-    getConnectionOccupants(fromId, toId) {
-
-        return [...this.requireConnection(fromId, toId).occupants];
-
-    }
-
-    hasOtherUsers(users, excludingAgent = null) {
-
-        for (const user of users) {
-
-            if (user !== excludingAgent) return true;
-
-        }
-
-        return false;
 
     }
 
@@ -369,15 +353,17 @@ export class NavigationGraph {
 
     }
 
-    reserveConnection(fromId, toId, agent) {
-
-        return this.reserveConnectionLane(fromId, toId, agent) !== null;
-
-    }
-
     reserveConnectionLane(fromId, toId, agent) {
 
         const connection = this.requireConnection(fromId, toId);
+        const existingLane = connection.lanes.find(lane =>
+            lane.reservations.has(agent) || lane.occupants.has(agent)
+        );
+
+        // Retries must preserve lane identity. Reserving a second free lane
+        // made one actor appear in both lanes and corrupted their geometry.
+        if (existingLane) return existingLane.index;
+
         const laneIndex = this.findAvailableLaneIndex(
             connection,
             fromId,
@@ -398,28 +384,92 @@ export class NavigationGraph {
 
     }
 
+    hasOtherNodeCommitments(id, agent) {
+
+        const node = this.requireNode(id);
+
+        return [...node.reservations, ...node.transitReservations]
+            .some(candidate => candidate !== agent);
+
+    }
+
+    getConnectionLaneIndex(fromId, toId, agent) {
+
+        const connection = this.requireConnection(fromId, toId);
+        const lane = connection.lanes.find(candidate =>
+            candidate.reservations.has(agent) ||
+            candidate.occupants.has(agent)
+        );
+
+        return lane?.index ?? null;
+
+    }
+
+    reserveNodeForTransit(id, agent) {
+
+        const node = this.requireNode(id);
+
+        if (node.blocked) return false;
+
+        // Ordinary circulation nodes are optimistic rendezvous points. Lanes
+        // and the physical failsafe arbitrate actual passage. Authored
+        // exclusive nodes retain their strict capacity contract.
+        if (node.exclusive) return this.reserveNode(id, agent);
+
+        node.transitReservations.add(agent);
+        return true;
+
+    }
+
+    reserveSpecificConnectionLane(fromId, toId, laneIndex, agent) {
+
+        const connection = this.requireConnection(fromId, toId);
+        const existingLane = connection.lanes.find(lane =>
+            lane.reservations.has(agent) || lane.occupants.has(agent)
+        );
+
+        if (existingLane) return existingLane.index === laneIndex
+            ? laneIndex
+            : null;
+
+        const lane = connection.lanes[laneIndex];
+        if (!lane || connection.blocked) return null;
+
+        const users = new Set([
+            ...lane.occupants,
+            ...lane.reservations
+        ]);
+        users.delete(agent);
+
+        // Interaction approaches have a physical side. Using the other lane
+        // as fallback would make the actor cross the path before departing.
+        if (users.size > 0) return null;
+
+        lane.reservations.add(agent);
+        lane.directions.set(agent, { fromId, toId });
+        connection.reservations.add(agent);
+
+        return laneIndex;
+
+    }
+
     findAvailableLaneIndex(connection, fromId, toId, agent = null) {
 
         if (connection.blocked) return null;
 
         const sameDirection = connection.fromId === fromId;
-        const preferredIndex = connection.lanes.length === 1
-            ? 0
-            : sameDirection
-                ? connection.lanes.length - 1
-                : 0;
-        const order = [preferredIndex];
+        // The project names index 0 as the right lane in the canonical
+        // direction. Reversing traversal makes index 1 the right lane.
+        const preferredIndex = sameDirection ? 0 : 1;
+        const order = [
+            preferredIndex,
+            ...connection.lanes
+                .map(lane => lane.index)
+                .filter(index => index !== preferredIndex)
+        ];
 
-        if (connection.passingAllowed) {
-
-            for (const lane of connection.lanes) {
-
-                if (!order.includes(lane.index)) order.push(lane.index);
-
-            }
-
-        }
-
+        // Both lanes are active resources. Direction only selects the first
+        // preference; any free lane may be used without overtaking logic.
         for (const index of order) {
 
             const lane = connection.lanes[index];
@@ -429,87 +479,11 @@ export class NavigationGraph {
             ]);
 
             if (agent) users.delete(agent);
-
-            if (users.size < connection.capacityPerLane) return index;
+            if (users.size === 0) return index;
 
         }
 
         return null;
-
-    }
-
-    getConnectionLaneOffset(fromId, toId, laneIndex) {
-
-        const connection = this.requireConnection(fromId, toId);
-        const center = (connection.lanes.length - 1) / 2;
-        const absoluteOffset = (laneIndex - center) * connection.laneWidth;
-        const sameDirection = connection.fromId === fromId;
-
-        // Returned in the Character visual's local x axis. Reversing traversal
-        // reverses the world-space right vector, so the sign must reverse too.
-        return sameDirection ? absoluteOffset : -absoluteOffset;
-
-    }
-
-    hasReciprocalLaneReservation(fromId, toId, agent) {
-
-        const connection = this.requireConnection(fromId, toId);
-
-        if (!connection.passingAllowed || connection.lanes.length < 2) {
-
-            return false;
-
-        }
-
-        const destination = this.requireNode(toId);
-
-        for (const occupant of destination.occupants) {
-
-            if (occupant === agent) continue;
-
-            for (const lane of connection.lanes) {
-
-                const direction = lane.directions.get(occupant);
-
-                if (direction?.fromId === toId &&
-                    direction.toId === fromId) return true;
-
-            }
-
-        }
-
-        return false;
-
-    }
-
-    getOpposingConnectionUsers(fromId, toId, agent = null) {
-
-        const connection = this.requireConnection(fromId, toId);
-        const users = [];
-
-        for (const lane of connection.lanes) {
-
-            for (const occupant of lane.occupants) {
-
-                if (occupant === agent) continue;
-
-                const direction = lane.directions.get(occupant);
-
-                if (direction?.fromId === toId && direction.toId === fromId) {
-
-                    users.push({
-                        actor: occupant,
-                        laneIndex: lane.index,
-                        direction
-                    });
-
-                }
-
-            }
-
-        }
-
-        return users;
 
     }
 
@@ -527,7 +501,12 @@ export class NavigationGraph {
         const node = this.requireNode(id);
         const occupied = this.occupyResource(node, agent);
 
-        if (occupied) node.restingAgents.delete(agent);
+        if (occupied) {
+
+            node.transitReservations.delete(agent);
+            node.restingAgents.delete(agent);
+
+        }
 
         return occupied;
 
@@ -559,8 +538,6 @@ export class NavigationGraph {
         lane.occupants.add(agent);
         connection.reservations.delete(agent);
         connection.occupants.add(agent);
-        this.activeConnections.add(connection);
-
         return true;
 
     }
@@ -581,29 +558,17 @@ export class NavigationGraph {
         const node = this.requireNode(id);
 
         node.restingAgents.delete(agent);
-        node.idleAssignments.delete(agent);
+        node.transitReservations.delete(agent);
         this.releaseResource(node, agent);
 
     }
 
-    claimNodeIdleSlot(id, agent) {
+    releaseNodeReservation(id, agent) {
 
         const node = this.requireNode(id);
-        const existing = node.idleAssignments.get(agent);
 
-        if (existing) return existing;
-
-        const slots = this.createNodeIdleSlots(node);
-        const occupiedIndices = new Set(
-            [...node.idleAssignments.values()].map(slot => slot.index)
-        );
-        const slot = slots.find(candidate =>
-            !occupiedIndices.has(candidate.index)
-        ) ?? { index: -1, x: 0, z: 0 };
-
-        node.idleAssignments.set(agent, slot);
-
-        return slot;
+        node.reservations.delete(agent);
+        node.transitReservations.delete(agent);
 
     }
 
@@ -620,48 +585,52 @@ export class NavigationGraph {
 
     }
 
-    createNodeIdleSlots(node) {
+    getConnectionLaneNodePosition(nodeId, fromId, toId, laneIndex) {
 
-        // Two default characters have a combined diameter of 0.9. Keep a
-        // small clearance so traffic on the centerline does not touch DWELL.
-        const radius = node.metadata.idleRadius ?? 1.05;
-        const clearance = node.metadata.pathClearance ?? 0.22;
-        const count = node.metadata.idleSlotCount ?? 12;
-        const slots = [];
-        const fallback = [];
+        const connection = this.requireConnection(fromId, toId);
+        const start = this.requireNode(connection.fromId).position;
+        const end = this.requireNode(connection.toId).position;
+        const deltaX = end.x - start.x;
+        const deltaZ = end.z - start.z;
+        const length = Math.hypot(deltaX, deltaZ) || 1;
+        const sideX = deltaZ / length;
+        const sideZ = -deltaX / length;
+        const center = (connection.lanes.length - 1) / 2;
+        const offset = (laneIndex - center) * connection.laneWidth;
+        const position = this.requireNode(nodeId).position.clone();
+        const travelStart = this.requireNode(fromId).position;
+        const travelEnd = this.requireNode(toId).position;
+        const travelDirection = travelEnd.clone().sub(travelStart);
+        const travelLength = travelDirection.length();
+        const configuredRadius =
+            this.requireNode(nodeId).metadata.laneRadius ?? 1.2;
+        const nodeRadius = Math.min(configuredRadius, travelLength * 0.25);
 
-        for (let index = 0; index < count; index++) {
+        if (travelLength > 0) travelDirection.divideScalar(travelLength);
 
-            const angle = (index / count) * Math.PI * 2;
-            const slot = {
-                index,
-                x: Math.cos(angle) * radius,
-                z: Math.sin(angle) * radius
-            };
+        position.x += sideX * offset;
+        position.z += sideZ * offset;
 
-            fallback.push(slot);
+        // Arrival stops before the node center; departure starts beyond it.
+        // The gap becomes the curved transition area between two connections.
+        position.addScaledVector(
+            travelDirection,
+            nodeId === fromId ? nodeRadius : -nodeRadius
+        );
 
-            const crossesPath = [...node.connections.keys()].some(neighborId => {
+        return position;
 
-                const neighbor = this.requireNode(neighborId);
-                const directionX = neighbor.position.x - node.position.x;
-                const directionZ = neighbor.position.z - node.position.z;
-                const length = Math.hypot(directionX, directionZ) || 1;
-                const distanceFromLine = Math.abs(
-                    slot.x * directionZ - slot.z * directionX
-                ) / length;
-                const pointsTowardEdge =
-                    slot.x * directionX + slot.z * directionZ > 0;
+    }
 
-                return pointsTowardEdge && distanceFromLine < clearance;
+    setActiveLaneCurve(agent, points) {
 
-            });
+        this.activeLaneCurves.set(agent, points.map(point => point.clone()));
 
-            if (!crossesPath) slots.push(slot);
+    }
 
-        }
+    clearActiveLaneCurve(agent) {
 
-        return slots.length > 0 ? slots : fallback;
+        this.activeLaneCurves.delete(agent);
 
     }
 
@@ -679,12 +648,6 @@ export class NavigationGraph {
 
         this.releaseResource(connection, agent);
 
-        if (connection.occupants.size === 0) {
-
-            this.activeConnections.delete(connection);
-
-        }
-
     }
 
     releaseResource(resource, agent) {
@@ -699,6 +662,7 @@ export class NavigationGraph {
         for (const node of this.nodes.values()) {
 
             node.reservations.delete(agent);
+            node.transitReservations.delete(agent);
 
             for (const connection of node.connections.values()) {
 
@@ -722,7 +686,7 @@ export class NavigationGraph {
         for (const node of this.nodes.values()) {
 
             node.restingAgents.delete(agent);
-            node.idleAssignments.delete(agent);
+            node.transitReservations.delete(agent);
             this.releaseResource(node, agent);
 
             for (const connection of node.connections.values()) {
@@ -736,12 +700,6 @@ export class NavigationGraph {
                 }
 
                 this.releaseResource(connection, agent);
-
-                if (connection.occupants.size === 0) {
-
-                    this.activeConnections.delete(connection);
-
-                }
 
             }
 
@@ -812,9 +770,8 @@ export class NavigationGraph {
 
         return {
             status: "waiting",
-            // Keep the unavailable waypoint so traversal can reserve its lane
-            // and wait before moving. Removing it prevents reciprocal lane
-            // intentions from ever being observed.
+            // Keep the unavailable waypoint so traversal waits immediately
+            // before the unavailable resource instead of truncating its route.
             nodeIds: directPlan.nodeIds.slice(0, unavailable.index + 2),
             fullNodeIds: directPlan.nodeIds,
             waitingFor: unavailable.resource,
@@ -831,14 +788,14 @@ export class NavigationGraph {
         if (nodes.length === 0) return null;
 
         const closest = nodes.reduce((closestNode, node) =>
-            this.getPlanarDistanceSquared(node.position, position) <
-            this.getPlanarDistanceSquared(closestNode.position, position)
+            node.position.distanceToSquared(position) <
+            closestNode.position.distanceToSquared(position)
                 ? node
                 : closestNode
         );
 
         const isInsideSelectionRadius =
-            this.getPlanarDistanceSquared(closest.position, position) <=
+            closest.position.distanceToSquared(position) <=
             this.selectionRadius * this.selectionRadius;
 
         return isInsideSelectionRadius ? closest : null;
@@ -927,20 +884,28 @@ export class NavigationGraph {
                 const neighbor = this.requireNode(neighborId);
 
                 if (connection.blocked || neighbor.blocked) continue;
+                if (!this.canAgentTraverseConnection(connection, agent)) {
+
+                    continue;
+
+                }
 
                 if (
                     avoidOccupied &&
                     (
-                        !this.isResourceAvailable(connection, agent) ||
+                        !this.isConnectionAvailable(
+                            currentId,
+                            neighborId,
+                            agent
+                        ) ||
                         !this.isNodeAvailable(neighbor.id, agent)
                     )
                 ) continue;
 
+                // Route cost is spatial: climbing is real distance even though
+                // body rotation and crowd circles remain projected onto XZ.
                 const cost = distances.get(currentId) +
-                    Math.sqrt(this.getPlanarDistanceSquared(
-                        current.position,
-                        neighbor.position
-                    ));
+                    current.position.distanceTo(neighbor.position);
 
                 if (cost >= (distances.get(neighborId) ?? Infinity)) continue;
 
@@ -993,6 +958,31 @@ export class NavigationGraph {
         const deltaZ = first.z - second.z;
 
         return deltaX * deltaX + deltaZ * deltaZ;
+
+    }
+
+    canAgentTraverseConnection(connection, agent = null) {
+
+        if (!agent) return true;
+
+        const capabilities = agent.navigationCapabilities ?? {};
+        const traversal = connection.metadata.traversal ?? "flat";
+
+        if (traversal === "stairs" && capabilities.stairs === false) {
+
+            return false;
+
+        }
+
+        if (traversal === "slope" &&
+            Number.isFinite(capabilities.maxSlope) &&
+            connection.metadata.slopeAngle > capabilities.maxSlope) {
+
+            return false;
+
+        }
+
+        return true;
 
     }
 

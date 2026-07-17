@@ -25,7 +25,7 @@ export class Cube extends Entity {
 
         );
 
-        this.object3D.position.set(-2, 0.5, 0);
+        this.object3D.position.set(-3, 0.5, 0);
 
         this.object3D.castShadow = true;
 

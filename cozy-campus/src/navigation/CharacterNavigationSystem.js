@@ -4,19 +4,31 @@ import { Tween } from "../core/Tween";
 import { NavigationNodeMode } from "./NavigationNodeMode";
 import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
 import { InteractionNavigation } from "./InteractionNavigation";
+import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
+import { CharacterCollisionSolver } from "./CharacterCollisionSolver";
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
 
-    constructor({ graph, connector, helper, onChanged = null }) {
+    constructor({
+        graph,
+        connector,
+        dwellSpots,
+        helper,
+        onChanged = null
+    }) {
 
         this.graph = graph;
         this.connector = connector;
+        this.dwellSpots = dwellSpots;
         this.helper = helper;
         this.onChanged = onChanged;
         this.contexts = new Map();
         this.traffic = new NavigationTrafficSystem(this);
         this.interactions = new InteractionNavigation(this);
+        this.collisionFailsafe = new CharacterCollisionFailsafe(this);
+        this.collisionSolver = new CharacterCollisionSolver(this);
+        this.grounding = null;
 
     }
 
@@ -36,16 +48,37 @@ export class CharacterNavigationSystem {
             interactionPoint: null,
             activeInteraction: null,
             preparingInteraction: false,
+            preparingInteractionExit: false,
+            preparingDwellEntry: false,
+            preparingDwellExit: false,
+            dwellExitReady: false,
             retryElapsed: 0,
             blockedElapsed: null,
             blockedTimeout: 3,
             recoveryPending: false,
-            pendingIdleSlot: null,
-            pendingIdleNodeId: null,
-            idleDelayRemaining: 0,
-            centeringForDeparture: false,
+            dwellSpot: null,
+            dwellSearchInProgress: false,
+            dwellSearchSpot: null,
+            traversingLaneCurve: false,
+            traversingInteractionCurve: false,
+            traversingDwellCurve: false,
+            transitTangent: null,
+            arrivalFromNodeId: null,
             nodeMode: NavigationNodeMode.DWELL,
-            clearanceRequesters: new Set()
+            currentTraversal: "flat",
+            deferredCommand: null,
+            turningAround: false,
+            turnaroundElapsed: 0,
+            turnaroundDuration: 0.35,
+            recoveryElapsed: 0,
+            recoveryTimeout: 3,
+            recoveryPosition: actor.object3D.position.clone(),
+            orphanedElapsed: 0,
+            queueWaitElapsed: 0,
+            queueWaitTimeout: 2,
+            pendingParkNodeId: null,
+            congestionEscaping: false,
+            congestionAttempts: 0
         };
 
         this.contexts.set(actor, context);
@@ -53,8 +86,8 @@ export class CharacterNavigationSystem {
         actor.setWaypointReachedHandler((waypoint, completedConnection) =>
             this.handleWaypointReached(context, waypoint, completedConnection)
         );
-        actor.setSegmentRequestedHandler((fromId, toId) =>
-            this.tryStartConnection(actor, fromId, toId)
+        actor.setSegmentRequestedHandler((fromId, toId, waypoint) =>
+            this.tryStartConnection(actor, fromId, toId, waypoint)
         );
         actor.setLocalPointRequestedHandler(point => {
 
@@ -70,17 +103,31 @@ export class CharacterNavigationSystem {
             return reserved;
 
         });
-        actor.setLocalConnectionRequestedHandler(entry =>
-            this.tryEnterConnectionFromInteraction(actor, entry)
+        actor.setLocalConnectionRequestedHandler((entry, waypoint) =>
+            this.tryEnterConnectionFromInteraction(actor, entry, waypoint)
+        );
+        actor.setDepartureRequestedHandler((request, waypoint) =>
+            request.originId
+                ? this.traffic.tryLeaveNodeForInteraction(
+                    actor,
+                    request.originId,
+                    waypoint,
+                    request.transitionTarget
+                )
+                : this.traffic.tryExitConnectionForInteraction(actor)
         );
         actor.setNavigationCancelledHandler(() => {
 
             this.graph.releaseReservations(actor);
             this.connector.releaseReservations(actor);
-            this.releaseClearanceRequests(actor);
+            this.traffic.cancel(actor);
             this.refresh();
 
         });
+        actor.setMovementGuard((target, delta) =>
+            this.collisionFailsafe.canMove(actor, target, delta)
+        );
+        this.collisionSolver.register(actor);
 
         if (spawnId) this.placeActorAtNode(actor, spawnId);
 
@@ -94,10 +141,13 @@ export class CharacterNavigationSystem {
         if (!context) return;
 
         this.graph.releaseAgent(actor);
-        this.releaseClearanceRequests(actor);
         this.finishActiveInteraction(context);
         this.connector.releaseAgent(actor);
+        this.dwellSpots.releaseActor(actor);
         this.traffic.unregister(actor);
+        this.collisionFailsafe.unregister(actor);
+        this.collisionSolver.unregister(actor);
+        actor.setMovementGuard(null);
         this.contexts.delete(actor);
         this.refresh();
 
@@ -131,29 +181,104 @@ export class CharacterNavigationSystem {
     // Commands
     // -----------------------------
 
-    moveToClosestNode(actor, position) {
+    moveToClosestNode(actor, position, {
+        replaceIntent = true,
+        skipTurnaround = false,
+        skipInteractionExit = false,
+        maxDetourFactor = 1.5
+    } = {}) {
 
         const context = this.requireContext(actor);
 
-        if (context.clearanceRequesters.size > 0) return false;
+        if (replaceIntent) this.cancelDwellSearch(context);
 
-        const candidate = this.findBestPlan(context, position);
+        // Store the command before planning. Traffic, a temporary occupation
+        // or even the absence of a route may reject this attempt, but they do
+        // not mean that the actor stopped wanting to reach this position.
+        if (actor.navigationIntentPolicy === "persistent") {
+
+            context.pendingPosition = position.clone();
+            context.pendingInteraction = null;
+            context.destinationId = null;
+            context.retryElapsed = 0;
+
+        }
+
+        if (context.turningAround) {
+
+            context.deferredCommand = {
+                type: "node",
+                position: position.clone()
+            };
+            return true;
+
+        }
+
+        const candidate = this.findBestPlan(
+            context,
+            position,
+            maxDetourFactor
+        );
 
         if (!candidate) {
 
             console.log(`[Navigation] No reachable node for ${actor.name}.`);
+            this.deferPersistentIntent(context);
             return false;
 
         }
 
+        const originIndex = candidate.plan.nodeIds.indexOf(
+            candidate.originId
+        );
+        const nextNodeId = candidate.plan.nodeIds[originIndex + 1] ?? null;
+
+        if (!skipInteractionExit && context.activeInteraction) {
+
+            this.beginInteractionExit(context, {
+                type: "node",
+                position: position.clone()
+            });
+            return true;
+
+        }
+        if (!skipTurnaround && this.shouldTurnAround(actor, position)) {
+
+            if (replaceIntent) {
+
+                this.traffic.cancel(actor);
+                this.connector.releaseReservations(actor);
+
+            }
+
+            if (!this.traffic.preflightDeparture(
+                actor,
+                candidate.originId,
+                nextNodeId
+            )) {
+
+                this.deferPersistentIntent(context);
+                return false;
+
+            }
+
+            this.beginTurnaround(context, {
+                type: "node",
+                position: position.clone(),
+                intentPrepared: true
+            });
+            return true;
+
+        }
+
+        if (replaceIntent) this.traffic.cancel(actor);
+
         context.pendingPosition = position.clone();
-        context.nodeMode = NavigationNodeMode.TRANSIT;
         context.pendingInteraction = null;
         context.destinationId = candidate.plan.destinationId;
         context.retryElapsed = 0;
         context.blockedElapsed = null;
         context.recoveryPending = false;
-        this.cancelPendingParking(context);
         this.prepareOrigin(context, candidate.originId);
 
         const waypoints = [
@@ -189,19 +314,107 @@ export class CharacterNavigationSystem {
 
     }
 
-    moveToInteractionPoint(actor, point, onArrive = null) {
+    moveToInteractionPoint(actor, point, onArrive = null, {
+        replaceIntent = true,
+        skipTurnaround = false,
+        skipInteractionExit = false
+    } = {}) {
 
         const context = this.requireContext(actor);
 
-        if (context.clearanceRequesters.size > 0 ||
-            !point.accessible ||
-            !this.connector.connect(point)) return false;
+        if (replaceIntent) this.cancelDwellSearch(context);
+
+        // Pointer commands must survive failed preflight checks. The queue may
+        // suspend this interaction, but only a newer Player command replaces it.
+        if (actor.navigationIntentPolicy === "persistent") {
+
+            context.pendingPosition = null;
+            context.pendingInteraction = { point, onArrive };
+            context.destinationId = null;
+            context.retryElapsed = 0;
+
+        }
+
+        if (context.turningAround) {
+
+            context.deferredCommand = {
+                type: "interaction",
+                point,
+                onArrive
+            };
+            return true;
+
+        }
+
+        if (!point.accessible || !this.connector.connect(point)) {
+
+            this.deferPersistentIntent(context);
+            return false;
+
+        }
+
+        const preflight = this.findInteractionPreflight(context, point);
+
+        if (!preflight) {
+
+            this.deferPersistentIntent(context);
+            return false;
+
+        }
+
+        if (!skipInteractionExit &&
+            context.activeInteraction &&
+            context.activeInteraction.point !== point) {
+
+            this.beginInteractionExit(context, {
+                type: "interaction",
+                point,
+                onArrive
+            });
+            return true;
+
+        }
+
+        if (!skipTurnaround &&
+            this.shouldTurnAround(actor, point.getWorldPosition())) {
+
+            if (replaceIntent) {
+
+                this.traffic.cancel(actor);
+                this.connector.releaseReservations(actor);
+
+            }
+
+            if (!this.traffic.preflightDeparture(
+                actor,
+                preflight.originId,
+                preflight.nextNodeId
+            )) {
+
+                this.deferPersistentIntent(context);
+                return false;
+
+            }
+
+            this.beginTurnaround(context, {
+                type: "interaction",
+                point,
+                onArrive,
+                intentPrepared: true
+            });
+            return true;
+
+        }
+
+        if (replaceIntent) this.traffic.cancel(actor);
 
         const directRoute = this.interactions.createDirectConnectionRoute(actor, point);
 
         if (directRoute) {
 
             if (!this.connector.reserveRoutePoints(directRoute, actor)) {
+
+                this.deferPersistentIntent(context);
                 return false;
             }
 
@@ -220,11 +433,18 @@ export class CharacterNavigationSystem {
             }))
             .filter(candidate => candidate.route);
 
-        if (routes.length === 0) return false;
+        if (routes.length === 0) {
+
+            this.deferPersistentIntent(context);
+            return false;
+
+        }
 
         const candidate = routes[0];
 
         if (!this.connector.reserveRoutePoints(candidate.route, actor)) {
+
+            this.deferPersistentIntent(context);
             return false;
         }
 
@@ -247,7 +467,71 @@ export class CharacterNavigationSystem {
     // Planning
     // -----------------------------
 
-    findBestPlan(context, position) {
+    findInteractionPreflight(context, point) {
+
+        const accessPoint = point.via ?? point;
+        const access = this.connector.connect(accessPoint);
+
+        if (!access) return null;
+
+        const traversal = context.actor.navigation.getTraversalState();
+        let originIds = [];
+
+        if (context.interactionPoint) {
+
+            const currentAccess = this.connector.connect(
+                context.interactionPoint.via ?? context.interactionPoint
+            );
+
+            originIds = currentAccess?.nodeIds ?? [];
+
+        } else if (traversal.currentNodeId) {
+
+            originIds = [traversal.currentNodeId];
+
+        } else if (traversal.currentConnection) {
+
+            originIds = [
+                traversal.currentConnection.fromId,
+                traversal.currentConnection.toId
+            ];
+
+        }
+
+        const candidates = [];
+
+        for (const originId of originIds) {
+
+            if (this.graph.isNodeBlocked(originId)) continue;
+
+            for (const endpointId of access.nodeIds) {
+
+                const path = this.graph.findShortestPath(
+                    originId,
+                    endpointId,
+                    { agent: context.actor, avoidOccupied: false }
+                );
+
+                if (path) candidates.push({ originId, path });
+
+            }
+
+        }
+
+        if (candidates.length === 0) return null;
+
+        const selected = candidates.reduce((best, candidate) =>
+            candidate.path.cost < best.path.cost ? candidate : best
+        );
+
+        return {
+            originId: selected.originId,
+            nextNodeId: selected.path.nodeIds[1] ?? null
+        };
+
+    }
+
+    findBestPlan(context, position, maxDetourFactor = 1.5) {
 
         const candidates = this.getOrigins(context)
             .map(origin => ({
@@ -256,7 +540,8 @@ export class CharacterNavigationSystem {
                 plan: this.graph.planClosestPath(
                     origin.id,
                     position,
-                    context.actor
+                    context.actor,
+                    { maxDetourFactor }
                 )
             }))
             .filter(candidate => candidate.plan.status !== "unreachable");
@@ -282,7 +567,10 @@ export class CharacterNavigationSystem {
             if (!connection) return [];
 
             return connection.nodeIds
-                .filter(id => this.graph.isNodeAvailable(id, actor))
+                // Occupancy is temporary and must not force an interaction
+                // exit through the opposite endpoint. Planning keeps the
+                // intended endpoint and traffic waits at approach if needed.
+                .filter(id => !this.graph.isNodeBlocked(id))
                 .map(id => ({
                     id,
                     accessCost: Math.sqrt(
@@ -369,15 +657,39 @@ export class CharacterNavigationSystem {
     // Traffic facade
     // -----------------------------
 
-    tryStartConnection(actor, fromId, toId) {
+    tryStartConnection(actor, fromId, toId, waypoint = null) {
 
-        return this.traffic.tryStartConnection(actor, fromId, toId);
+        return this.traffic.tryStartConnection(
+            actor,
+            fromId,
+            toId,
+            waypoint
+        );
 
     }
 
-    tryEnterConnectionFromInteraction(actor, entry) {
+    rejectInvalidSegment(actor, fromId, toId) {
 
-        return this.traffic.tryEnterFromInteraction(actor, entry);
+        const context = this.requireContext(actor);
+
+        console.log(
+            `[Navigation] ${actor.name} discarded stale segment ` +
+            `"${fromId}" -> "${toId}".`
+        );
+
+        actor.cancel();
+        actor.setState(EntityState.WAITING);
+        context.retryElapsed = 0;
+
+        // pendingPosition/pendingInteraction remain intact. The normal retry
+        // cycle will build a fresh route from the actor's real current node.
+        this.refresh();
+
+    }
+
+    tryEnterConnectionFromInteraction(actor, entry, waypoint = null) {
+
+        return this.traffic.tryEnterFromInteraction(actor, entry, waypoint);
 
     }
 
@@ -385,7 +697,27 @@ export class CharacterNavigationSystem {
 
         const { actor } = context;
 
+        if (waypoint.dwellSpotArrival) {
+
+            this.finishDwellApproach(context, waypoint.dwellSpotArrival);
+            return;
+
+        }
+
         if (this.interactions.handleWaypoint(context, waypoint)) return;
+
+        if (waypoint.congestionEscape) {
+
+            context.congestionEscaping = false;
+            console.log(
+                `[NavigationCongestion] ${actor.name} created local space ` +
+                `and replans its preserved intent.`
+            );
+            this.retryPreservedIntent(context, { maxDetourFactor: Infinity });
+            return;
+
+        }
+
         if (!waypoint.id) return;
 
         if (context.interactionPoint) {
@@ -394,7 +726,33 @@ export class CharacterNavigationSystem {
 
         }
 
+        const isFinalRouteWaypoint =
+            actor.navigation.getNextWaypoint() === null;
+        const reachedDestination =
+            waypoint.id === context.destinationId ||
+            (
+                isFinalRouteWaypoint &&
+                context.pendingPosition !== null &&
+                context.pendingInteraction === null
+            );
+
+        if (reachedDestination && waypoint.id !== context.destinationId) {
+
+            console.log(
+                `[NavigationRecovery] ${actor.name} treats final waypoint ` +
+                `"${waypoint.id}" as its destination after intent ` +
+                `synchronization was lost.`
+            );
+
+        }
+
         if (completedConnection) {
+
+            context.traversingLaneCurve = false;
+            this.graph.clearActiveLaneCurve(actor);
+            context.arrivalFromNodeId = completedConnection.fromId;
+            context.currentTraversal = "flat";
+            actor.traversalType = "flat";
 
             this.graph.releaseConnection(
                 completedConnection.fromId,
@@ -402,7 +760,9 @@ export class CharacterNavigationSystem {
                 actor
             );
 
-            if (actor.visual && Math.abs(actor.visual.position.x) > 0.001) {
+            if (reachedDestination &&
+                actor.visual &&
+                Math.abs(actor.visual.position.x) > 0.001) {
 
                 AnimationPresets.to(actor, {
                     object: actor.visual.position,
@@ -416,25 +776,50 @@ export class CharacterNavigationSystem {
 
         }
 
-        this.graph.occupyNode(waypoint.id, actor);
-        this.releaseClearanceRequests(actor, waypoint.id);
+        if (!this.graph.occupyNode(waypoint.id, actor)) {
 
-        if (waypoint.id === context.destinationId) {
+            actor.setState(EntityState.WAITING);
+            console.log(
+                `[NavigationReservation] ${actor.name} reached ` +
+                `"${waypoint.id}" but waits for its reservation to become ` +
+                `occupiable.`
+            );
+            this.refresh();
+            return false;
+
+        }
+
+        if (reachedDestination) {
 
             context.pendingPosition = null;
             context.destinationId = null;
             context.nodeMode = NavigationNodeMode.DWELL;
-            context.clearanceRequesters.clear();
             actor.setState(EntityState.STOPPING);
-            this.parkActorAtNode(context, waypoint.id);
+
+            if (this.graph.hasOtherNodeCommitments(waypoint.id, actor)) {
+
+                context.pendingParkNodeId = waypoint.id;
+                actor.setState(EntityState.WAITING);
+                console.log(
+                    `[DwellSpot] ${actor.name} postpones resting at ` +
+                    `"${waypoint.id}" while transit is reserved.`
+                );
+
+            } else {
+
+                this.parkActorAtNode(context, waypoint.id);
+
+            }
 
         } else {
 
             context.nodeMode = NavigationNodeMode.TRANSIT;
+            actor.setState(EntityState.WALKING);
 
         }
 
         console.log(`[Navigation] ${actor.name} passed: ${waypoint.id}`);
+        context.congestionAttempts = 0;
         this.refresh();
 
     }
@@ -445,117 +830,439 @@ export class CharacterNavigationSystem {
 
         if (!actor.visual) return;
 
-        const node = this.graph.requireNode(nodeId);
-        const slot = this.graph.claimNodeIdleSlot(nodeId, actor);
-        const worldPosition = node.position.clone().add(
-            new THREE.Vector3(slot.x, 0, slot.z)
-        );
+        // Reaching a graph-node waypoint proves that an older dwell curve is
+        // no longer the active route. This can happen when a command replaces
+        // a curve while collision avoidance has it suspended.
+        if (context.traversingDwellCurve &&
+            actor.navigation.getCurrentWaypoint()?.id === nodeId) {
 
-        if (immediate) {
-
-            actor.object3D.position.x = worldPosition.x;
-            actor.object3D.position.z = worldPosition.z;
-            return;
+            console.log(
+                `[NavigationRecovery] ${actor.name} clears a stale dwell ` +
+                `curve at "${nodeId}".`
+            );
+            context.traversingDwellCurve = false;
+            this.graph.clearActiveLaneCurve(actor);
 
         }
 
-        // Reaching a node and stepping aside are different visual actions.
-        // Waiting here prevents the side-step from blending into locomotion.
-        context.pendingIdleSlot = worldPosition;
-        context.pendingIdleNodeId = nodeId;
-        context.idleDelayRemaining = 5;
+        if (context.dwellSearchInProgress ||
+            context.traversingDwellCurve ||
+            context.preparingDwellEntry ||
+            context.preparingDwellExit) return true;
+
+        let spot = context.dwellSpot;
+
+        if (!spot || spot.nodeId !== nodeId || !spot.isAvailable(actor)) {
+
+            const localSpot = this.dwellSpots.findAvailableAtNode(
+                nodeId,
+                actor
+            );
+
+            if (localSpot && this.reserveDwellDestination(localSpot, actor)) {
+
+                spot = localSpot;
+                context.dwellSpot = spot;
+
+            } else if (actor.canDwellWithoutSpot) {
+
+                // Player override: remaining at the node is intentional. The
+                // actor stays a normal, impassable DWELL occupant until their
+                // controller provides another command.
+                context.dwellSpot = null;
+                actor.setState(EntityState.DWELLING);
+                console.log(
+                    `[DwellSpot] ${actor.name} remains at "${nodeId}" ` +
+                    `without a dwell spot (override).`
+                );
+                return true;
+
+            } else {
+
+                const candidate = this.dwellSpots.findNearestAvailable(
+                    nodeId,
+                    actor
+                );
+
+                if (!candidate ||
+                    !this.reserveDwellDestination(candidate.spot, actor)) {
+
+                    actor.setState(EntityState.WAITING);
+                    console.log(
+                        `[DwellSpot] No reachable free spot for ${actor.name}.`
+                    );
+                    return false;
+
+                }
+
+                spot = candidate.spot;
+                context.dwellSpot = spot;
+
+                if (spot.nodeId !== nodeId) {
+
+                    this.beginDwellSearch(
+                        context,
+                        nodeId,
+                        spot,
+                        candidate.path
+                    );
+                    return true;
+
+                }
+
+            }
+
+        }
+
+        const worldPosition = spot.position;
+
+        if (immediate) {
+
+            this.dwellSpots.occupy(spot, actor);
+            actor.object3D.position.x = worldPosition.x;
+            actor.object3D.position.z = worldPosition.z;
+            this.orientActor(actor, spot.getDirection());
+            this.graph.setNodeAgentResting(nodeId, actor, true);
+            return true;
+
+        }
+
+        this.beginDwellApproach(context, nodeId, spot);
+
+        return true;
 
     }
 
-    applyPendingParking(context) {
+    beginDwellApproach(context, nodeId, spot) {
 
-        const { actor, pendingIdleSlot, pendingIdleNodeId } = context;
+        const { actor } = context;
+        const start = actor.object3D.position.clone();
+        const arrivalDirection = spot.getDirection();
+        const storedTangent = context.transitTangent;
+        const nodePosition = this.graph.requireNode(nodeId).position;
+        const previousPosition = context.arrivalFromNodeId &&
+            this.graph.hasNode(context.arrivalFromNodeId)
+            ? this.graph.requireNode(context.arrivalFromNodeId).position
+            : null;
+        const departureDirection = storedTangent?.nodeId === nodeId
+            ? storedTangent.direction
+            : previousPosition
+                ? this.traffic.createPositionTangent(
+                    previousPosition,
+                    nodePosition,
+                    spot.position
+                )
+                : null;
+        const curve = this.traffic.createLaneCurveWaypoints(
+            start,
+            nodePosition,
+            spot.position,
+            12,
+            { departureDirection, arrivalDirection }
+        );
+        const destination = {
+            id: null,
+            position: spot.position.clone(),
+            dwellSpotArrival: spot,
+            arrivalDirection: spot.getDirection()
+        };
 
-        if (!pendingIdleSlot) return;
+        context.traversingDwellCurve = true;
+        context.transitTangent = null;
+        context.arrivalFromNodeId = null;
+        this.graph.setActiveLaneCurve(actor, [
+            start,
+            ...curve.map(waypoint => waypoint.position),
+            spot.position
+        ]);
 
-        // Resting is a real world-space displacement. Navigation still owns the
-        // logical node, while object3D moves physically outside its crossing.
-        AnimationPresets.to(actor, {
-            object: actor.object3D.position,
-            property: "x",
-            to: pendingIdleSlot.x,
-            duration: 0.8,
-            easing: Tween.easeInOutQuad
+        // This is real locomotion, not a transform tween: the character turns,
+        // walks along the curve and may later use the same path with bone clips.
+        actor.followWaypoints([...curve, destination]);
+        this.refresh();
+
+    }
+
+    finishDwellApproach(context, spot) {
+
+        const { actor } = context;
+
+        context.traversingDwellCurve = false;
+        this.graph.clearActiveLaneCurve(actor);
+
+        // Dwell begins at physical arrival, before its entry animation. From
+        // this instant the spot is occupied and the node is resting/passable.
+        this.dwellSpots.occupy(spot, actor);
+        this.graph.releaseNodeReservation(spot.nodeId, actor);
+        this.graph.setNodeAgentResting(spot.nodeId, actor, true);
+        actor.setState(EntityState.DWELLING);
+        context.preparingDwellEntry = true;
+
+        actor.performDwellEntry(spot, () => {
+
+            if (!context.preparingDwellEntry ||
+                context.dwellSpot !== spot) return;
+
+            context.preparingDwellEntry = false;
+            this.refresh();
+
         });
-        AnimationPresets.to(actor, {
-            object: actor.object3D.position,
-            property: "z",
-            to: pendingIdleSlot.z,
-            duration: 0.8,
-            easing: Tween.easeInOutQuad,
+
+        // Do not snap rotation here. The last Bézier tangent already follows
+        // spot.getDirection(), so Locomotion progressively aligns the actor
+        // before arrival. This point is the preparation mark from which a
+        // future stand/lean/idle bone animation will start smoothly.
+        this.refresh();
+
+    }
+
+    setGrounding(grounding) {
+
+        this.grounding = grounding;
+
+    }
+
+    projectWaypointsToGround(waypoints, options = {}) {
+
+        if (!this.grounding) return waypoints;
+
+        for (const waypoint of waypoints) {
+
+            if (!waypoint.airborne) {
+
+                this.grounding.projectPosition(
+                    waypoint.position,
+                    1,
+                    options
+                );
+
+            }
+
+        }
+
+        return waypoints;
+
+    }
+
+    prepareDwellExit(context) {
+
+        const { actor, dwellSpot } = context;
+
+        if (!dwellSpot || dwellSpot.occupant !== actor) return true;
+        if (context.dwellExitReady) return true;
+        if (context.preparingDwellExit) return false;
+
+        context.preparingDwellExit = true;
+        actor.pause();
+        actor.performDwellExit(dwellSpot, () => {
+
+            if (!context.preparingDwellExit) return;
+
+            // The future visual clip finishes facing outward. At onComplete,
+            // hand that exact 180° pose to the logical root, then end dwell.
+            this.orientActor(actor, dwellSpot.getDirection().negate());
+            context.preparingDwellExit = false;
+            context.dwellExitReady = true;
+            actor.resume();
+            this.refresh();
+
+        });
+
+        return false;
+
+    }
+
+    orientActor(actor, direction) {
+
+        // Helper and actor consume this exact same world-space vector. Do not
+        // reconstruct an Euler angle here: lookAt keeps the +Z convention used
+        // by Locomotion and removes ambiguity around arrival direction.
+        actor.object3D.lookAt(
+            actor.object3D.position.x + direction.x,
+            actor.object3D.position.y,
+            actor.object3D.position.z + direction.z
+        );
+
+    }
+
+    recoverAfterCollisionDisplacement(actor) {
+
+        const context = this.requireContext(actor);
+        const remaining = actor.navigation.getRemainingWaypoints();
+
+        if (remaining.length === 0) return false;
+
+        // Bézier samples have no semantic ownership. Keep the first waypoint
+        // that actually means node/interaction/transition/dwell and everything
+        // after it; only the obsolete local samples leading there are rebuilt.
+        const targetIndex = remaining.findIndex(waypoint =>
+            waypoint.id ||
+            waypoint.interactionPoint ||
+            waypoint.dwellSpotArrival ||
+            waypoint.departureRequest ||
+            waypoint.connectionEntry ||
+            waypoint.leavingGraph ||
+            waypoint.leavingInteraction
+        );
+
+        if (targetIndex < 0) return false;
+
+        const target = remaining[targetIndex];
+        const start = actor.object3D.position.clone();
+        const staleSamples = remaining.slice(0, targetIndex);
+        const lastStalePosition = staleSamples.at(-1)?.position;
+        const arrivalDirection = lastStalePosition
+            ? target.position.clone().sub(lastStalePosition).setY(0)
+            : target.arrivalDirection?.clone() ?? null;
+        const departureDirection = new THREE.Vector3(0, 0, 1)
+            .applyQuaternion(actor.object3D.quaternion)
+            .setY(0)
+            .normalize();
+        const midpoint = start.clone().lerp(target.position, 0.5);
+        const curve = this.traffic.createLaneCurveWaypoints(
+            start,
+            midpoint,
+            target.position,
+            10,
+            {
+                departureDirection,
+                arrivalDirection: arrivalDirection?.lengthSq() > 0.0001
+                    ? arrivalDirection.normalize()
+                    : null
+            }
+        );
+
+        actor.navigation.replaceRemainingWaypoints([
+            ...curve,
+            target,
+            ...remaining.slice(targetIndex + 1)
+        ]);
+        const belongsToSpecialCurve =
+            context.traversingInteractionCurve ||
+            context.traversingDwellCurve;
+
+        context.traversingLaneCurve =
+            !belongsToSpecialCurve && curve.length > 0;
+        this.graph.setActiveLaneCurve(actor, [
+            start,
+            ...curve.map(waypoint => waypoint.position),
+            target.position
+        ]);
+        console.log(
+            `[CollisionRecovery] ${actor.name} rebuilds ${curve.length} ` +
+            `Bézier samples toward ` +
+            `"${target.id ?? target.interactionPoint?.id ?? "local target"}".`
+        );
+        this.refresh();
+        return true;
+
+    }
+
+    recoverDisplacedDwellActor(actor) {
+
+        const context = this.requireContext(actor);
+        const spot = context.dwellSpot;
+
+        if (!spot || spot.occupant !== actor ||
+            actor.navigation.hasPath() ||
+            context.preparingDwellExit ||
+            context.dwellExitReady ||
+            context.traversingDwellCurve) return false;
+
+        const distance = actor.object3D.position.distanceTo(spot.position);
+
+        if (distance < 0.08) return false;
+
+        console.warn(
+            `[DwellRecovery] ${actor.name} was displaced ${distance.toFixed(2)} ` +
+            `from "${spot.id}" and returns to it.`
+        );
+        this.graph.setNodeAgentResting(spot.nodeId, actor, false);
+        this.beginDwellApproach(context, spot.nodeId, spot);
+        return true;
+
+    }
+
+    reserveDwellDestination(spot, actor) {
+
+        // Spot and node form a single destination contract. Claiming only the
+        // spot could send an actor toward a node that it did not reserve.
+        const traversal = actor.navigation.getTraversalState();
+        const alreadyOccupiesNode =
+            traversal.currentNodeId === spot.nodeId &&
+            this.graph.getNodeOccupants(spot.nodeId).includes(actor);
+
+        // Occupancy already grants ownership. Adding a reservation for the
+        // same actor here would remain after parking and keep the resting node
+        // incorrectly marked as impassable.
+        if (!alreadyOccupiesNode &&
+            !this.graph.reserveNode(spot.nodeId, actor)) return false;
+
+        if (this.dwellSpots.reserve(spot, actor)) return true;
+
+        if (!alreadyOccupiesNode) {
+
+            this.graph.releaseNodeReservation(spot.nodeId, actor);
+
+        }
+        return false;
+
+    }
+
+    beginDwellSearch(context, nodeId, spot, path) {
+
+        const { actor } = context;
+
+        context.dwellSearchInProgress = true;
+        context.dwellSearchSpot = spot;
+        actor.setState(EntityState.WAITING);
+
+        actor.performDwellSpotSearch({
+            nodeId,
+            spot,
             onComplete: () => {
 
-                // The crossing becomes passable only when the visible actor
-                // has actually finished stepping out of it.
-                this.graph.setNodeAgentResting(
-                    pendingIdleNodeId,
-                    actor,
-                    true
+                if (!context.dwellSearchInProgress ||
+                    context.dwellSearchSpot !== spot ||
+                    spot.reservedBy !== actor) return;
+
+                context.dwellSearchInProgress = false;
+                context.dwellSearchSpot = null;
+                context.destinationId = spot.nodeId;
+                // Internal retries target the graph node, not the authored
+                // spot offset. Using spot.position here incorrectly applies
+                // the Floor click selectionRadius and may report that no node
+                // is reachable even though the reserved spot has a valid path.
+                context.pendingPosition = this.graph
+                    .requireNode(spot.nodeId)
+                    .position.clone();
+                context.nodeMode = NavigationNodeMode.TRANSIT;
+                actor.followWaypoints(
+                    this.graph.createWaypoints(path.nodeIds.slice(1))
                 );
-                actor.setState(EntityState.DWELLING);
+                console.log(
+                    `[DwellSpot] ${actor.name} seeks "${spot.id}" at ` +
+                    `"${spot.nodeId}".`
+                );
                 this.refresh();
 
             }
         });
 
-        context.pendingIdleSlot = null;
-        context.pendingIdleNodeId = null;
-
     }
 
-    cancelPendingParking(context) {
+    cancelDwellSearch(context) {
 
-        context.pendingIdleSlot = null;
-        context.pendingIdleNodeId = null;
-        context.idleDelayRemaining = 0;
+        if (!context.dwellSearchInProgress) return;
 
-    }
-
-    requestImmediateNodeClearance(nodeId, requestingActor) {
-
-        for (const occupant of this.graph.getNodeOccupants(nodeId)) {
-
-            if (occupant === requestingActor) continue;
-
-            const context = this.contexts.get(occupant);
-
-            // Someone is trying to pass through this actor's destination.
-            // Skip the normal dwell delay and step aside immediately.
-            if (context?.nodeMode !== NavigationNodeMode.DWELL) continue;
-
-            if (!context.clearanceRequesters.has(requestingActor)) {
-
-                context.clearanceRequesters.add(requestingActor);
-                this.onDwellClearanceRequested(
-                    occupant,
-                    requestingActor,
-                    nodeId
-                );
-
-            }
-
-            if (!context.pendingIdleSlot) continue;
-
-            context.idleDelayRemaining = 0;
-            this.applyPendingParking(context);
-
-        }
-
-    }
-
-    onDwellClearanceRequested(dwellActor, transitActor, nodeId) {
-
-        // Future animation hook: look back, acknowledge the approaching actor
-        // and perform a deliberate side-step before yielding the route.
-        console.log(
-            `[Navigation] ${dwellActor.name} yields node "${nodeId}" ` +
-            `to ${transitActor.name}.`
+        context.actor.cancelTweens(
+            context.actor.object3D.rotation,
+            ["y"]
         );
+        this.dwellSpots.releaseReservations(context.actor);
+        context.dwellSpot = null;
+        context.dwellSearchInProgress = false;
+        context.dwellSearchSpot = null;
 
     }
 
@@ -573,13 +1280,10 @@ export class CharacterNavigationSystem {
 
         }
 
-        this.cancelPendingParking(context);
-
         // object3D already occupies the resting spot in world space. Once the
         // route is authorized, Locomotion moves directly from there to the next
         // graph node and owns all turning; no visual recentering is necessary.
         actor.cancelTweens(actor.object3D.position, ["x", "z"]);
-        context.centeringForDeparture = false;
         return true;
 
     }
@@ -616,28 +1320,192 @@ export class CharacterNavigationSystem {
 
     }
 
+    beginInteractionExit(context, command) {
+
+        if (context.preparingInteractionExit) return;
+
+        const interaction = context.activeInteraction;
+        const approachPoint = interaction.point.via ?? interaction.point;
+
+        context.preparingInteractionExit = true;
+        context.deferredCommand = command;
+        context.actor.pause();
+
+        interaction.target?.prepareInteractionExit(
+            context.actor,
+            interaction.point,
+            approachPoint,
+            () => {
+
+                if (!context.preparingInteractionExit) return;
+
+                context.preparingInteractionExit = false;
+                this.executeDeferredCommand(context, {
+                    skipInteractionExit: true
+                });
+
+            }
+        );
+
+    }
+
+    shouldTurnAround(actor, requestedPosition) {
+
+        if (!actor.isState(EntityState.WALKING)) return false;
+
+        const waypoint = actor.navigation.getCurrentWaypoint();
+
+        if (!waypoint) return false;
+
+        const currentDirection = waypoint.position.clone()
+            .sub(actor.object3D.position)
+            .setY(0);
+        const requestedDirection = requestedPosition.clone()
+            .sub(actor.object3D.position)
+            .setY(0);
+
+        if (currentDirection.lengthSq() < 0.0001 ||
+            requestedDirection.lengthSq() < 0.0001) return false;
+
+        return currentDirection.normalize().dot(
+            requestedDirection.normalize()
+        ) < -0.1;
+
+    }
+
+    beginTurnaround(context, command) {
+
+        // The replacement route was structurally validated and queued before
+        // this callback. Future animation may replace the temporary timer.
+        context.deferredCommand = command;
+        context.turningAround = true;
+        context.turnaroundElapsed = 0;
+        context.actor.pause();
+        this.onTurnaroundRequested(context.actor);
+
+    }
+
+    onTurnaroundRequested(actor) {
+
+        // Future animation callback: play a turn-in-place clip and replace the
+        // timer by its onComplete signal before executing the deferred route.
+        console.log(`[Navigation] ${actor.name} prepares to turn around.`);
+
+    }
+
+    executeDeferredCommand(context, { skipInteractionExit = false } = {}) {
+
+        const command = context.deferredCommand;
+
+        if (!command) return false;
+
+        context.deferredCommand = null;
+
+        let accepted;
+
+        if (command.type === "interaction") {
+
+            accepted = this.moveToInteractionPoint(
+                context.actor,
+                command.point,
+                command.onArrive,
+                {
+                    replaceIntent: !command.intentPrepared,
+                    skipTurnaround: true,
+                    skipInteractionExit
+                }
+            );
+
+        } else {
+
+            accepted = this.moveToClosestNode(
+                context.actor,
+                command.position,
+                {
+                    replaceIntent: !command.intentPrepared,
+                    skipTurnaround: true,
+                    skipInteractionExit
+                }
+            );
+
+        }
+
+        if (!accepted) {
+
+            context.deferredCommand = command;
+            context.actor.pause();
+
+        }
+
+        return accepted;
+
+    }
+
     // -----------------------------
     // Lifecycle
     // -----------------------------
 
     update(delta) {
 
-        this.traffic.update();
-
         for (const context of this.contexts.values()) {
 
             const { actor } = context;
 
-            if (context.pendingIdleSlot) {
+            if (this.retryPendingPark(context)) continue;
+            if (this.monitorNavigationProgress(context, delta)) continue;
+            if (this.recoverOrphanedActor(context, delta)) continue;
 
-                context.idleDelayRemaining -= delta;
+            this.traffic.prequeueUpcomingTransit(actor);
 
-                if (context.idleDelayRemaining <= 0) {
+            if (context.turningAround) {
 
-                    context.idleDelayRemaining = 0;
-                    this.applyPendingParking(context);
+                context.turnaroundElapsed += delta;
+
+                if (context.turnaroundElapsed >= context.turnaroundDuration) {
+
+                    context.turningAround = false;
+                    context.turnaroundElapsed = 0;
+                    this.executeDeferredCommand(context);
 
                 }
+
+                continue;
+
+            }
+
+            // prepareInteractionExit() exclusively owns deferredCommand until
+            // its animation callback fires. Generic retries here could execute
+            // the command early, then leave the actor lowered at seat with no
+            // command remaining for onComplete.
+            if (context.preparingInteractionExit) continue;
+            if (context.preparingDwellEntry ||
+                context.preparingDwellExit) continue;
+
+            if (context.deferredCommand) {
+
+                context.retryElapsed += delta;
+
+                if (context.retryElapsed < 0.5) continue;
+
+                context.retryElapsed = 0;
+                this.executeDeferredCommand(context);
+                continue;
+
+            }
+
+            if (context.traversingLaneCurve &&
+                actor.isState(EntityState.WAITING)) {
+
+                actor.resume();
+                continue;
+
+            }
+
+            if (context.traversingInteractionCurve &&
+                actor.isState(EntityState.WAITING)) {
+
+                actor.resume();
+                continue;
 
             }
 
@@ -648,7 +1516,7 @@ export class CharacterNavigationSystem {
                 if (context.blockedElapsed >= context.blockedTimeout) {
 
                     context.blockedElapsed = null;
-                    this.abandonBlockedDestination(context);
+                    this.abandonBlockedIntent(context);
 
                 }
 
@@ -671,39 +1539,448 @@ export class CharacterNavigationSystem {
             if (context.pendingInteraction ||
                 actor.navigation.getCurrentWaypoint()?.interactionPoint) {
 
-                actor.resume();
+                if (actor.navigation.hasPath()) {
+
+                    actor.resume();
+
+                } else if (context.pendingInteraction) {
+
+                    const { point, onArrive } = context.pendingInteraction;
+                    this.moveToInteractionPoint(actor, point, onArrive, {
+                        replaceIntent: false,
+                        skipTurnaround: true
+                    });
+
+                }
                 continue;
 
             }
 
             if (context.pendingPosition) {
 
-                this.moveToClosestNode(actor, context.pendingPosition);
+                this.moveToClosestNode(actor, context.pendingPosition, {
+                    replaceIntent: false,
+                    skipTurnaround: true
+                });
 
             }
 
         }
+
+        // Scene updates every Character before this system. Resolve the final
+        // residual circle penetration once, after all desired movement exists.
+        this.collisionSolver.solve();
 
     }
 
-    releaseClearanceRequests(requestingActor, reachedNodeId = null) {
+    monitorNavigationProgress(context, delta) {
 
-        for (const context of this.contexts.values()) {
+        const { actor } = context;
+        const hasIntent = Boolean(
+            context.pendingInteraction || context.pendingPosition
+        );
 
-            if (!context.clearanceRequesters.has(requestingActor)) continue;
+        // No movement is expected while DepartureQueue owns the actor. Running
+        // recovery here would cancel a valid request and enqueue it again at
+        // the tail, which can starve both Player and NPC indefinitely.
+        if (this.traffic.isQueued(actor)) {
 
-            if (reachedNodeId) {
+            if (!actor.navigation.hasPath()) {
 
-                const dwellNodeId = context.actor.navigation
-                    .getTraversalState().currentNodeId;
-
-                if (dwellNodeId !== reachedNodeId) continue;
+                // A queue orders departure of an existing route. Without a
+                // waypoint there is nothing left to authorize, so retaining
+                // the request would exempt this actor from recovery forever.
+                console.warn(
+                    `[NavigationQueue] ${actor.name} had a stale queue entry ` +
+                    `without a route; releasing it for replanning.`
+                );
+                this.traffic.cancel(actor);
+                actor.setState(EntityState.WAITING);
+                return false;
 
             }
 
-            context.clearanceRequesters.delete(requestingActor);
+            // prequeueUpcomingTransit() may reserve order while the actor is
+            // still moving on the previous connection. Timeout measures an
+            // actual stopped queue, never this useful look-ahead period.
+            if (!actor.isState(EntityState.WAITING)) {
+
+                context.queueWaitElapsed = 0;
+                context.recoveryElapsed = 0;
+                context.recoveryPosition.copy(actor.object3D.position);
+                return false;
+
+            }
+
+            context.queueWaitElapsed += delta;
+
+            if (context.queueWaitElapsed >= context.queueWaitTimeout) {
+
+                context.queueWaitElapsed = 0;
+                this.resolveQueueCongestion(context);
+                return true;
+
+            }
+
+            context.recoveryElapsed = 0;
+            context.recoveryPosition.copy(actor.object3D.position);
+            return false;
 
         }
+
+        context.queueWaitElapsed = 0;
+
+        const mayRecover = hasIntent &&
+            !context.preparingInteraction &&
+            !context.preparingInteractionExit &&
+            !context.preparingDwellEntry &&
+            !context.preparingDwellExit;
+
+        if (!mayRecover) {
+
+            context.recoveryElapsed = 0;
+            context.recoveryPosition.copy(actor.object3D.position);
+            return false;
+
+        }
+
+        const progress = context.recoveryPosition.distanceTo(
+            actor.object3D.position
+        );
+
+        if (progress >= 0.025) {
+
+            context.recoveryElapsed = 0;
+            context.recoveryPosition.copy(actor.object3D.position);
+            return false;
+
+        }
+
+        context.recoveryElapsed += delta;
+
+        if (context.recoveryElapsed < context.recoveryTimeout) return false;
+
+        context.recoveryElapsed = 0;
+        context.recoveryPosition.copy(actor.object3D.position);
+        this.restartIntentFromNearestAccess(context);
+        return true;
+
+    }
+
+    retryPendingPark(context) {
+
+        const nodeId = context.pendingParkNodeId;
+
+        if (!nodeId ||
+            this.graph.hasOtherNodeCommitments(nodeId, context.actor)) {
+
+            return false;
+
+        }
+
+        context.pendingParkNodeId = null;
+        this.parkActorAtNode(context, nodeId);
+        return true;
+
+    }
+
+    resolveQueueCongestion(context) {
+
+        const { actor } = context;
+
+        console.warn(
+            `[NavigationCongestion] ${actor.name} exceeded queue timeout; ` +
+            `discarding the local route while preserving its target.`
+        );
+        context.congestionAttempts++;
+        this.traffic.cancel(actor);
+        this.graph.releaseReservations(actor);
+        this.connector.releaseReservations(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        actor.navigation.clearRoute();
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.transitTangent = null;
+
+        if (context.pendingPosition) {
+
+            const alternative = this.findBestPlan(
+                context,
+                context.pendingPosition,
+                Infinity
+            );
+
+            if (alternative?.plan.status === "ready") {
+
+                console.log(
+                    `[NavigationCongestion] ${actor.name} found an available ` +
+                    `detour.`
+                );
+                this.moveToClosestNode(actor, context.pendingPosition, {
+                    replaceIntent: false,
+                    skipTurnaround: true,
+                    maxDetourFactor: Infinity
+                });
+                return true;
+
+            }
+
+        }
+
+        return this.beginCongestionEscape(context);
+
+    }
+
+    beginCongestionEscape(context) {
+
+        const { actor } = context;
+        const target = context.pendingInteraction?.point.getWorldPosition() ??
+            context.pendingPosition ??
+            actor.navigation.getCurrentWaypoint()?.position ??
+            null;
+
+        if (!target) {
+
+            actor.setState(EntityState.IDLE);
+            return false;
+
+        }
+
+        const retreat = context.congestionAttempts > 1;
+        const escapePosition = retreat
+            ? this.collisionSolver.findRetreatPosition(actor, target)
+            : this.collisionSolver.findEscapePosition(actor, target);
+
+        context.congestionEscaping = true;
+        actor.followWaypoints([{
+            id: null,
+            position: escapePosition,
+            congestionEscape: true
+        }]);
+        console.log(
+            `[NavigationCongestion] ${actor.name} ` +
+            `${retreat ? "turns back" : "leaves the lane locally"} ` +
+            `before trying another route.`
+        );
+        return true;
+
+    }
+
+    retryPreservedIntent(context, { maxDetourFactor = 1.5 } = {}) {
+
+        if (context.pendingInteraction) {
+
+            const { point, onArrive } = context.pendingInteraction;
+            return this.moveToInteractionPoint(
+                context.actor,
+                point,
+                onArrive,
+                { replaceIntent: false, skipTurnaround: true }
+            );
+
+        }
+
+        if (context.pendingPosition) {
+
+            return this.moveToClosestNode(
+                context.actor,
+                context.pendingPosition,
+                {
+                    replaceIntent: false,
+                    skipTurnaround: true,
+                    maxDetourFactor
+                }
+            );
+
+        }
+
+        context.actor.setState(EntityState.IDLE);
+        return false;
+
+    }
+
+    recoverOrphanedActor(context, delta) {
+
+        const { actor } = context;
+        const hasOwner = Boolean(
+            actor.navigation.hasPath() ||
+            context.pendingPosition ||
+            context.pendingInteraction ||
+            context.deferredCommand ||
+            context.activeInteraction ||
+            context.dwellSpot ||
+            context.pendingParkNodeId ||
+            context.congestionEscaping ||
+            this.traffic.isQueued(actor) ||
+            context.turningAround ||
+            context.preparingInteraction ||
+            context.preparingInteractionExit ||
+            context.preparingDwellEntry ||
+            context.preparingDwellExit
+        );
+
+        if (!actor.isState(EntityState.WAITING) || hasOwner) {
+
+            context.orphanedElapsed = 0;
+            return false;
+
+        }
+
+        context.orphanedElapsed += delta;
+
+        if (context.orphanedElapsed < 0.5) return false;
+
+        context.orphanedElapsed = 0;
+        actor.setState(EntityState.IDLE);
+        console.warn(
+            `[NavigationRecovery] ${actor.name} had orphaned WAITING; ` +
+            `returning control to its controller.`
+        );
+        return true;
+
+    }
+
+    deferPersistentIntent(context) {
+
+        const { actor } = context;
+
+        if (actor.navigationIntentPolicy !== "persistent") return;
+
+        // A newer Player command supersedes the old route, but not itself.
+        // Remove obsolete geometry/claims, preserve the topological location
+        // and leave pendingPosition/pendingInteraction available for retry.
+        this.traffic.cancel(actor);
+        this.connector.releaseReservations(actor);
+        this.graph.releaseReservations(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        actor.navigation.clearRoute();
+        actor.setState(EntityState.WAITING);
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.traversingDwellCurve = false;
+        context.retryElapsed = 0;
+        this.refresh();
+
+    }
+
+    restartIntentFromNearestAccess(context) {
+
+        const { actor } = context;
+        const interactionIntent = context.pendingInteraction
+            ? { ...context.pendingInteraction }
+            : null;
+        const positionIntent = context.pendingPosition?.clone() ?? null;
+
+        console.log(
+            `[NavigationRecovery] ${actor.name} timed out; rebuilding ` +
+            `navigation from the nearest graph access.`
+        );
+
+        // Abandon every old ownership claim and geometric sample. Only the
+        // user/behavior target captured above survives this reset.
+        this.collisionFailsafe.cancel(actor);
+        this.graph.releaseAgent(actor);
+        this.connector.releaseAgent(actor);
+        this.dwellSpots.releaseActor(actor);
+        this.traffic.cancel(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        actor.navigation.cancel();
+        actor.navigation.setCurrentNode(null);
+
+        context.pendingPosition = null;
+        context.destinationId = null;
+        context.pendingInteraction = null;
+        context.interactionPoint = null;
+        context.dwellSpot = null;
+        context.dwellSearchInProgress = false;
+        context.dwellSearchSpot = null;
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.traversingDwellCurve = false;
+        context.transitTangent = null;
+        context.arrivalFromNodeId = null;
+        context.nodeMode = NavigationNodeMode.TRANSIT;
+
+        const origin = [...this.graph.nodes.values()]
+            .filter(node =>
+                !node.blocked &&
+                [...node.connections.values()].some(connection =>
+                    !connection.blocked
+                ) &&
+                (!node.exclusive ||
+                    this.graph.isNodeAvailable(node.id, actor))
+            )
+            .sort((first, second) =>
+                this.graph.getPlanarDistanceSquared(
+                    actor.object3D.position,
+                    first.position
+                ) -
+                this.graph.getPlanarDistanceSquared(
+                    actor.object3D.position,
+                    second.position
+                )
+            )[0];
+
+        let accepted = false;
+
+        if (origin) {
+
+            actor.navigation.setCurrentNode(origin.id);
+            this.graph.occupyNode(origin.id, actor);
+
+            accepted = interactionIntent
+                ? this.moveToInteractionPoint(
+                    actor,
+                    interactionIntent.point,
+                    interactionIntent.onArrive,
+                    { skipTurnaround: true }
+                )
+                : positionIntent
+                    ? this.moveToClosestNode(actor, positionIntent, {
+                        skipTurnaround: true
+                    })
+                    : false;
+
+        }
+
+        if (accepted) {
+
+            console.log(
+                `[NavigationRecovery] ${actor.name} rejoined through ` +
+                `"${origin.id}".`
+            );
+            return true;
+
+        }
+
+        if (actor.navigationIntentPolicy === "persistent") {
+
+            // A failed recovery invalidates only the route. Keep the command
+            // queued in the context so the ordinary WAITING retry and future
+            // topology/occupancy changes can attempt it again.
+            context.pendingPosition = positionIntent;
+            context.pendingInteraction = interactionIntent;
+            context.destinationId = null;
+            context.retryElapsed = 0;
+            actor.setState(EntityState.WAITING);
+            console.log(
+                `[NavigationRecovery] ${actor.name} still intends to reach ` +
+                `its target and will retry.`
+            );
+            return false;
+
+        }
+
+        // An autonomous controller may abandon the task and choose another.
+        context.pendingPosition = null;
+        context.pendingInteraction = null;
+        context.destinationId = null;
+        actor.cancel();
+        console.log(
+            `[NavigationRecovery] ${actor.name} could not recover; ` +
+            `the old target was abandoned.`
+        );
+        return false;
 
     }
 
@@ -724,7 +2001,27 @@ export class CharacterNavigationSystem {
 
                 const replanned = this.moveToClosestNode(
                     context.actor,
-                    context.pendingPosition
+                    context.pendingPosition,
+                    { replaceIntent: false, skipTurnaround: true }
+                );
+
+                if (!replanned) {
+
+                    context.actor.pause();
+                    context.blockedElapsed ??= 0;
+
+                }
+
+            }
+
+            if (context.pendingInteraction) {
+
+                const { point, onArrive } = context.pendingInteraction;
+                const replanned = this.moveToInteractionPoint(
+                    context.actor,
+                    point,
+                    onArrive,
+                    { replaceIntent: false, skipTurnaround: true }
                 );
 
                 if (!replanned) {
@@ -740,12 +2037,37 @@ export class CharacterNavigationSystem {
 
     }
 
-    abandonBlockedDestination(context) {
+    abandonBlockedIntent(context) {
+
+        if (context.actor.navigationIntentPolicy === "persistent") {
+
+            // A hard block has no known release time. Keep the Player command
+            // pending instead of converting a navigation condition into a
+            // silent input failure. Topology changes and the retry loop will
+            // rebuild the route when it becomes possible again.
+            context.blockedElapsed = null;
+            context.retryElapsed = 0;
+            context.actor.setState(EntityState.WAITING);
+            this.graph.releaseReservations(context.actor);
+            this.connector.releaseReservations(context.actor);
+            console.log(
+                `[Navigation] ${context.actor.name} keeps its blocked intent ` +
+                `and will retry.`
+            );
+            return;
+
+        }
 
         context.pendingPosition = null;
         context.destinationId = null;
+        context.pendingInteraction = null;
+        context.preparingInteraction = false;
         context.recoveryPending = true;
         this.graph.releaseReservations(context.actor);
+        this.connector.releaseReservations(context.actor);
+        console.log(
+            `[Navigation] ${context.actor.name} abandoned a blocked intent.`
+        );
         this.tryRecoverToNearestNode(context);
 
     }
@@ -844,10 +2166,132 @@ export class CharacterNavigationSystem {
 
     }
 
+    releaseDwellOccupancy(actor) {
+
+        const context = this.contexts.get(actor);
+        const occupiedSpot = context?.dwellSpot?.occupant === actor
+            ? context.dwellSpot
+            : null;
+
+        this.dwellSpots.releaseOccupancy(actor);
+
+        if (occupiedSpot && context) {
+
+            // Exit authorization remains valid through every inserted Bézier
+            // waypoint. Reset it only when the actor truly leaves the dwell
+            // resource; resetting in centerActorForDeparture replayed the mock
+            // once per retry while approaching an interaction anchor.
+            context.preparingDwellExit = false;
+            context.dwellExitReady = false;
+            context.dwellSpot = null;
+
+        }
+
+    }
+
+    getActorDebugState(actor) {
+
+        const context = this.requireContext(actor);
+        const traversal = actor.navigation.getTraversalState();
+        const waypoint = actor.navigation.getCurrentWaypoint();
+        const nextStructuralWaypoint = actor.navigation
+            .getRemainingWaypoints()
+            .find(candidate =>
+                candidate.id ||
+                candidate.interactionPoint ||
+                candidate.dwellSpotArrival ||
+                candidate.departureRequest ||
+                candidate.connectionEntry
+            );
+        const traffic = this.traffic.getDebugState(actor);
+        const connection = traversal.currentConnection;
+        const laneIndex = connection
+            ? this.graph.getConnectionLaneIndex(
+                connection.fromId,
+                connection.toId,
+                actor
+            )
+            : null;
+        const interaction = context.pendingInteraction?.point;
+        const flags = [
+            context.turningAround && "turning",
+            context.preparingInteraction && "interaction-entry",
+            context.preparingInteractionExit && "interaction-exit",
+            context.preparingDwellEntry && "dwell-entry",
+            context.preparingDwellExit && "dwell-exit",
+            context.pendingParkNodeId && "park-pending",
+            context.congestionEscaping && "congestion-escape",
+            context.traversingLaneCurve && "lane-curve",
+            context.traversingInteractionCurve && "interaction-curve",
+            context.traversingDwellCurve && "dwell-curve"
+        ].filter(Boolean);
+
+        return {
+            name: actor.name,
+            state: actor.state,
+            mode: context.nodeMode === NavigationNodeMode.TRANSIT
+                ? `${context.nodeMode} / ${context.currentTraversal}`
+                : context.nodeMode,
+            location: traversal.currentNodeId ?? (connection
+                ? `${connection.fromId} → ${connection.toId}`
+                : "off-graph"),
+            lane: laneIndex === null ? "—" : `${laneIndex === 0 ? "A" : "B"} (${laneIndex})`,
+            next: nextStructuralWaypoint?.id ??
+                nextStructuralWaypoint?.interactionPoint?.id ??
+                nextStructuralWaypoint?.dwellSpotArrival?.id ??
+                nextStructuralWaypoint?.departureRequest?.originId ??
+                (waypoint ? "curve → local target" : "—"),
+            intent: interaction?.id ??
+                (context.pendingPosition ? context.destinationId ?? "position" : "—"),
+            queue: traffic.queue
+                ? `${traffic.queue.originId} ${traffic.queue.position}/${traffic.queue.length}`
+                : "—",
+            wait: traffic.waitReason ?? (actor.navigation.isPaused()
+                ? "navigation paused"
+                : "—"),
+            flags: flags.join(", ") || "—"
+        };
+
+    }
+
+    retryFreedDwellSpot(nodeId, departingActor) {
+
+        // Releasing a spot is the useful retry event. This lets an actor that
+        // deliberately waited on the node claim the newly free authored spot
+        // without polling every frame.
+        for (const context of this.contexts.values()) {
+
+            const { actor } = context;
+            const traversal = actor.navigation.getTraversalState();
+
+            if (actor === departingActor || context.dwellSpot ||
+                context.nodeMode !== NavigationNodeMode.DWELL ||
+                traversal.currentNodeId !== nodeId) continue;
+
+            this.parkActorAtNode(context, nodeId);
+
+        }
+
+    }
+
+    releaseDwellReservation(actor) {
+
+        this.dwellSpots.releaseReservations(actor);
+        const context = this.contexts.get(actor);
+
+        if (context?.dwellSpot?.reservedBy === null &&
+            context.dwellSpot?.occupant !== actor) {
+
+            context.dwellSpot = null;
+
+        }
+
+    }
+
+    debugQueues() {
+
+        return this.traffic.debugQueues();
+
+    }
+
 }
-
-
-
-
-
-

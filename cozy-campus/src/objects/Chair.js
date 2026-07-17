@@ -21,7 +21,7 @@ export class Chair extends Entity {
         this.legsGroup = new THREE.Group();
 
         this.object3D.add(this.legsGroup);
-        this.object3D.position.set(5, 0, -1);
+        this.object3D.position.set(-0.5, 0, 2.8);
         this.object3D.rotateOnAxis(new THREE.Vector3(0, 1, 0), -Math.PI / 4);
 
         this.createSeat();
@@ -103,7 +103,7 @@ export class Chair extends Entity {
         // connectTo: ["west-1", "west-exit"]      -> force projection on an edge.
         this.approachPoint = this.addInteractionPoint(
             new InteractionPoint("chair-01:approach", {
-                position: new THREE.Vector3(0, 0, 1.5),
+                position: new THREE.Vector3(0, 0, 1),
                 rotationY: Math.PI,
                 maxConnectionDistance: 2.5,
                 metadata: { action: "sit" }
@@ -115,9 +115,20 @@ export class Chair extends Entity {
         this.seatPoint = this.addInteractionPoint(
             new InteractionPoint("chair-01:seat", {
                 position: new THREE.Vector3(0, 0, 0),
+                // Local rotation relative to Chair.object3D. The navigation
+                // helper draws its resulting world direction. Change only
+                // this value to turn the seated actor without turning Chair.
                 rotationY: 0,
                 via: this.approachPoint,
-                metadata: { action: "sit" }
+                // Only terminal interaction poses need a facing arrow in the
+                // helper. Set showDirection on other points when useful.
+                metadata: {
+                    action: "sit",
+                    showDirection: true,
+                    // approach <-> seat is animated movement. Navigation keeps
+                    // the approach facing; the sitting clip will turn the actor.
+                    preserveFacing: true
+                }
             })
         );
 
@@ -220,15 +231,79 @@ export class Chair extends Entity {
 
         }
 
-        // This starts at approachPoint and finishes before navigation advances
-        // to seatPoint. Replace this tween with a bone animation later, keeping
-        // onComplete as the signal that the final positional step may begin.
+        const seatPosition = targetPoint.getWorldPosition();
+
+        // Mock sit animation: it starts at approach, raises the actor and moves
+        // the logical root to seat. onComplete lets navigation reach seat and
+        // only then trigger performInteraction(). A future bone/root animation
+        // replaces these tweens while preserving this callback contract.
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "x",
+            to: seatPosition.x,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeInOutQuad
+        });
         AnimationPresets.to(actor, {
             object: actor.object3D.position,
             property: "y",
             to: this.seatHeight,
             duration: this.seatTransitionDuration,
-            easing: Tween.easeOutCubic,
+            easing: Tween.easeOutCubic
+        });
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "z",
+            to: seatPosition.z,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeInOutQuad,
+            onComplete
+        });
+
+    }
+
+    onPrepareInteractionExit(actor, point, approachPoint, onComplete) {
+
+        if (!actor || !approachPoint) {
+
+            onComplete?.();
+            return;
+
+        }
+
+        const approachPosition = approachPoint.getWorldPosition();
+        const exitDirection = approachPoint.getWorldDirection().negate();
+
+        // Logical facing changes instantly; the future stand-up clip will hide
+        // this root change on the visual skeleton.
+        actor.object3D.lookAt(
+            actor.object3D.position.x + exitDirection.x,
+            actor.object3D.position.y,
+            actor.object3D.position.z + exitDirection.z
+        );
+
+        // Mock stand-up/jump-to-floor animation. It owns seat -> approach and
+        // navigation cannot continue beyond approach before onComplete.
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "x",
+            to: approachPosition.x,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeInOutQuad
+        });
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "y",
+            to: 0,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeInCubic
+        });
+        AnimationPresets.to(actor, {
+            object: actor.object3D.position,
+            property: "z",
+            to: approachPosition.z,
+            duration: this.seatTransitionDuration,
+            easing: Tween.easeInOutQuad,
             onComplete
         });
 
@@ -320,7 +395,7 @@ export class Chair extends Entity {
 
     onStateChanged(previous, current) {
 
-        console.log(previous, "->", current);
+        /* console.log(previous, "->", current); */
 
     }
 

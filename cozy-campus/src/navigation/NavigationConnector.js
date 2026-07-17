@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GeneratedAccessAnchor } from "./GeneratedAccessAnchor";
 
 export class NavigationConnector {
 
@@ -6,6 +7,7 @@ export class NavigationConnector {
 
         this.graph = graph;
         this.points = new Map();
+        this.anchors = new Map();
 
     }
 
@@ -38,15 +40,21 @@ export class NavigationConnector {
 
     }
 
-    connect(point) {
+    connect(point, { silent = false } = {}) {
 
         point.connection = null;
+        this.anchors.delete(`generated:${point.id}`);
 
         if (!point.accessible) {
 
-            console.log(
-                `[NavigationConnector] Interaction point "${point.id}" is inaccessible.`
-            );
+            if (!silent) {
+
+                console.log(
+                    `[NavigationConnector] Interaction point ` +
+                    `"${point.id}" is inaccessible.`
+                );
+
+            }
             return null;
 
         }
@@ -54,7 +62,7 @@ export class NavigationConnector {
         if (point.via) {
 
             const accessConnection = point.via.connection ??
-                this.connect(point.via);
+                this.connect(point.via, { silent });
 
             if (!accessConnection) return null;
 
@@ -87,15 +95,25 @@ export class NavigationConnector {
             nearest.distanceSquared >
                 point.maxConnectionDistance * point.maxConnectionDistance) {
 
-            console.log(
-                `[NavigationConnector] No nearby graph access for "${point.id}".`
-            );
+            if (!silent) {
+
+                console.log(
+                    `[NavigationConnector] No nearby graph access for ` +
+                    `"${point.id}".`
+                );
+
+            }
             return null;
 
         }
 
+        const anchor = nearest.nodeIds.length === 2
+            ? this.createAccessAnchor(point, nearest)
+            : null;
+
         point.connection = {
             ...nearest,
+            anchor,
             automatic: point.connectTo === null
         };
 
@@ -253,6 +271,91 @@ export class NavigationConnector {
 
     }
 
+    createAccessAnchor(point, projection) {
+
+        const connection = this.graph.requireConnection(
+            projection.nodeIds[0],
+            projection.nodeIds[1]
+        );
+        const fromId = connection.fromId;
+        const toId = connection.toId;
+        const from = this.graph.requireNode(fromId).position;
+        const to = this.graph.requireNode(toId).position;
+        const directionX = to.x - from.x;
+        const directionZ = to.z - from.z;
+        const lengthSquared = directionX ** 2 + directionZ ** 2;
+        const length = Math.sqrt(lengthSquared) || 1;
+        const normalX = directionZ / length;
+        const normalZ = -directionX / length;
+        const amount = lengthSquared === 0
+            ? 0
+            : THREE.MathUtils.clamp(
+                ((projection.projectedPosition.x - from.x) * directionX +
+                    (projection.projectedPosition.z - from.z) * directionZ) /
+                    lengthSquared,
+                0,
+                1
+            );
+        const center = projection.projectedPosition.clone();
+        const halfWidth = connection.laneWidth * 0.5;
+        const lanePositions = [-halfWidth, halfWidth].map(offset =>
+            center.clone().add(
+                new THREE.Vector3(normalX * offset, 0, normalZ * offset)
+            )
+        );
+        const id = `generated:${point.id}`;
+        const anchor = this.anchors.get(id) ??
+            new GeneratedAccessAnchor(id);
+
+        anchor.update({
+            nodeIds: [fromId, toId],
+            amount,
+            center,
+            lanePositions
+        });
+        this.anchors.set(id, anchor);
+
+        return anchor;
+
+    }
+
+    getPortalPosition(point, connection) {
+
+        if (connection.anchor) {
+
+            return connection.anchor.getClosestLanePosition(
+                point.getWorldPosition()
+            );
+
+        }
+
+        const portal = connection.projectedPosition.clone();
+
+        if (connection.nodeIds?.length !== 2) return portal;
+
+        const [fromId, toId] = connection.nodeIds;
+        const from = this.graph.requireNode(fromId).position;
+        const to = this.graph.requireNode(toId).position;
+        const resource = this.graph.requireConnection(fromId, toId);
+        const directionX = to.x - from.x;
+        const directionZ = to.z - from.z;
+        const length = Math.hypot(directionX, directionZ) || 1;
+        const normalX = -directionZ / length;
+        const normalZ = directionX / length;
+        const pointPosition = point.getWorldPosition();
+        const side = Math.sign(
+            (pointPosition.x - portal.x) * normalX +
+            (pointPosition.z - portal.z) * normalZ
+        ) || 1;
+        const offset = resource.laneWidth * 0.5 * side;
+
+        portal.x += normalX * offset;
+        portal.z += normalZ * offset;
+
+        return portal;
+
+    }
+
     // -----------------------------
     // Route creation
     // -----------------------------
@@ -393,16 +496,24 @@ export class NavigationConnector {
             current.cost < best.cost ? current : best
         );
         const waypoints = this.graph.createWaypoints(route.path.nodeIds);
+        const portalPosition = this.getPortalPosition(
+            accessPoint,
+            connection
+        );
 
         if (this.graph.getPlanarDistanceSquared(
             this.graph.requireNode(route.endpointId).position,
-            connection.projectedPosition
+            portalPosition
         ) > 0.0001) {
 
             waypoints.push({
                 id: null,
-                position: connection.projectedPosition.clone(),
-                leavingGraph: true
+                position: portalPosition,
+                leavingGraph: true,
+                departureRequest: {
+                    originId: route.endpointId,
+                    transitionTarget: accessPoint.getWorldPosition()
+                }
             });
 
         }
@@ -441,13 +552,23 @@ export class NavigationConnector {
         if (!connection) return [];
 
         const waypoints = [];
+        const portalPosition = this.getPortalPosition(
+            accessPoint,
+            connection
+        );
+        const departureDirection = accessPoint.getWorldDirection().negate();
 
         if (point !== accessPoint) {
 
             waypoints.push({
                 id: null,
                 position: accessPoint.getWorldPosition(),
-                interactionPoint: accessPoint
+                interactionPoint: accessPoint,
+                departureDirection,
+                // seat -> approach belongs to the interaction animation. Keep
+                // the facing established at approach instead of turning the
+                // actor toward the backwards displacement.
+                preserveFacing: point.metadata.preserveFacing === true
             });
 
         }
@@ -458,10 +579,20 @@ export class NavigationConnector {
 
         waypoints.push({
             id: null,
-            position: connection.projectedPosition.clone(),
+            position: portalPosition,
             leavingInteraction: true,
+            // When already standing at approach, this is the first exit
+            // waypoint and therefore owns the same immediate 180° turn.
+            departureDirection: point === accessPoint
+                ? departureDirection
+                : null,
             connectionEntry: destinationNodeId && otherNodeId
-                ? { fromId: otherNodeId, toId: destinationNodeId }
+                ? {
+                    fromId: otherNodeId,
+                    toId: destinationNodeId,
+                    anchorId: connection.anchor?.id ?? null,
+                    originKey: `interaction:${accessPoint.id}`
+                }
                 : null
         });
 

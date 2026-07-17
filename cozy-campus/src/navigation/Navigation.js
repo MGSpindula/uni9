@@ -12,6 +12,12 @@ export class Navigation {
         this.currentNodeId = null;
         this.currentConnection = null;
 
+        // Changes whenever the route itself is replaced. A waypoint callback
+        // may install a follow-up route (for example, toward a dwell spot).
+        // Character uses this number to avoid advancing that brand-new route
+        // as though it were the route that has just finished.
+        this.routeRevision = 0;
+
     }
 
     // -----------------------------
@@ -42,6 +48,7 @@ export class Navigation {
         this.currentIndex = 0;
         this.waitAtEnd = waitAtEnd;
         this.paused = false;
+        this.routeRevision++;
 
     }
 
@@ -50,6 +57,7 @@ export class Navigation {
         this.path = [];
         this.currentIndex = 0;
         this.waitAtEnd = false;
+        this.routeRevision++;
 
     }
 
@@ -76,6 +84,83 @@ export class Navigation {
     getCurrentWaypoint() {
 
         return this.path[this.currentIndex] ?? null;
+
+    }
+
+    getRouteRevision() {
+
+        return this.routeRevision;
+
+    }
+
+    insertManyBeforeCurrent(waypoints) {
+
+        this.path.splice(
+            this.currentIndex,
+            0,
+            ...waypoints.map(waypoint => ({
+                ...waypoint,
+                position: waypoint.position.clone()
+            }))
+        );
+
+    }
+
+    insertManyAfterCurrent(waypoints) {
+
+        this.path.splice(
+            this.currentIndex + 1,
+            0,
+            ...waypoints.map(waypoint => ({
+                ...waypoint,
+                position: waypoint.position.clone()
+            }))
+        );
+
+    }
+
+    getNextWaypoint() {
+
+        return this.path[this.currentIndex + 1] ?? null;
+
+    }
+
+    getRemainingWaypoints() {
+
+        return this.path.slice(this.currentIndex);
+
+    }
+
+    replaceRemainingWaypoints(waypoints) {
+
+        // Used by local recovery: consumed topology stays consumed, while the
+        // obsolete geometric samples ahead are replaced from the actor's real
+        // position. Pause and waitAtEnd ownership remain unchanged.
+        this.path = waypoints.map(waypoint => ({
+            ...waypoint,
+            position: waypoint.position.clone()
+        }));
+        this.currentIndex = 0;
+        this.routeRevision++;
+
+    }
+
+    getUpcomingNodeIds(limit = 2) {
+
+        const ids = [];
+
+        for (let index = this.currentIndex; index < this.path.length; index++) {
+
+            const id = this.path[index].id;
+
+            if (!id || ids.at(-1) === id) continue;
+
+            ids.push(id);
+            if (ids.length >= limit) break;
+
+        }
+
+        return ids;
 
     }
 

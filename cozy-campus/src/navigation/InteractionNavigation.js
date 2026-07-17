@@ -13,14 +13,11 @@ export class InteractionNavigation {
     beginRoute(context, point, onArrive) {
 
         context.pendingPosition = null;
-        context.nodeMode = NavigationNodeMode.TRANSIT;
         context.destinationId = null;
         context.pendingInteraction = { point, onArrive };
         context.retryElapsed = 0;
         context.blockedElapsed = null;
         context.recoveryPending = false;
-        this.owner.cancelPendingParking(context);
-
     }
 
     createDirectConnectionRoute(actor, point) {
@@ -42,8 +39,9 @@ export class InteractionNavigation {
 
         const waypoints = [{
             id: null,
-            position: access.projectedPosition.clone(),
-            leavingGraph: true
+            position: this.connector.getPortalPosition(accessPoint, access),
+            leavingGraph: true,
+            departureRequest: { connection: true }
         }];
 
         if (accessPoint !== point) {
@@ -72,13 +70,26 @@ export class InteractionNavigation {
 
         if (waypoint.leavingGraph) {
 
+            context.traversingInteractionCurve = false;
+            this.graph.clearActiveLaneCurve(actor);
+
             const traversal = actor.navigation.getTraversalState();
 
             if (traversal.currentNodeId) {
 
                 this.graph.releaseNode(traversal.currentNodeId, actor);
+                this.owner.retryFreedDwellSpot(
+                    traversal.currentNodeId,
+                    actor
+                );
 
             }
+
+            // A dwell spot is a separate resource from its navigation node.
+            // Leaving the graph for a chair, item or other interaction must
+            // release both; otherwise the helper keeps showing a ghost owner.
+            this.owner.releaseDwellOccupancy(actor);
+            this.owner.releaseDwellReservation(actor);
 
             if (traversal.currentConnection) {
 
@@ -91,6 +102,15 @@ export class InteractionNavigation {
 
             }
 
+            if (waypoint.departureRequest?.originId) {
+
+                this.owner.traffic.completeNodeDeparture(
+                    actor,
+                    waypoint.departureRequest.originId
+                );
+
+            }
+
             this.owner.refresh();
             return true;
 
@@ -98,6 +118,12 @@ export class InteractionNavigation {
 
         if (waypoint.leavingInteraction) {
 
+            context.traversingInteractionCurve = false;
+
+            this.owner.traffic.completeInteractionDeparture(
+                actor,
+                waypoint.connectionEntry?.originKey
+            );
             this.owner.leaveInteractionPoint(context);
             this.owner.refresh();
             return true;
@@ -138,8 +164,8 @@ export class InteractionNavigation {
         if (interaction?.point === waypoint.interactionPoint) {
 
             context.pendingInteraction = null;
-            actor.object3D.rotation.y =
-                waypoint.interactionPoint.getWorldRotationY();
+            // Character already completed the point's smooth arrivalDirection
+            // alignment before this interaction callback was allowed to run.
             interaction.onArrive?.();
             context.activeInteraction = {
                 target: waypoint.interactionPoint.entity,

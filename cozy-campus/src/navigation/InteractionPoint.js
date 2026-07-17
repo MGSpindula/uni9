@@ -53,18 +53,18 @@ export class InteractionPoint {
 
     }
 
-    getWorldRotationY() {
+    getWorldDirection(target = new THREE.Vector3()) {
 
         this.object3D.updateWorldMatrix(true, false);
 
-        const quaternion = this.object3D.getWorldQuaternion(
-            new THREE.Quaternion()
+        target.set(0, 0, 1).applyQuaternion(
+            this.object3D.getWorldQuaternion(new THREE.Quaternion())
         );
+        target.y = 0;
 
-        return new THREE.Euler().setFromQuaternion(
-            quaternion,
-            "YXZ"
-        ).y;
+        return target.lengthSq() > 0.0001
+            ? target.normalize()
+            : target.set(0, 0, 1);
 
     }
 

@@ -11,6 +11,10 @@ export class AnimationController {
 
         // Procedural animation changes local visual offsets, never world movement.
         this.time = 0;
+        this.walkPhase = 0;
+        this.strideLength = 1.15;
+        this.visualSpeed = 0;
+        this.speedResponse = 10;
         this.baseY = visual?.position.y ?? 0;
         this.baseRotationZ = visual?.rotation.z ?? 0;
 
@@ -40,22 +44,41 @@ export class AnimationController {
     // Lifecycle
     // -----------------------------
 
-    update(delta) {
+    update(delta, motion = null) {
 
         this.mixer?.update(delta);
 
         if (!this.visual) return;
 
-        if (this.isPlaying(EntityState.WALKING)) {
+        // Physical motion is authoritative. Collision avoidance can move a
+        // character while its semantic state remains WAITING.
+        const targetSpeed = motion?.moving
+            ? motion.normalizedSpeed
+            : 0;
+        const blend = 1 - Math.exp(-this.speedResponse * delta);
+
+        this.visualSpeed += (targetSpeed - this.visualSpeed) * blend;
+
+        if (this.visualSpeed > 0.001) {
 
             this.time += delta;
 
+            // Phase follows physical distance, not elapsed time. Changing the
+            // locomotion speed therefore changes the walk cycle without foot
+            // sliding, and a traffic stop freezes progress through the stride.
+            this.walkPhase += (
+                (motion?.distanceMoved ?? 0) / this.strideLength
+            ) * Math.PI * 2;
+
             // A small bob and lean make the primitive communicate "walking".
             this.visual.position.y =
-                this.baseY + Math.abs(Math.sin(this.time * 9)) * 0.08;
+                this.baseY +
+                Math.abs(Math.sin(this.walkPhase * 2)) *
+                0.08 * this.visualSpeed;
 
             this.visual.rotation.z =
-                this.baseRotationZ + Math.sin(this.time * 4.5) * 0.05;
+                this.baseRotationZ +
+                Math.sin(this.walkPhase) * 0.05 * this.visualSpeed;
 
             return;
 

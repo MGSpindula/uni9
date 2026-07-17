@@ -1,5 +1,7 @@
 import { AnimationPresets } from "../core/AnimationPresets";
 import { Tween } from "../core/Tween";
+import { NavigationDepartureQueue } from "./NavigationDepartureQueue";
+import { NavigationNodeMode } from "./NavigationNodeMode";
 
 export class NavigationTrafficSystem {
 
@@ -7,7 +9,8 @@ export class NavigationTrafficSystem {
 
         this.owner = owner;
         this.graph = owner.graph;
-        this.activeEncounters = [];
+        this.departures = new NavigationDepartureQueue();
+        this.waitReasons = new Map();
 
     }
 
@@ -15,57 +18,115 @@ export class NavigationTrafficSystem {
     // Connection entry
     // -----------------------------
 
-    tryStartConnection(actor, fromId, toId) {
+    prequeueUpcomingTransit(actor) {
 
-        const context = this.owner.requireContext(actor);
-        const laneIndex = this.graph.reserveConnectionLane(
-            fromId,
-            toId,
-            actor
-        );
+        const traversal = actor.navigation.getTraversalState();
 
-        if (laneIndex === null) return false;
+        if (!traversal.currentConnection) return;
 
-        this.owner.requestImmediateNodeClearance(toId, actor);
+        const [arrivalId, nextId] = actor.navigation.getUpcomingNodeIds(2);
 
-        if (!this.graph.reserveNode(toId, actor)) {
+        if (!arrivalId || !nextId ||
+            !this.graph.hasNode(arrivalId) ||
+            !this.graph.hasNode(nextId) ||
+            !this.graph.areConnected(arrivalId, nextId) ||
+            this.graph.isNodeBlocked(arrivalId) ||
+            this.graph.isNodeBlocked(nextId) ||
+            this.graph.isConnectionBlocked(arrivalId, nextId)) return;
 
-            const reciprocal = this.graph.hasReciprocalLaneReservation(
-                fromId,
-                toId,
-                actor
-            );
+        // This reserves only queue order, not the lane or destination node.
+        // Temporary occupancy is rechecked at the actual handoff.
+        this.departures.enqueue(arrivalId, actor, { priority: 1 });
 
-            if (!reciprocal) {
+    }
 
-                const connection = this.graph.requireConnection(fromId, toId);
+    preflightDeparture(actor, originId, toId = null) {
 
-                // Keep a reservation only as a reciprocal multi-lane intent.
-                if (!connection.passingAllowed ||
-                    connection.lanes.length < 2) {
+        if (!originId) return false;
 
-                    this.graph.releaseConnection(fromId, toId, actor);
+        if (this.graph.isNodeBlocked(originId)) {
 
-                }
+            this.setWaitReason(actor, originId, "origin is hard-blocked");
+            return false;
 
+        }
+
+        if (toId) {
+
+            const connection = this.graph.requireConnection(originId, toId);
+
+            if (this.graph.isNodeBlocked(toId) || connection.blocked) {
+
+                this.setWaitReason(actor, originId, "return path is hard-blocked");
                 return false;
 
             }
 
         }
 
-        this.owner.centerActorForDeparture(context);
-        this.graph.occupyConnectionLane(fromId, toId, actor, laneIndex);
-        this.graph.releaseNode(fromId, actor);
-        this.owner.refresh();
+        const context = this.owner.requireContext(actor);
+
+        this.departures.enqueue(originId, actor, {
+            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+        });
+
+        if (!this.departures.isFirst(originId, actor)) {
+
+            this.setWaitReason(actor, originId, "turnaround queued");
+
+        } else {
+
+            this.setWaitReason(actor, originId, "turnaround is first in queue");
+
+        }
 
         return true;
 
     }
 
-    tryEnterFromInteraction(actor, { fromId, toId }) {
+    tryStartConnection(actor, fromId, toId, waypoint = null) {
 
-        if (actor.navigation.getTraversalState().currentConnection) return true;
+        // Routes can become stale after topology/debug changes. Never let one
+        // invalid segment stop the entire Scene update loop.
+        if (!this.graph.hasNode(fromId) ||
+            !this.graph.hasNode(toId) ||
+            !this.graph.areConnected(fromId, toId)) {
+
+            this.owner.rejectInvalidSegment(actor, fromId, toId);
+            return false;
+
+        }
+
+        const connection = this.graph.requireConnection(fromId, toId);
+        const context = this.owner.requireContext(actor);
+
+        // Hard blocks cannot become available by waiting and must never retain
+        // the head of a departure queue. Temporary occupancy may be queued.
+        if (this.graph.isNodeBlocked(fromId) ||
+            this.graph.isNodeBlocked(toId) ||
+            connection.blocked) {
+
+            this.departures.cancel(actor);
+            this.setWaitReason(actor, fromId, "resource is hard-blocked");
+            return false;
+
+        }
+
+        // TRANSIT clears the node before DWELL departures. The queue orders
+        // exits; node availability is intentionally not checked here because
+        // it describes whether another actor may enter, not whether an existing
+        // occupant may leave through a free lane.
+        this.departures.enqueue(fromId, actor, {
+            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+        });
+
+        if (!this.departures.isFirst(fromId, actor)) {
+
+            this.setWaitReason(actor, fromId, "waiting for queue head");
+            return false;
+
+        }
+
 
         const laneIndex = this.graph.reserveConnectionLane(
             fromId,
@@ -73,154 +134,365 @@ export class NavigationTrafficSystem {
             actor
         );
 
-        if (laneIndex === null) return false;
+        if (laneIndex === null) {
 
-        if (!this.graph.reserveNode(toId, actor)) {
+            this.setWaitReason(actor, fromId, "no lane available");
+            return false;
+
+        }
+
+
+        if (!this.graph.reserveNodeForTransit(toId, actor)) {
 
             this.graph.releaseConnection(fromId, toId, actor);
+            this.setWaitReason(actor, toId, "destination is unavailable");
             return false;
+
+        }
+
+        // Dwell exit is prepared only after the lane and destination have been
+        // secured. During its animation the actor still owns the spot/node.
+        if (!this.owner.prepareDwellExit(context)) return false;
+
+        const laneStart = this.graph.getConnectionLaneNodePosition(
+            fromId,
+            fromId,
+            toId,
+            laneIndex
+        );
+        const laneEnd = this.graph.getConnectionLaneNodePosition(
+            toId,
+            fromId,
+            toId,
+            laneIndex
+        );
+        const nextWaypoint = actor.navigation.getNextWaypoint();
+        const nextNodeId = nextWaypoint?.id &&
+            this.graph.hasNode(nextWaypoint.id) &&
+            this.graph.areConnected(toId, nextWaypoint.id)
+            ? nextWaypoint.id
+            : null;
+        const arrivalDirection = nextNodeId
+            ? this.createTransitTangent(fromId, toId, nextNodeId)
+            : null;
+        const storedTangent = context.transitTangent;
+        const departureDirection =
+            storedTangent?.nodeId === fromId &&
+            storedTangent?.nextNodeId === toId
+                ? storedTangent.direction
+                : null;
+        const curveWaypoints = waypoint
+            ? this.createLaneCurveWaypoints(
+                actor.object3D.position,
+                laneStart,
+                laneEnd,
+                10,
+                { departureDirection, arrivalDirection }
+            )
+            : [];
+
+        if (connection.metadata.traversal === "slope") {
+
+            // The base floor exists below both test ramps. Slope samples must
+            // select the upper raycast hit, otherwise they project back onto
+            // the base and visually/semantically remain at Y=0.
+            this.owner.projectWaypointsToGround(curveWaypoints, {
+                preferHighest: true
+            });
+
+        }
+
+        // The arriving and departing curves consume the same tangent at this
+        // transit node. The handle arms lie on opposite sides of the join,
+        // providing C1 continuity without moving through the node center.
+        context.transitTangent = arrivalDirection
+            ? {
+                nodeId: toId,
+                nextNodeId,
+                direction: arrivalDirection.clone()
+            }
+            : null;
+
+        if (curveWaypoints.length > 0) {
+
+            this.graph.setActiveLaneCurve(actor, [
+                actor.object3D.position,
+                ...curveWaypoints.map(candidate => candidate.position),
+                laneEnd
+            ]);
+
+        }
+
+        this.owner.centerActorForDeparture(context);
+        context.nodeMode = NavigationNodeMode.TRANSIT;
+        context.currentTraversal = connection.metadata.traversal ?? "flat";
+        actor.traversalType = context.currentTraversal;
+        this.graph.occupyConnectionLane(fromId, toId, actor, laneIndex);
+
+        if (waypoint) {
+
+            waypoint.position.copy(laneEnd);
+
+        }
+        this.owner.releaseDwellOccupancy(actor);
+        this.graph.releaseNode(fromId, actor);
+        this.owner.retryFreedDwellSpot(fromId, actor);
+        // Every clearance request attached to this actor asked it to vacate
+        // fromId. Entering the connection fulfills all of them, including a
+        // node swap with the actor at the opposite endpoint.
+        this.departures.complete(fromId, actor);
+        this.clearWaitReason(actor);
+        this.owner.refresh();
+
+        if (curveWaypoints.length > 0) {
+
+            actor.navigation.insertManyBeforeCurrent(curveWaypoints);
+            actor.navigation.beginConnection(fromId, toId);
+            context.traversingLaneCurve = true;
+            return false;
+
+        }
+
+        return true;
+
+    }
+
+    tryLeaveNodeForInteraction(
+        actor,
+        originId,
+        waypoint = null,
+        transitionTarget = null
+    ) {
+
+        const context = this.owner.requireContext(actor);
+
+        if (this.graph.isNodeBlocked(originId)) {
+
+            this.departures.cancel(actor);
+            this.setWaitReason(actor, originId, "origin is hard-blocked");
+            return false;
+
+        }
+
+        this.departures.enqueue(originId, actor, {
+            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+        });
+
+        if (!this.departures.isFirst(originId, actor)) {
+
+            this.setWaitReason(actor, originId, "waiting for queue head");
+            return false;
+
+        }
+
+        if (!this.owner.prepareDwellExit(context)) return false;
+
+        if (actor.visual && Math.abs(actor.visual.position.x) > 0.01) {
+
+            this.moveVisualToCenter(actor);
+            this.setWaitReason(actor, originId, "returning to graph axis");
+            return false;
+
+        }
+
+        if (waypoint && !context.traversingInteractionCurve) {
+
+            const curveWaypoints = this.createInteractionCurveWaypoints(
+                actor.object3D.position,
+                waypoint.position,
+                transitionTarget
+            );
+
+            if (curveWaypoints.length > 0) {
+
+                this.graph.setActiveLaneCurve(actor, [
+                    actor.object3D.position,
+                    ...curveWaypoints.map(candidate => candidate.position),
+                    waypoint.position
+                ]);
+                actor.navigation.insertManyBeforeCurrent(curveWaypoints);
+                context.traversingInteractionCurve = true;
+                this.owner.refresh();
+                return false;
+
+            }
+
+        }
+
+        context.nodeMode = NavigationNodeMode.TRANSIT;
+        this.owner.centerActorForDeparture(context);
+        this.clearWaitReason(actor);
+        return true;
+
+    }
+
+    completeNodeDeparture(actor, originId) {
+
+        this.departures.complete(originId, actor);
+
+    }
+
+    tryExitConnectionForInteraction(actor) {
+
+        if (actor.visual && Math.abs(actor.visual.position.x) > 0.01) {
+
+            this.moveVisualToCenter(actor);
+            this.setWaitReason(actor, "connection", "returning to graph axis");
+            return false;
+
+        }
+
+        this.clearWaitReason(actor);
+        return true;
+
+    }
+
+    tryEnterFromInteraction(
+        actor,
+        { fromId, toId, originKey, anchorId = null },
+        waypoint = null
+    ) {
+
+        if (actor.navigation.getTraversalState().currentConnection) return true;
+
+        const connection = this.graph.requireConnection(fromId, toId);
+
+        if (this.graph.isNodeBlocked(toId) || connection.blocked) {
+
+            this.departures.cancel(actor);
+            this.setWaitReason(actor, originKey, "exit is hard-blocked");
+            return false;
+
+        }
+
+        this.departures.enqueue(originKey, actor);
+
+        if (!this.departures.isFirst(originKey, actor)) {
+
+            this.setWaitReason(actor, originKey, "waiting for queue head");
+            return false;
+
+        }
+
+        const context = this.owner.requireContext(actor);
+        const anchor = anchorId
+            ? this.owner.connector.anchors.get(anchorId)
+            : null;
+        const approachLaneIndex = anchor
+            ? anchor.lanePositions.reduce((closestIndex, position, index) =>
+                position.distanceToSquared(actor.object3D.position) <
+                anchor.lanePositions[closestIndex].distanceToSquared(
+                    actor.object3D.position
+                ) ? index : closestIndex
+            , 0)
+            : null;
+        const laneIndex = approachLaneIndex === null
+            ? this.graph.reserveConnectionLane(fromId, toId, actor)
+            : this.graph.reserveSpecificConnectionLane(
+                fromId,
+                toId,
+                approachLaneIndex,
+                actor
+            );
+
+        if (laneIndex === null) {
+
+            this.setWaitReason(actor, originKey, "no lane available");
+            return false;
+
+        }
+
+
+        if (!this.graph.reserveNodeForTransit(toId, actor)) {
+
+            this.graph.releaseConnection(fromId, toId, actor);
+            this.setWaitReason(actor, toId, "endpoint is unavailable");
+            return false;
+
+        }
+
+        const portal = anchor?.lanePositions[laneIndex]?.clone() ??
+            waypoint?.position.clone();
+        const laneEnd = this.graph.getConnectionLaneNodePosition(
+            toId,
+            fromId,
+            toId,
+            laneIndex
+        );
+
+        if (waypoint && portal && !context.traversingInteractionCurve) {
+
+            waypoint.position.copy(portal);
+            const interactionCurve = this.createInteractionCurveWaypoints(
+                actor.object3D.position,
+                portal,
+                laneEnd
+            );
+
+            if (interactionCurve.length > 0) {
+
+                this.graph.setActiveLaneCurve(actor, [
+                    actor.object3D.position,
+                    ...interactionCurve.map(candidate => candidate.position),
+                    portal
+                ]);
+                actor.navigation.insertManyBeforeCurrent(interactionCurve);
+                context.traversingInteractionCurve = true;
+                this.owner.refresh();
+                return false;
+
+            }
 
         }
 
         this.graph.occupyConnectionLane(fromId, toId, actor, laneIndex);
         actor.navigation.beginConnection(fromId, toId);
-        this.owner.centerActorForDeparture(this.owner.requireContext(actor));
+
+        context.nodeMode = NavigationNodeMode.TRANSIT;
+        this.owner.centerActorForDeparture(context);
+
+        if (waypoint && portal) {
+
+            waypoint.position.copy(portal);
+            const nextWaypoint = actor.navigation.getNextWaypoint();
+            const departureControl = portal.clone().lerp(laneEnd, 0.25);
+            const laneCurve = this.createLaneCurveWaypoints(
+                portal,
+                departureControl,
+                laneEnd
+            );
+
+            if (nextWaypoint?.id === toId) {
+
+                nextWaypoint.position.copy(laneEnd);
+                actor.navigation.insertManyAfterCurrent(laneCurve);
+                context.traversingLaneCurve = laneCurve.length > 0;
+                this.graph.setActiveLaneCurve(actor, [
+                    portal,
+                    ...laneCurve.map(candidate => candidate.position),
+                    laneEnd
+                ]);
+
+            }
+
+        }
+
+        this.clearWaitReason(actor);
         this.owner.refresh();
 
         return true;
 
     }
 
+    completeInteractionDeparture(actor, originKey) {
+
+        if (originKey) this.departures.complete(originKey, actor);
+
+    }
+
     // -----------------------------
-    // Encounter presentation
+    // Lane presentation
     // -----------------------------
-
-    update() {
-
-        const observedPairs = this.collectOpposingPairs();
-
-        for (const pair of observedPairs) {
-
-            const existing = this.activeEncounters.find(encounter =>
-                encounter.connection === pair.connection &&
-                encounter.first === pair.first.actor &&
-                encounter.second === pair.second.actor
-            );
-            const distance = this.getPlanarDistance(
-                pair.first.actor,
-                pair.second.actor
-            );
-            const crossed = this.haveCrossed(pair);
-
-            if (!existing && !crossed && distance <= 2.5) {
-
-                this.activeEncounters.push({
-                    connection: pair.connection,
-                    first: pair.first.actor,
-                    second: pair.second.actor,
-                    crossed: false
-                });
-                this.moveVisualToLane(pair.first);
-                this.moveVisualToLane(pair.second);
-
-            } else if (existing && crossed) {
-
-                existing.crossed = true;
-
-            }
-
-        }
-
-        this.activeEncounters = this.activeEncounters.filter(encounter => {
-
-            const pair = observedPairs.find(candidate =>
-                candidate.connection === encounter.connection &&
-                candidate.first.actor === encounter.first &&
-                candidate.second.actor === encounter.second
-            );
-            const finished = !pair || (
-                encounter.crossed &&
-                this.getPlanarDistance(
-                    encounter.first,
-                    encounter.second
-                ) >= 1.2
-            );
-
-            if (finished) {
-
-                this.moveVisualToCenter(encounter.first);
-                this.moveVisualToCenter(encounter.second);
-
-            }
-
-            return !finished;
-
-        });
-
-    }
-
-    collectOpposingPairs() {
-
-        const pairs = [];
-        for (const connection of this.graph.activeConnections) {
-
-                const forward = [];
-                const reverse = [];
-
-                for (const lane of connection.lanes) {
-
-                    for (const actor of lane.occupants) {
-
-                        const direction = lane.directions.get(actor);
-                        const entry = { actor, laneIndex: lane.index, direction };
-
-                        if (direction?.fromId === connection.fromId) {
-
-                            forward.push(entry);
-
-                        } else if (direction) {
-
-                            reverse.push(entry);
-
-                        }
-
-                    }
-
-                }
-
-                for (const first of forward) {
-
-                    for (const second of reverse) {
-
-                        pairs.push({ connection, first, second });
-
-                    }
-
-                }
-
-        }
-
-        return pairs;
-
-    }
-
-    moveVisualToLane({ actor, direction, laneIndex }) {
-
-        if (!actor.visual) return;
-
-        AnimationPresets.to(actor, {
-            object: actor.visual.position,
-            property: "x",
-            to: this.graph.getConnectionLaneOffset(
-                direction.fromId,
-                direction.toId,
-                laneIndex
-            ),
-            duration: 0.25,
-            easing: Tween.easeInOutQuad
-        });
-
-    }
 
     moveVisualToCenter(actor) {
 
@@ -236,34 +508,209 @@ export class NavigationTrafficSystem {
 
     }
 
-    haveCrossed({ connection, first, second }) {
+    createTransitTangent(previousId, nodeId, nextId) {
 
-        const from = this.graph.requireNode(connection.fromId).position;
-        const to = this.graph.requireNode(connection.toId).position;
-        const directionX = to.x - from.x;
-        const directionZ = to.z - from.z;
-        const progress = entry =>
-            (entry.actor.object3D.position.x - from.x) * directionX +
-            (entry.actor.object3D.position.z - from.z) * directionZ;
-
-        return progress(first) >= progress(second);
+        const previous = this.graph.requireNode(previousId).position;
+        const node = this.graph.requireNode(nodeId).position;
+        const next = this.graph.requireNode(nextId).position;
+        return this.createPositionTangent(previous, node, next);
 
     }
 
-    getPlanarDistance(first, second) {
+    createPositionTangent(previous, node, next) {
 
-        return Math.hypot(
-            first.object3D.position.x - second.object3D.position.x,
-            first.object3D.position.z - second.object3D.position.z
+        // Curve tangents are fully spatial. Locomotion projects only the body
+        // rotation onto XZ, so following a slope never tilts the character.
+        const incoming = node.clone().sub(previous).normalize();
+        const outgoing = next.clone().sub(node).normalize();
+        const tangent = incoming.add(outgoing);
+
+        // A U-turn has no stable bisector. Following the outgoing direction is
+        // predictable and avoids an almost-zero vector producing a sharp flip.
+        return tangent.lengthSq() > 0.0001
+            ? tangent.normalize()
+            : outgoing;
+
+    }
+
+    createLaneCurveWaypoints(
+        start,
+        laneStart,
+        end,
+        segments = 10,
+        {
+            departureDirection = null,
+            arrivalDirection = null
+        } = {}
+    ) {
+
+        const distance = start.distanceTo(end);
+
+        if (distance <= 0.1) return [];
+
+        const defaultDirection = end.clone().sub(laneStart).normalize();
+        const startTangent = departureDirection?.clone().normalize() ??
+            laneStart.clone().sub(start).normalize();
+        const endTangent = arrivalDirection?.clone().normalize() ??
+            defaultDirection;
+        const handleLength = Math.min(1.5, distance / 3);
+        const firstControl = start.clone().addScaledVector(
+            startTangent.lengthSq() > 0.0001
+                ? startTangent
+                : defaultDirection,
+            handleLength
         );
+        const secondControl = end.clone().addScaledVector(
+            endTangent,
+            -handleLength
+        );
+        const waypoints = [];
+
+        for (let index = 1; index < segments; index++) {
+
+            const t = index / segments;
+            const inverse = 1 - t;
+            const position = start.clone().multiplyScalar(inverse ** 3)
+                .add(firstControl.clone().multiplyScalar(
+                    3 * inverse ** 2 * t
+                ))
+                .add(secondControl.clone().multiplyScalar(
+                    3 * inverse * t ** 2
+                ))
+                .add(end.clone().multiplyScalar(t ** 3));
+
+            waypoints.push({
+                id: null,
+                position,
+                laneCurve: true
+            });
+
+        }
+
+        return this.owner.projectWaypointsToGround(waypoints);
+
+    }
+
+    createInteractionCurveWaypoints(
+        start,
+        portal,
+        transitionTarget = null,
+        segments = 8
+    ) {
+
+        const distance = start.distanceTo(portal);
+
+        if (distance <= 0.1) return [];
+
+        const towardPortal = portal.clone().sub(start).normalize();
+        const towardInteraction = transitionTarget
+            ? transitionTarget.clone().sub(portal).normalize()
+            : towardPortal;
+        const handleLength = Math.min(1.2, distance * 0.4);
+        const firstControl = start.clone().addScaledVector(
+            towardPortal,
+            handleLength
+        );
+        const secondControl = portal.clone().addScaledVector(
+            towardInteraction,
+            -handleLength * 0.65
+        );
+        const waypoints = [];
+
+        for (let index = 1; index < segments; index++) {
+
+            const t = index / segments;
+            const inverse = 1 - t;
+            const position = start.clone().multiplyScalar(inverse ** 3)
+                .add(firstControl.clone().multiplyScalar(
+                    3 * inverse ** 2 * t
+                ))
+                .add(secondControl.clone().multiplyScalar(
+                    3 * inverse * t ** 2
+                ))
+                .add(portal.clone().multiplyScalar(t ** 3));
+
+            waypoints.push({
+                id: null,
+                position,
+                interactionCurve: true
+            });
+
+        }
+
+        return this.owner.projectWaypointsToGround(waypoints);
 
     }
 
     unregister(actor) {
 
-        this.activeEncounters = this.activeEncounters.filter(encounter =>
-            encounter.first !== actor && encounter.second !== actor
+        this.cancel(actor);
+
+    }
+
+    cancel(actor) {
+
+        this.departures.cancel(actor);
+        this.graph.releaseReservations(actor);
+        this.owner.releaseDwellReservation(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        const context = this.owner.contexts.get(actor);
+
+        if (context) {
+
+            context.traversingLaneCurve = false;
+            context.traversingInteractionCurve = false;
+            context.traversingDwellCurve = false;
+            context.transitTangent = null;
+            context.arrivalFromNodeId = null;
+
+        }
+
+        this.clearWaitReason(actor);
+
+    }
+
+    setWaitReason(actor, resourceId, reason) {
+
+        const key = `${resourceId}:${reason}`;
+
+        if (this.waitReasons.get(actor) === key) return;
+
+        this.waitReasons.set(actor, key);
+        console.log(
+            `[NavigationQueue] … ${actor.name} waits at ` +
+            `"${resourceId}": ${reason}.`
         );
+
+    }
+
+    clearWaitReason(actor) {
+
+        if (!this.waitReasons.has(actor)) return;
+
+        console.log(`[NavigationQueue] → ${actor.name} may proceed.`);
+        this.waitReasons.delete(actor);
+
+    }
+
+    debugQueues() {
+
+        return this.departures.debug();
+
+    }
+
+    isQueued(actor) {
+
+        return this.departures.has(actor);
+
+    }
+
+    getDebugState(actor) {
+
+        return {
+            queue: this.departures.getActorRequest(actor),
+            waitReason: this.waitReasons.get(actor) ?? null
+        };
 
     }
 
