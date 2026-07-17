@@ -6,6 +6,7 @@ import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
 import { InteractionNavigation } from "./InteractionNavigation";
 import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
 import { PhysicsWorld } from "../physics/PhysicsWorld";
+import { WaitReason } from "./WaitReason";
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
@@ -28,6 +29,7 @@ export class CharacterNavigationSystem {
         this.interactions = new InteractionNavigation(this);
         this.collisionFailsafe = new CharacterCollisionFailsafe(this);
         this.physics = new PhysicsWorld(this);
+        this.dwellRetryTimers = new Map();
         this.grounding = null;
 
     }
@@ -71,7 +73,7 @@ export class CharacterNavigationSystem {
             turnaroundElapsed: 0,
             turnaroundDuration: 0.35,
             recoveryElapsed: 0,
-            recoveryTimeout: 3,
+            recoveryTimeout: actor.name === "Player" ? 8 : 3,
             recoveryPosition: actor.object3D.position.clone(),
             orphanedElapsed: 0,
             queueWaitElapsed: 0,
@@ -85,6 +87,9 @@ export class CharacterNavigationSystem {
 
         actor.setWaypointReachedHandler((waypoint, completedConnection) =>
             this.handleWaypointReached(context, waypoint, completedConnection)
+        );
+        actor.setWaypointArrivalGuard((waypoint, completedConnection) =>
+            this.canAcceptWaypointArrival(context, waypoint, completedConnection)
         );
         actor.setSegmentRequestedHandler((fromId, toId, waypoint) =>
             this.tryStartConnection(actor, fromId, toId, waypoint)
@@ -149,6 +154,7 @@ export class CharacterNavigationSystem {
         this.collisionFailsafe.unregister(actor);
         this.physics.unregisterActor(actor);
         actor.setMovementGuard(null);
+        actor.setWaypointArrivalGuard(null);
         this.contexts.delete(actor);
         this.refresh();
 
@@ -675,6 +681,33 @@ export class CharacterNavigationSystem {
 
     }
 
+    canAcceptWaypointArrival(context, waypoint, completedConnection) {
+
+        if (!completedConnection || !waypoint?.id) return true;
+
+        const { actor } = context;
+        if (!this.traffic.isFirstAtNode(waypoint.id, actor)) {
+            this.traffic.setWaitReason(
+                actor,
+                waypoint.id,
+                WaitReason.QUEUE_HEAD
+            );
+            return false;
+        }
+
+        if (!this.graph.isNodeAvailable(waypoint.id, actor)) {
+            this.traffic.setWaitReason(
+                actor,
+                waypoint.id,
+                WaitReason.NODE_OCCUPIED
+            );
+            return false;
+        }
+
+        return true;
+
+    }
+
     rejectInvalidSegment(actor, fromId, toId) {
 
         const context = this.requireContext(actor);
@@ -796,6 +829,8 @@ export class CharacterNavigationSystem {
             return false;
 
         }
+
+        this.traffic.completeNodeArrival(waypoint.id, actor);
 
         if (reachedDestination) {
 
@@ -936,6 +971,7 @@ export class CharacterNavigationSystem {
         if (immediate) {
 
             this.dwellSpots.occupy(spot, actor);
+            this.physics.setDwellProtected(actor, true);
             actor.object3D.position.x = worldPosition.x;
             actor.object3D.position.z = worldPosition.z;
             this.orientActor(actor, spot.getDirection());
@@ -1026,6 +1062,7 @@ export class CharacterNavigationSystem {
         // Dwell begins at physical arrival, before its entry animation. From
         // this instant the spot is occupied and the node is resting/passable.
         this.dwellSpots.occupy(spot, actor);
+        this.physics.setDwellProtected(actor, true);
         this.graph.releaseNodeReservation(spot.nodeId, actor);
         this.graph.setNodeAgentResting(spot.nodeId, actor, true);
         actor.setState(EntityState.DWELLING);
@@ -2235,6 +2272,7 @@ export class CharacterNavigationSystem {
             ? context.dwellSpot
             : null;
 
+        this.physics.setDwellProtected(actor, false);
         this.dwellSpots.releaseOccupancy(actor);
 
         if (occupiedSpot && context) {
@@ -2304,7 +2342,11 @@ export class CharacterNavigationSystem {
                 nextStructuralWaypoint?.departureRequest?.originId ??
                 (waypoint ? "curve → local target" : "—"),
             intent: interaction?.id ??
-                (context.pendingPosition ? context.destinationId ?? "position" : "—"),
+                (context.pendingPosition
+                    ? context.destinationId ??
+                        `position (${context.pendingPosition.x.toFixed(1)}, ` +
+                        `${context.pendingPosition.z.toFixed(1)})`
+                    : "—"),
             queue: traffic.queue
                 ? `${traffic.queue.originId} ${traffic.queue.position}/${traffic.queue.length}`
                 : "—",
@@ -2316,23 +2358,31 @@ export class CharacterNavigationSystem {
 
     }
 
-    retryFreedDwellSpot(nodeId, departingActor) {
+    retryFreedDwellSpot(nodeId, departingActor) {        // Keep the released spot clear for a short handoff interval. This
+        // prevents an actor already waiting on the node from snapping into the
+        // animation position in the same frame as the previous occupant exits.
+        if (this.dwellRetryTimers.has(nodeId)) return;
 
-        // Releasing a spot is the useful retry event. This lets an actor that
-        // deliberately waited on the node claim the newly free authored spot
-        // without polling every frame.
-        for (const context of this.contexts.values()) {
+        const timer = window.setTimeout(() => {
 
-            const { actor } = context;
-            const traversal = actor.navigation.getTraversalState();
+            this.dwellRetryTimers.delete(nodeId);
 
-            if (actor === departingActor || context.dwellSpot ||
-                context.nodeMode !== NavigationNodeMode.DWELL ||
-                traversal.currentNodeId !== nodeId) continue;
+            for (const context of this.contexts.values()) {
 
-            this.parkActorAtNode(context, nodeId);
+                const { actor } = context;
+                const traversal = actor.navigation.getTraversalState();
 
-        }
+                if (actor === departingActor || context.dwellSpot ||
+                    context.nodeMode !== NavigationNodeMode.DWELL ||
+                    traversal.currentNodeId !== nodeId) continue;
+
+                this.parkActorAtNode(context, nodeId);
+
+            }
+
+        }, 1000);
+
+        this.dwellRetryTimers.set(nodeId, timer);
 
     }
 
@@ -2353,6 +2403,18 @@ export class CharacterNavigationSystem {
     debugQueues() {
 
         return this.traffic.debugQueues();
+
+    }
+
+    dispose() {
+
+        for (const timer of this.dwellRetryTimers.values()) {
+
+            window.clearTimeout(timer);
+
+        }
+
+        this.dwellRetryTimers.clear();
 
     }
 

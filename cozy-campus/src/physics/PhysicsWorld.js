@@ -58,9 +58,26 @@ export class PhysicsWorld {
         body.velocity.set(0, 0, 0);
         body.angularVelocity.set(0, 0, 0);
         body.characterRadius = radius;
+        body.dwellProtected = false;
         body.collisionResponse = true;
         this.world.addBody(body);
         this.actorBodies.set(actor, body);
+
+    }
+
+    setDwellProtected(actor, protectedState) {
+
+        const body = this.actorBodies.get(actor);
+        if (!body) return;
+
+        body.dwellProtected = protectedState;
+        body.type = protectedState
+            ? CANNON.Body.KINEMATIC
+            : CANNON.Body.DYNAMIC;
+        body.updateMassProperties();
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        body.wakeUp();
 
     }
 
@@ -82,6 +99,18 @@ export class PhysicsWorld {
         for (const [actor, body] of this.actorBodies) {
 
             if (!actor.isActive()) continue;
+
+            if (body.dwellProtected) {
+
+                body.position.x = actor.object3D.position.x;
+                body.position.z = actor.object3D.position.z;
+                body.position.y = actor.object3D.position.y +
+                    body.characterRadius;
+                body.velocity.set(0, 0, 0);
+                body.angularVelocity.set(0, 0, 0);
+                continue;
+
+            }
 
             // Navigation/locomotion own intent. Cannon only separates overlaps
             // from the already chosen frame position. Use velocity-to-target
@@ -123,6 +152,67 @@ export class PhysicsWorld {
 
             actor.object3D.position.x = body.position.x;
             actor.object3D.position.z = body.position.z;
+
+        }
+
+        this.separateContacts();
+
+    }
+
+    separateContacts() {
+
+        const actors = [...this.actorBodies.entries()]
+            .filter(([actor]) => actor.isActive());
+
+        for (let firstIndex = 0; firstIndex < actors.length; firstIndex++) {
+
+            const [firstActor, firstBody] = actors[firstIndex];
+
+            for (let secondIndex = firstIndex + 1;
+                secondIndex < actors.length;
+                secondIndex++) {
+
+                const [secondActor, secondBody] = actors[secondIndex];
+                const firstRadius = this.getActorRadius(firstActor);
+                const secondRadius = this.getActorRadius(secondActor);
+                const minimumDistance =
+                    firstRadius + secondRadius + this.contactSkin;
+                let deltaX = secondBody.position.x - firstBody.position.x;
+                let deltaZ = secondBody.position.z - firstBody.position.z;
+                let distance = Math.hypot(deltaX, deltaZ);
+
+                if (distance >= minimumDistance) continue;
+
+                if (firstBody.dwellProtected && secondBody.dwellProtected) {
+                    continue;
+                }
+
+                if (distance < 0.0001) {
+
+                    const sign = firstIndex % 2 === 0 ? 1 : -1;
+                    deltaX = sign;
+                    deltaZ = 0;
+                    distance = 1;
+
+                }
+
+                const correction = (minimumDistance - distance) / distance;
+                const correctionShare = firstBody.dwellProtected ? 0 :
+                    secondBody.dwellProtected ? 1 : 0.5;
+                const moveX = deltaX * correction * correctionShare;
+                const moveZ = deltaZ * correction * correctionShare;
+
+                firstBody.position.x -= moveX;
+                firstBody.position.z -= moveZ;
+                secondBody.position.x += moveX;
+                secondBody.position.z += moveZ;
+
+                firstActor.object3D.position.x = firstBody.position.x;
+                firstActor.object3D.position.z = firstBody.position.z;
+                secondActor.object3D.position.x = secondBody.position.x;
+                secondActor.object3D.position.z = secondBody.position.z;
+
+            }
 
         }
 

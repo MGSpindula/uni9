@@ -2,6 +2,7 @@ import { AnimationPresets } from "../core/AnimationPresets";
 import { Tween } from "../core/Tween";
 import { NavigationDepartureQueue } from "./NavigationDepartureQueue";
 import { NavigationNodeMode } from "./NavigationNodeMode";
+import { WaitReason, WaitReasonLabel } from "./WaitReason";
 
 export class NavigationTrafficSystem {
 
@@ -10,6 +11,7 @@ export class NavigationTrafficSystem {
         this.owner = owner;
         this.graph = owner.graph;
         this.departures = new NavigationDepartureQueue();
+        this.arrivals = new NavigationDepartureQueue();
         this.waitReasons = new Map();
 
     }
@@ -36,7 +38,11 @@ export class NavigationTrafficSystem {
 
         // This reserves only queue order, not the lane or destination node.
         // Temporary occupancy is rechecked at the actual handoff.
-        this.departures.enqueue(arrivalId, actor, { priority: 1 });
+        this.departures.enqueue(
+            arrivalId,
+            actor,
+            { priority: this.getActorPriority(actor, 1) }
+        );
 
     }
 
@@ -46,7 +52,7 @@ export class NavigationTrafficSystem {
 
         if (this.graph.isNodeBlocked(originId)) {
 
-            this.setWaitReason(actor, originId, "origin is hard-blocked");
+            this.setWaitReason(actor, originId, WaitReason.HARD_BLOCKED);
             return false;
 
         }
@@ -57,7 +63,7 @@ export class NavigationTrafficSystem {
 
             if (this.graph.isNodeBlocked(toId) || connection.blocked) {
 
-                this.setWaitReason(actor, originId, "return path is hard-blocked");
+                this.setWaitReason(actor, originId, WaitReason.HARD_BLOCKED);
                 return false;
 
             }
@@ -67,16 +73,19 @@ export class NavigationTrafficSystem {
         const context = this.owner.requireContext(actor);
 
         this.departures.enqueue(originId, actor, {
-            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            priority: this.getActorPriority(
+                actor,
+                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            )
         });
 
         if (!this.departures.isFirst(originId, actor)) {
 
-            this.setWaitReason(actor, originId, "turnaround queued");
+            this.setWaitReason(actor, originId, WaitReason.QUEUE_HEAD);
 
         } else {
 
-            this.setWaitReason(actor, originId, "turnaround is first in queue");
+            this.setWaitReason(actor, originId, WaitReason.QUEUE_FIRST);
 
         }
 
@@ -107,22 +116,24 @@ export class NavigationTrafficSystem {
             connection.blocked) {
 
             this.departures.cancel(actor);
-            this.setWaitReason(actor, fromId, "resource is hard-blocked");
+            this.setWaitReason(actor, fromId, WaitReason.HARD_BLOCKED);
             return false;
 
         }
 
-        // TRANSIT clears the node before DWELL departures. The queue orders
-        // exits; node availability is intentionally not checked here because
-        // it describes whether another actor may enter, not whether an existing
-        // occupant may leave through a free lane.
         this.departures.enqueue(fromId, actor, {
-            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            priority: this.getActorPriority(
+                actor,
+                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            )
+        });
+        this.arrivals.enqueue(toId, actor, {
+            priority: this.getActorPriority(actor, 1)
         });
 
         if (!this.departures.isFirst(fromId, actor)) {
 
-            this.setWaitReason(actor, fromId, "waiting for queue head");
+            this.setWaitReason(actor, fromId, WaitReason.QUEUE_HEAD);
             return false;
 
         }
@@ -136,18 +147,15 @@ export class NavigationTrafficSystem {
 
         if (laneIndex === null) {
 
-            this.setWaitReason(actor, fromId, "no lane available");
+            this.setWaitReason(actor, fromId, WaitReason.LANE_FULL);
             return false;
 
         }
 
 
-        if (!this.graph.reserveNodeForTransit(toId, actor)) {
-
-            this.graph.releaseConnection(fromId, toId, actor);
-            this.setWaitReason(actor, toId, "destination is unavailable");
-            return false;
-
+        const endpointReserved = this.graph.reserveNodeForTransit(toId, actor);
+        if (!endpointReserved) {
+            this.setWaitReason(actor, toId, WaitReason.ENDPOINT_WAIT);
         }
 
         // Dwell exit is prepared only after the lane and destination have been
@@ -269,18 +277,21 @@ export class NavigationTrafficSystem {
         if (this.graph.isNodeBlocked(originId)) {
 
             this.departures.cancel(actor);
-            this.setWaitReason(actor, originId, "origin is hard-blocked");
+            this.setWaitReason(actor, originId, WaitReason.HARD_BLOCKED);
             return false;
 
         }
 
         this.departures.enqueue(originId, actor, {
-            priority: context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            priority: this.getActorPriority(
+                actor,
+                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
+            )
         });
 
         if (!this.departures.isFirst(originId, actor)) {
 
-            this.setWaitReason(actor, originId, "waiting for queue head");
+            this.setWaitReason(actor, originId, WaitReason.QUEUE_HEAD);
             return false;
 
         }
@@ -290,7 +301,7 @@ export class NavigationTrafficSystem {
         if (actor.visual && Math.abs(actor.visual.position.x) > 0.01) {
 
             this.moveVisualToCenter(actor);
-            this.setWaitReason(actor, originId, "returning to graph axis");
+            this.setWaitReason(actor, originId, WaitReason.REALIGNING);
             return false;
 
         }
@@ -337,7 +348,7 @@ export class NavigationTrafficSystem {
         if (actor.visual && Math.abs(actor.visual.position.x) > 0.01) {
 
             this.moveVisualToCenter(actor);
-            this.setWaitReason(actor, "connection", "returning to graph axis");
+            this.setWaitReason(actor, "connection", WaitReason.REALIGNING);
             return false;
 
         }
@@ -360,16 +371,21 @@ export class NavigationTrafficSystem {
         if (this.graph.isNodeBlocked(toId) || connection.blocked) {
 
             this.departures.cancel(actor);
-            this.setWaitReason(actor, originKey, "exit is hard-blocked");
+            this.setWaitReason(actor, originKey, WaitReason.HARD_BLOCKED);
             return false;
 
         }
 
-        this.departures.enqueue(originKey, actor);
+        this.departures.enqueue(originKey, actor, {
+            priority: this.getActorPriority(actor)
+        });
+        this.arrivals.enqueue(toId, actor, {
+            priority: this.getActorPriority(actor, 1)
+        });
 
         if (!this.departures.isFirst(originKey, actor)) {
 
-            this.setWaitReason(actor, originKey, "waiting for queue head");
+            this.setWaitReason(actor, originKey, WaitReason.QUEUE_HEAD);
             return false;
 
         }
@@ -397,18 +413,14 @@ export class NavigationTrafficSystem {
 
         if (laneIndex === null) {
 
-            this.setWaitReason(actor, originKey, "no lane available");
+            this.setWaitReason(actor, originKey, WaitReason.LANE_FULL);
             return false;
 
         }
 
 
         if (!this.graph.reserveNodeForTransit(toId, actor)) {
-
-            this.graph.releaseConnection(fromId, toId, actor);
-            this.setWaitReason(actor, toId, "endpoint is unavailable");
-            return false;
-
+            this.setWaitReason(actor, toId, WaitReason.ENDPOINT_WAIT);
         }
 
         const portal = anchor?.lanePositions[laneIndex]?.clone() ??
@@ -651,6 +663,7 @@ export class NavigationTrafficSystem {
     cancel(actor) {
 
         this.departures.cancel(actor);
+        this.arrivals.cancel(actor);
         this.graph.releaseReservations(actor);
         this.owner.releaseDwellReservation(actor);
         this.graph.clearActiveLaneCurve(actor);
@@ -672,14 +685,14 @@ export class NavigationTrafficSystem {
 
     setWaitReason(actor, resourceId, reason) {
 
-        const key = `${resourceId}:${reason}`;
+        const key = `${reason}@${resourceId}`;
 
-        if (this.waitReasons.get(actor) === key) return;
+        if (this.waitReasons.get(actor)?.key === key) return;
 
-        this.waitReasons.set(actor, key);
+        this.waitReasons.set(actor, { key, resourceId, reason });
         console.log(
             `[NavigationQueue] … ${actor.name} waits at ` +
-            `"${resourceId}": ${reason}.`
+            `"${resourceId}": ${WaitReasonLabel[reason] ?? reason}.`
         );
 
     }
@@ -693,33 +706,74 @@ export class NavigationTrafficSystem {
 
     }
 
+    isFirstAtNode(nodeId, actor) {
+
+        if (!this.arrivals.hasAt(nodeId, actor)) return true;
+        return this.arrivals.isFirst(nodeId, actor);
+
+    }
+
+    isQueuedAtNode(nodeId, actor) {
+
+        return this.departures.hasAt(nodeId, actor) ||
+            this.arrivals.hasAt(nodeId, actor);
+
+    }
+
+    completeNodeArrival(nodeId, actor) {
+
+        this.arrivals.complete(nodeId, actor);
+
+    }
+
+    getActorPriority(actor, fallback = 0) {
+
+        return actor.name === "Player" ? 10 : fallback;
+
+    }
+
     debugQueues() {
 
-        return this.departures.debug();
+        console.log("-- Departures --");
+        this.departures.debug();
+        console.log("-- Arrivals --");
+        return this.arrivals.debug();
 
     }
 
     isQueued(actor) {
 
-        return this.departures.has(actor);
+        return this.departures.has(actor) || this.arrivals.has(actor);
 
     }
 
     isWaitingForQueue(actor) {
 
-        const request = this.departures.getActorRequest(actor);
+        const depRequest = this.departures.getActorRequest(actor);
+        if (depRequest && !this.departures.isFirst(depRequest.originId, actor)) {
+            return true;
+        }
 
-        if (!request) return false;
+        const arrRequest = this.arrivals.getActorRequest(actor);
+        if (arrRequest && !this.arrivals.isFirst(arrRequest.originId, actor)) {
+            return true;
+        }
 
-        return !this.departures.isFirst(request.originId, actor);
+        return false;
 
     }
 
     getDebugState(actor) {
 
+        const entry = this.departures.getActorRequest(actor) ??
+            this.arrivals.getActorRequest(actor);
+        const wr = this.waitReasons.get(actor);
+
         return {
-            queue: this.departures.getActorRequest(actor),
-            waitReason: this.waitReasons.get(actor) ?? null
+            queue: entry,
+            waitReason: wr
+                ? `${wr.reason} @ ${wr.resourceId}`
+                : null
         };
 
     }

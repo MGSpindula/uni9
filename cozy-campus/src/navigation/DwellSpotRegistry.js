@@ -94,7 +94,12 @@ export class DwellSpotRegistry {
 
         for (const spot of this.spots.values()) {
 
-            if (spot.occupant === actor) spot.occupant = null;
+            if (spot.occupant === actor) {
+
+                spot.occupant = null;
+                spot.availableAfter = Date.now() + 1000;
+
+            }
 
         }
 

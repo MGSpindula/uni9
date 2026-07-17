@@ -183,8 +183,6 @@ export class Scene {
 
         this.scene.add(sun);
 
-        /* const helper = new THREE.CameraHelper(sun.shadow.camera);
-        this.scene.add(helper); */
     }
 
     createObjects() {
@@ -461,58 +459,6 @@ export class Scene {
         this.controls.update();
 
         this.characterNavigation.update(delta);
-
-    }
-
-    occupyNavigationNode(id, occupant) {
-
-        const occupied = this.navigationGraph.occupyNode(id, occupant);
-
-        return occupied;
-
-    }
-
-    releaseNavigationNode(id, occupant) {
-
-        this.navigationGraph.releaseNode(id, occupant);
-
-    }
-
-    occupyNavigationConnection(fromId, toId, occupant) {
-
-        const occupied = this.navigationGraph.occupyConnection(
-            fromId,
-            toId,
-            occupant
-        );
-
-        return occupied;
-
-    }
-
-    releaseNavigationConnection(fromId, toId, occupant) {
-
-        this.navigationGraph.releaseConnection(fromId, toId, occupant);
-
-    }
-
-    occupyNavigationInteractionPoint(id, occupant) {
-
-        const point = this.navigationConnector.points.get(id);
-        const occupied = point
-            ? this.navigationConnector.occupyPoint(point, occupant)
-            : false;
-
-        return occupied;
-
-    }
-
-    releaseNavigationInteractionPoint(id, occupant) {
-
-        const point = this.navigationConnector.points.get(id);
-
-        if (point) this.navigationConnector.releasePoint(point, occupant);
-
 
     }
 

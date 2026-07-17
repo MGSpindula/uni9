@@ -133,7 +133,7 @@ export class NavigationGraph {
         metadata = {},
         // Global spacing between the centers of lanes A and B. Override with
         // graph.connect(fromId, toId, { laneWidth: ... }) for one connection.
-        laneWidth = 0.9
+        laneWidth = 1.0
     } = {}) {
 
         const from = this.getNode(fromId);
@@ -282,6 +282,11 @@ export class NavigationGraph {
             if (reservation !== agent) return false;
 
         }
+        for (const reservation of node.transitReservations) {
+
+            if (reservation !== agent) return false;
+
+        }
 
         if (!node.exclusive) return true;
 
@@ -411,9 +416,23 @@ export class NavigationGraph {
 
         if (node.blocked) return false;
 
-        // Ordinary circulation nodes are optimistic rendezvous points. Lanes
-        // and the physical failsafe arbitrate actual passage. Authored
-        // exclusive nodes retain their strict capacity contract.
+        // A transit reservation is an endpoint claim, not just a diagnostic
+        // marker. Do not let two actors enter the same node and rely on Cannon
+        // to decide which one gets stuck there.
+        if ([...node.reservations].some(candidate => candidate !== agent)) {
+            return false;
+        }
+        if ([...node.occupants].some(candidate =>
+            candidate !== agent && !node.restingAgents.has(candidate)
+        )) {
+            return false;
+        }
+        if ([...node.transitReservations].some(candidate =>
+            candidate !== agent
+        )) {
+            return false;
+        }
+
         if (node.exclusive) return this.reserveNode(id, agent);
 
         node.transitReservations.add(agent);

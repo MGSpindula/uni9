@@ -395,8 +395,6 @@ export class Chair extends Entity {
 
     onStateChanged(previous, current) {
 
-        /* console.log(previous, "->", current); */
-
     }
 
     // -----------------------------

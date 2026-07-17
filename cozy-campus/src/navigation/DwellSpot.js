@@ -17,12 +17,14 @@ export class DwellSpot {
         this.metadata = { ...metadata };
         this.occupant = null;
         this.reservedBy = null;
+        this.availableAfter = 0;
 
     }
 
     isAvailable(actor = null) {
 
-        return (!this.occupant || this.occupant === actor) &&
+        return (this.occupant === actor ||
+            (!this.occupant && Date.now() >= this.availableAfter)) &&
             (!this.reservedBy || this.reservedBy === actor);
 
     }

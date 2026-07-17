@@ -31,6 +31,7 @@ export class Character extends Entity {
         this.canDwellWithoutSpot = false;
 
         this.waypointReachedHandler = null;
+        this.waypointArrivalGuard = null;
         this.segmentRequestedHandler = null;
         this.localPointRequestedHandler = null;
         this.localConnectionRequestedHandler = null;
@@ -93,6 +94,12 @@ export class Character extends Entity {
     setWaypointReachedHandler(handler) {
 
         this.waypointReachedHandler = handler;
+
+    }
+
+    setWaypointArrivalGuard(handler) {
+
+        this.waypointArrivalGuard = handler;
 
     }
 
@@ -392,15 +399,25 @@ export class Character extends Entity {
                 delta
             )) return;
 
+        const traversalBeforeArrival = this.navigation.getTraversalState();
         const completedConnection = waypoint.id
-            ? this.navigation.reachNode(waypoint.id)
+            ? traversalBeforeArrival.currentConnection
             : null;
+        const canAcceptArrival = this.waypointArrivalGuard?.(
+            waypoint,
+            completedConnection,
+        ) ?? true;
+
+        if (!canAcceptArrival) return;
+
+        if (waypoint.id) this.navigation.reachNode(waypoint.id);
 
         const completedRouteRevision = this.navigation.getRouteRevision();
 
         const waypointAccepted = this.waypointReachedHandler?.(
             waypoint,
-            completedConnection
+            completedConnection,
+            { afterArrival: true }
         );
 
         // Arrival ownership can change while the actor is on the connection.

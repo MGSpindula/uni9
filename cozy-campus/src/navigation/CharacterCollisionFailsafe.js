@@ -5,9 +5,9 @@ import * as THREE from "three";
 export class CharacterCollisionFailsafe {
 
     constructor(owner, {
-        detectionRadius = 2.4,
+        detectionRadius = 1.8,
         predictionTime = 0.34,
-        safetyPadding = 0.1
+        safetyPadding = 0.06
     } = {}) {
 
         this.owner = owner;
@@ -26,6 +26,12 @@ export class CharacterCollisionFailsafe {
     canMove(actor, target) {
 
         this.getIntendedVelocity(actor, target, this.velocity);
+
+        // Queue-controlled endpoint waiting must not be converted into a
+        // lateral avoidance maneuver. The actor has already committed to this
+        // lane; it may advance only after the node handoff is accepted.
+        if (this.isWaitingAtLaneEndpoint(actor)) return false;
+
         let blocker = null;
         let closestClearance = Infinity;
 
@@ -158,6 +164,40 @@ export class CharacterCollisionFailsafe {
         }
 
         return false;
+
+    }
+
+    isWaitingAtLaneEndpoint(actor) {
+
+        const traffic = this.owner.traffic;
+        const graph = this.owner.graph;
+        const connection = actor.navigation.getTraversalState().currentConnection;
+
+        if (!traffic || !connection) return false;
+        if (!traffic.isQueuedAtNode(connection.toId, actor)) return false;
+        if (graph.isNodeAvailable(connection.toId, actor) &&
+            traffic.isFirstAtNode(connection.toId, actor)) return false;
+
+        const laneIndex = graph.getConnectionLaneIndex(
+            connection.fromId,
+            connection.toId,
+            actor
+        );
+        if (laneIndex === null) return false;
+
+        const endpoint = graph.getConnectionLaneNodePosition(
+            connection.toId,
+            connection.fromId,
+            connection.toId,
+            laneIndex
+        );
+        const endpointDistance = actor.object3D.position.distanceTo(endpoint);
+        const stoppingDistance = Math.max(
+            0.85,
+            (actor.collisionRadius ?? 0.42) * 2.2
+        );
+
+        return endpointDistance <= stoppingDistance;
 
     }
 

@@ -2,7 +2,8 @@ export class NavigationDepartureQueue {
 
     constructor() {
 
-        this.queues = new Map();
+        this.queues = new Map();      // originId → request[]
+        this.actorIndex = new Map();  // actor → Map<originId, request>
         this.sequence = 0;
 
     }
@@ -10,7 +11,7 @@ export class NavigationDepartureQueue {
     enqueue(originId, actor, { priority = 0 } = {}) {
 
         const queue = this.queues.get(originId) ?? [];
-        let request = queue.find(candidate => candidate.actor === actor);
+        let request = this._getRequest(actor, originId);
 
         if (!request) {
 
@@ -26,6 +27,14 @@ export class NavigationDepartureQueue {
                 first.order - second.order
             );
             this.queues.set(originId, queue);
+
+            let actorEntries = this.actorIndex.get(actor);
+            if (!actorEntries) {
+                actorEntries = new Map();
+                this.actorIndex.set(actor, actorEntries);
+            }
+            actorEntries.set(originId, request);
+
             const position = queue.indexOf(request) + 1;
             console.log(
                 `[NavigationQueue] + ${actor.name} queued at "${originId}" ` +
@@ -51,35 +60,47 @@ export class NavigationDepartureQueue {
 
     }
 
+    _getRequest(actor, originId) {
+
+        return this.actorIndex.get(actor)?.get(originId) ?? null;
+
+    }
+
     isFirst(originId, actor) {
 
         return this.queues.get(originId)?.[0]?.actor === actor;
 
     }
 
+    hasAt(originId, actor) {
+
+        return this.actorIndex.get(actor)?.has(originId) ?? false;
+
+    }
+
     has(actor) {
 
-        for (const queue of this.queues.values()) {
-
-            if (queue.some(request => request.actor === actor)) return true;
-
-        }
-
-        return false;
+        return (this.actorIndex.get(actor)?.size ?? 0) > 0;
 
     }
 
     getActorRequest(actor) {
 
-        for (const [originId, queue] of this.queues) {
+        const entries = this.actorIndex.get(actor);
+        if (!entries || entries.size === 0) return null;
 
-            const index = queue.findIndex(request => request.actor === actor);
+        for (const [originId, request] of entries) {
 
-            if (index >= 0) return {
+            const queue = this.queues.get(originId);
+            if (!queue) continue;
+            const index = queue.indexOf(request);
+            if (index < 0) continue;
+
+            return {
                 originId,
                 position: index + 1,
                 length: queue.length,
-                priority: queue[index].priority
+                priority: request.priority
             };
 
         }
@@ -91,14 +112,12 @@ export class NavigationDepartureQueue {
     complete(originId, actor) {
 
         const queue = this.queues.get(originId);
-
         if (!queue) return;
 
         const index = queue.findIndex(request => request.actor === actor);
-
-        if (index >= 0) queue.splice(index, 1);
         if (index >= 0) {
 
+            queue.splice(index, 1);
             console.log(
                 `[NavigationQueue] ✓ ${actor.name} completed "${originId}". ` +
                 `Next: ${queue[0]?.actor.name ?? "none"}.`
@@ -108,11 +127,25 @@ export class NavigationDepartureQueue {
 
         if (queue.length === 0) this.queues.delete(originId);
 
+        const actorEntries = this.actorIndex.get(actor);
+        if (actorEntries) {
+
+            actorEntries.delete(originId);
+            if (actorEntries.size === 0) this.actorIndex.delete(actor);
+
+        }
+
     }
 
     cancel(actor) {
 
-        for (const [originId, queue] of this.queues) {
+        const entries = this.actorIndex.get(actor);
+        if (!entries) return;
+
+        for (const originId of entries.keys()) {
+
+            const queue = this.queues.get(originId);
+            if (!queue) continue;
 
             const remaining = queue.filter(request => request.actor !== actor);
 
@@ -130,6 +163,8 @@ export class NavigationDepartureQueue {
             else this.queues.delete(originId);
 
         }
+
+        this.actorIndex.delete(actor);
 
     }
 
@@ -156,3 +191,4 @@ export class NavigationDepartureQueue {
     }
 
 }
+
