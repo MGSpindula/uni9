@@ -18,15 +18,6 @@ export class InteractionNavigation {
         context.retryElapsed = 0;
         context.blockedElapsed = null;
         context.recoveryPending = false;
-<<<<<<< HEAD
-=======
-        context.stateMachine.transitionToMoving({
-            kind: "interaction",
-            interactionPointId: point.id
-        });
-        this.owner.cancelPendingParking(context);
-
->>>>>>> b09e5f4 (Save uncommitted changes)
     }
 
     createDirectConnectionRoute(actor, point) {
@@ -180,9 +171,6 @@ export class InteractionNavigation {
                 target: waypoint.interactionPoint.entity,
                 point: waypoint.interactionPoint
             };
-            context.stateMachine.transitionToInteracting(
-                waypoint.interactionPoint
-            );
 
         }
 

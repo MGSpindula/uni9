@@ -2,12 +2,7 @@ import * as THREE from "three";
 
 export class Locomotion {
 
-    constructor(object3D, {
-        speed = 3,
-        turnSpeed = 8,
-        arrivalDistance = 0.05,
-        maxStepHeight = 0.35
-    } = {}) {
+    constructor(object3D, { speed = 3, turnSpeed = 8, arrivalDistance = 0.05 } = {}) {
 
         // Locomotion owns physical displacement, never animation selection.
         this.object3D = object3D;
@@ -17,30 +12,6 @@ export class Locomotion {
 
         this.direction = new THREE.Vector3();
         this.lookTarget = new THREE.Object3D();
-        this.maxStepHeight = maxStepHeight;
-        this.physicsBody = null;
-        this.slopeDetector = null;
-        this.walkingHeight = 0;
-        this.blockedBySlope = false;
-
-    }
-
-    setPhysicsBody(body, { walkingHeight = 0 } = {}) {
-
-        this.physicsBody = body;
-        this.walkingHeight = walkingHeight;
-
-    }
-
-    setSlopeDetector(detector) {
-
-        this.slopeDetector = detector;
-
-    }
-
-    isBlockedBySlope() {
-
-        return this.blockedBySlope;
 
         // Reused every frame. Navigation and animation may read this snapshot,
         // but Locomotion remains the only system allowed to write it.
@@ -58,7 +29,6 @@ export class Locomotion {
     // Movement
     // -----------------------------
 
-<<<<<<< HEAD
     beginFrame() {
 
         // Character calls this even while paused. Consequently WAITING and
@@ -76,10 +46,6 @@ export class Locomotion {
         rotate = true,
         followSurface = false
     } = {}) {
-=======
-    moveTo(target, delta) {
-        this.blockedBySlope = false;
->>>>>>> b09e5f4 (Save uncommitted changes)
 
         this.direction.subVectors(target, this.object3D.position);
 
@@ -92,7 +58,6 @@ export class Locomotion {
 
         if (distance <= this.arrivalDistance) {
 
-<<<<<<< HEAD
             if (followSurface) {
 
                 this.object3D.position.x = target.x;
@@ -104,19 +69,6 @@ export class Locomotion {
 
             }
             this.recordMovement(distance, delta);
-=======
-            // The navigation target lives on the floor; keep the character height.
-            this.object3D.position.x = target.x;
-            this.object3D.position.z = target.z;
-
-            if (this.physicsBody) {
-
-                this.physicsBody.velocity.x = 0;
-                this.physicsBody.velocity.z = 0;
-
-            }
-
->>>>>>> b09e5f4 (Save uncommitted changes)
             return true;
 
         }
@@ -125,54 +77,11 @@ export class Locomotion {
         if (rotate) this.motion.turning = this.rotateTowards(target, delta);
 
         const distanceThisFrame = Math.min(this.speed * delta, distance);
-        const speedPerSecond = distanceThisFrame / Math.max(delta, 0.0001);
-        const velocity = this.direction.clone().multiplyScalar(speedPerSecond);
 
-        if (this.slopeDetector) {
-
-            const slopeInfo = this.slopeDetector.detectSlope(
-                this.object3D.position,
-                this.direction,
-                1.25
-            );
-
-            if (!slopeInfo.isClimbable) {
-                this.blockedBySlope = true;
-
-                if (this.physicsBody) {
-
-                    this.physicsBody.velocity.x = 0;
-                    this.physicsBody.velocity.z = 0;
-
-                }
-
-                return false;
-
-            }
-
-            const speedMultiplier =
-                this.slopeDetector.getMovementSpeedMultiplier(slopeInfo.slopeAngle) *
-                this.slopeDetector.getGravityMultiplier(slopeInfo.slopeAngle);
-
-            velocity.multiplyScalar(speedMultiplier);
-
-        }
-
-        if (this.physicsBody) {
-
-            this.physicsBody.velocity.x = velocity.x;
-            this.physicsBody.velocity.z = velocity.z;
-            this.applyGrounding(delta);
-
-        } else {
-
-            this.object3D.position.addScaledVector(
-                this.direction,
-                distanceThisFrame
-            );
-            this.applyGrounding(delta);
-
-        }
+        this.object3D.position.addScaledVector(
+            this.direction,
+            distanceThisFrame
+        );
 
         this.recordMovement(distanceThisFrame, delta);
 
@@ -180,7 +89,6 @@ export class Locomotion {
 
     }
 
-<<<<<<< HEAD
     recordMovement(distanceMoved, delta) {
 
         this.motion.distanceMoved = distanceMoved;
@@ -204,49 +112,6 @@ export class Locomotion {
         );
         this.recordMovement(distanceThisFrame, delta);
         return distanceThisFrame;
-=======
-    applyGrounding(delta) {
-
-        if (!this.slopeDetector) return;
-
-        const projected = this.object3D.position.clone();
-        const groundY = this.slopeDetector.getGroundHeight(
-            projected,
-            this.object3D.position.y
-        );
-        const nextY = groundY + this.walkingHeight;
-        const stepDelta = nextY - this.object3D.position.y;
-
-        // Prevent stepping onto very high ledges in one frame.
-        if (stepDelta > this.maxStepHeight) {
-
-            if (this.physicsBody) {
-
-                this.physicsBody.velocity.x = 0;
-                this.physicsBody.velocity.z = 0;
-
-            }
-
-            return;
-
-        }
-
-        if (this.physicsBody) {
-
-            const climbVelocity = stepDelta > 0
-                ? stepDelta / Math.max(delta, 0.0001)
-                : 0;
-            this.physicsBody.velocity.y = Math.max(
-                this.physicsBody.velocity.y,
-                climbVelocity
-            );
-
-        } else {
-
-            this.object3D.position.y += stepDelta * Math.min(delta * 12, 1);
-
-        }
->>>>>>> b09e5f4 (Save uncommitted changes)
 
     }
 

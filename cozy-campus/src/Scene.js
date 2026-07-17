@@ -23,7 +23,6 @@ import { NavigationGraph } from "./navigation/NavigationGraph";
 import { NavigationGraphHelper } from "./navigation/NavigationGraphHelper";
 import { NavigationConnector } from "./navigation/NavigationConnector";
 import { CharacterNavigationSystem } from "./navigation/CharacterNavigationSystem";
-<<<<<<< HEAD
 import { DwellSpotRegistry } from "./navigation/DwellSpotRegistry";
 import { CharacterDebugPanel } from "./debug/CharacterDebugPanel";
 import { PerformanceDebugPanel } from "./debug/PerformanceDebugPanel";
@@ -31,11 +30,6 @@ import {
     configureCozyCampusDwellSpots,
     configureCozyCampusNavigation
 } from "./levels/CozyCampusNavigation";
-=======
-import { NavigationDebugPanel } from "./debug/NavigationDebugPanel";
-import { PhysicsWorld } from "./physics/PhysicsWorld";
-import { SlopeDetector } from "./navigation/SlopeDetector";
->>>>>>> b09e5f4 (Save uncommitted changes)
 
 export class Scene {
 
@@ -82,9 +76,6 @@ export class Scene {
 
         // Scene content must exist before input can raycast it.
         this.createLights();
-
-        this.physicsWorld = new PhysicsWorld();
-        this.slopeDetector = new SlopeDetector();
 
         this.createNavigation();
 
@@ -205,8 +196,6 @@ export class Scene {
         this.characterNavigation.setGrounding(this.characterGrounding);
         this.characterGrounding.validateGraph(this.navigationGraph);
         this.player = new Player();
-        
-        this.registerNavigationTerrain(this.floor.object3D);
 
         this.registerCharacter(this.player, {
             spawnId: "spawn"
@@ -288,19 +277,6 @@ export class Scene {
 
     }
 
-    registerNavigationTerrain(root) {
-
-        root.traverse(object => {
-
-            if (!object.isMesh) return;
-
-            this.slopeDetector.addTerrainMesh(object);
-            this.physicsWorld.createTerrainBodyFromMesh(object);
-
-        });
-
-    }
-
     createNavigation() {
 
         this.navigationGraph = new NavigationGraph({
@@ -333,14 +309,7 @@ export class Scene {
         this.characterNavigation = new CharacterNavigationSystem({
             graph: this.navigationGraph,
             connector: this.navigationConnector,
-<<<<<<< HEAD
             dwellSpots: this.dwellSpots
-=======
-            helper: this.navigationHelper,
-            slopeDetector: this.slopeDetector,
-            physicsWorld: this.physicsWorld,
-            onChanged: () => this.refreshNavigationDebugPanel()
->>>>>>> b09e5f4 (Save uncommitted changes)
         });
         this.scene.add(this.navigationHelper);
         this.navigationHelper.highlightNode("spawn");
@@ -356,20 +325,8 @@ export class Scene {
         // Player and NPCs use this same registration. Example:
         // this.registerCharacter(librarian, { spawnId: "library-entry" });
         // Their controllers differ, but navigation and interaction do not.
-<<<<<<< HEAD
         character.setGrounding(this.characterGrounding);
         this.characterNavigation.registerActor(character, { spawnId });
-=======
-        
-        // Create physics body for character
-        const context = this.characterNavigation.registerActor(character, { spawnId });
-        context.physicsBody = this.physicsWorld.createActorBody(character);
-        character.locomotion.setPhysicsBody(context.physicsBody, {
-            walkingHeight: context.physicsBody.characterRadius ?? 0
-        });
-        character.locomotion.setSlopeDetector(this.slopeDetector);
-        
->>>>>>> b09e5f4 (Save uncommitted changes)
         this.interactionSystem.registerActor(character, request =>
             this.characterNavigation.moveToInteractionPoint(
                 character,
@@ -447,11 +404,7 @@ export class Scene {
             this.navigationHelper.refresh();
 
         }
-<<<<<<< HEAD
 
-=======
-        this.refreshNavigationDebugPanel();
->>>>>>> b09e5f4 (Save uncommitted changes)
         this.characterNavigation?.topologyChanged();
 
     }
@@ -506,10 +459,6 @@ export class Scene {
 
         this.controls.update();
 
-        // Step physics engine (must happen before character navigation)
-        this.physicsWorld.step(delta);
-        this.physicsWorld.syncActorPositions();
-
         this.characterNavigation.update(delta);
 
     }
@@ -518,16 +467,6 @@ export class Scene {
 
         const occupied = this.navigationGraph.occupyNode(id, occupant);
 
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
-
->>>>>>> b09e5f4 (Save uncommitted changes)
         return occupied;
 
     }
@@ -535,15 +474,6 @@ export class Scene {
     releaseNavigationNode(id, occupant) {
 
         this.navigationGraph.releaseNode(id, occupant);
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
->>>>>>> b09e5f4 (Save uncommitted changes)
 
     }
 
@@ -555,16 +485,6 @@ export class Scene {
             occupant
         );
 
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
-
->>>>>>> b09e5f4 (Save uncommitted changes)
         return occupied;
 
     }
@@ -572,15 +492,6 @@ export class Scene {
     releaseNavigationConnection(fromId, toId, occupant) {
 
         this.navigationGraph.releaseConnection(fromId, toId, occupant);
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
->>>>>>> b09e5f4 (Save uncommitted changes)
 
     }
 
@@ -591,16 +502,6 @@ export class Scene {
             ? this.navigationConnector.occupyPoint(point, occupant)
             : false;
 
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
-
->>>>>>> b09e5f4 (Save uncommitted changes)
         return occupied;
 
     }
@@ -611,15 +512,6 @@ export class Scene {
 
         if (point) this.navigationConnector.releasePoint(point, occupant);
 
-<<<<<<< HEAD
-=======
-        if (this.navigationHelper?.isVisible) {
-
-            this.navigationHelper.refresh();
-
-        }
-        this.refreshNavigationDebugPanel();
->>>>>>> b09e5f4 (Save uncommitted changes)
 
     }
 

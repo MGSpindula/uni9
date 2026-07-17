@@ -4,12 +4,8 @@ import { Tween } from "../core/Tween";
 import { NavigationNodeMode } from "./NavigationNodeMode";
 import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
 import { InteractionNavigation } from "./InteractionNavigation";
-<<<<<<< HEAD
 import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
 import { CharacterCollisionSolver } from "./CharacterCollisionSolver";
-=======
-import { ActorStateMachine } from "./ActorStateMachine";
->>>>>>> b09e5f4 (Save uncommitted changes)
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
@@ -17,14 +13,8 @@ export class CharacterNavigationSystem {
     constructor({
         graph,
         connector,
-<<<<<<< HEAD
         dwellSpots,
         helper,
-=======
-        helper,
-        slopeDetector = null,
-        physicsWorld = null,
->>>>>>> b09e5f4 (Save uncommitted changes)
         onChanged = null
     }) {
 
@@ -32,8 +22,6 @@ export class CharacterNavigationSystem {
         this.connector = connector;
         this.dwellSpots = dwellSpots;
         this.helper = helper;
-        this.slopeDetector = slopeDetector;
-        this.physicsWorld = physicsWorld;
         this.onChanged = onChanged;
         this.contexts = new Map();
         this.traffic = new NavigationTrafficSystem(this);
@@ -52,7 +40,6 @@ export class CharacterNavigationSystem {
 
         // Player and NPCs use the same context. Their only difference is who
         // calls moveToClosestNode() or InteractionSystem.request().
-<<<<<<< HEAD
         const context = {
             actor,
             pendingPosition: null,
@@ -92,106 +79,7 @@ export class CharacterNavigationSystem {
             pendingParkNodeId: null,
             congestionEscaping: false,
             congestionAttempts: 0
-=======
-        const runtime = {
-            navigation: {
-                pendingPosition: null,
-                destinationId: null,
-                retryElapsed: 0,
-                blockedElapsed: null,
-                blockedTimeout: 3,
-                recoveryPending: false,
-                nodeMode: NavigationNodeMode.DWELL,
-                centeringForDeparture: false
-            },
-            interaction: {
-                pendingInteraction: null,
-                interactionPoint: null,
-                activeInteraction: null,
-                preparingInteraction: false
-            },
-            parking: {
-                pendingIdleSlot: null,
-                pendingIdleNodeId: null,
-                idleDelayRemaining: 0
-            },
-            clearanceRequesters: new Set()
->>>>>>> b09e5f4 (Save uncommitted changes)
         };
-
-        const context = {
-            actor,
-            stateMachine: new ActorStateMachine(actor),
-            physicsBody: null,
-            runtime
-        };
-
-        Object.defineProperties(context, {
-            pendingPosition: {
-                get() { return this.runtime.navigation.pendingPosition; },
-                set(value) { this.runtime.navigation.pendingPosition = value; }
-            },
-            destinationId: {
-                get() { return this.runtime.navigation.destinationId; },
-                set(value) { this.runtime.navigation.destinationId = value; }
-            },
-            retryElapsed: {
-                get() { return this.runtime.navigation.retryElapsed; },
-                set(value) { this.runtime.navigation.retryElapsed = value; }
-            },
-            blockedElapsed: {
-                get() { return this.runtime.navigation.blockedElapsed; },
-                set(value) { this.runtime.navigation.blockedElapsed = value; }
-            },
-            blockedTimeout: {
-                get() { return this.runtime.navigation.blockedTimeout; },
-                set(value) { this.runtime.navigation.blockedTimeout = value; }
-            },
-            recoveryPending: {
-                get() { return this.runtime.navigation.recoveryPending; },
-                set(value) { this.runtime.navigation.recoveryPending = value; }
-            },
-            nodeMode: {
-                get() { return this.runtime.navigation.nodeMode; },
-                set(value) { this.runtime.navigation.nodeMode = value; }
-            },
-            centeringForDeparture: {
-                get() { return this.runtime.navigation.centeringForDeparture; },
-                set(value) { this.runtime.navigation.centeringForDeparture = value; }
-            },
-            pendingInteraction: {
-                get() { return this.runtime.interaction.pendingInteraction; },
-                set(value) { this.runtime.interaction.pendingInteraction = value; }
-            },
-            interactionPoint: {
-                get() { return this.runtime.interaction.interactionPoint; },
-                set(value) { this.runtime.interaction.interactionPoint = value; }
-            },
-            activeInteraction: {
-                get() { return this.runtime.interaction.activeInteraction; },
-                set(value) { this.runtime.interaction.activeInteraction = value; }
-            },
-            preparingInteraction: {
-                get() { return this.runtime.interaction.preparingInteraction; },
-                set(value) { this.runtime.interaction.preparingInteraction = value; }
-            },
-            pendingIdleSlot: {
-                get() { return this.runtime.parking.pendingIdleSlot; },
-                set(value) { this.runtime.parking.pendingIdleSlot = value; }
-            },
-            pendingIdleNodeId: {
-                get() { return this.runtime.parking.pendingIdleNodeId; },
-                set(value) { this.runtime.parking.pendingIdleNodeId = value; }
-            },
-            idleDelayRemaining: {
-                get() { return this.runtime.parking.idleDelayRemaining; },
-                set(value) { this.runtime.parking.idleDelayRemaining = value; }
-            },
-            clearanceRequesters: {
-                get() { return this.runtime.clearanceRequesters; },
-                set(value) { this.runtime.clearanceRequesters = value; }
-            }
-        });
 
         this.contexts.set(actor, context);
 
@@ -232,12 +120,7 @@ export class CharacterNavigationSystem {
 
             this.graph.releaseReservations(actor);
             this.connector.releaseReservations(actor);
-<<<<<<< HEAD
             this.traffic.cancel(actor);
-=======
-            this.releaseClearanceRequests(actor);
-            context.stateMachine.transitionToIdle();
->>>>>>> b09e5f4 (Save uncommitted changes)
             this.refresh();
 
         });
@@ -288,7 +171,6 @@ export class CharacterNavigationSystem {
         actor.object3D.position.x = node.position.x;
         actor.object3D.position.z = node.position.z;
         this.parkActorAtNode(this.requireContext(actor), nodeId);
-        this.requireContext(actor).stateMachine.transitionToIdle();
         this.refresh();
 
         return true;
@@ -397,14 +279,6 @@ export class CharacterNavigationSystem {
         context.retryElapsed = 0;
         context.blockedElapsed = null;
         context.recoveryPending = false;
-<<<<<<< HEAD
-=======
-        context.stateMachine.transitionToMoving({
-            kind: "node",
-            destinationId: candidate.plan.destinationId
-        });
-        this.cancelPendingParking(context);
->>>>>>> b09e5f4 (Save uncommitted changes)
         this.prepareOrigin(context, candidate.originId);
 
         const waypoints = [
@@ -427,7 +301,6 @@ export class CharacterNavigationSystem {
             context.pendingPosition = null;
             context.destinationId = null;
             context.nodeMode = NavigationNodeMode.DWELL;
-            context.stateMachine.transitionToIdle();
             actor.cancel();
             return true;
 
@@ -546,10 +419,6 @@ export class CharacterNavigationSystem {
             }
 
             this.interactions.beginRoute(context, point, onArrive);
-            context.stateMachine.transitionToMoving({
-                kind: "interaction",
-                interactionPointId: point.id
-            });
             this.helper?.highlightInteractionPoint(point.id);
             actor.followWaypoints(directRoute.waypoints);
             return true;
@@ -581,10 +450,6 @@ export class CharacterNavigationSystem {
 
         this.prepareOrigin(context, candidate.origin.id);
         this.interactions.beginRoute(context, point, onArrive);
-        context.stateMachine.transitionToMoving({
-            kind: "interaction",
-            interactionPointId: point.id
-        });
         this.helper?.highlightInteractionPoint(point.id);
         actor.followWaypoints([
             ...this.connector.createExitWaypoints(
@@ -930,7 +795,6 @@ export class CharacterNavigationSystem {
             context.destinationId = null;
             context.nodeMode = NavigationNodeMode.DWELL;
             actor.setState(EntityState.STOPPING);
-<<<<<<< HEAD
 
             if (this.graph.hasOtherNodeCommitments(waypoint.id, actor)) {
 
@@ -946,25 +810,11 @@ export class CharacterNavigationSystem {
                 this.parkActorAtNode(context, waypoint.id);
 
             }
-=======
-            this.parkActorAtNode(context, waypoint.id);
-            context.stateMachine.transitionToDwelling(
-                { id: waypoint.id },
-                5
-            );
->>>>>>> b09e5f4 (Save uncommitted changes)
 
         } else {
 
             context.nodeMode = NavigationNodeMode.TRANSIT;
-<<<<<<< HEAD
             actor.setState(EntityState.WALKING);
-=======
-            context.stateMachine.transitionToMoving({
-                kind: "node",
-                destinationId: context.destinationId ?? waypoint.id
-            });
->>>>>>> b09e5f4 (Save uncommitted changes)
 
         }
 
@@ -1394,14 +1244,6 @@ export class CharacterNavigationSystem {
                     `[DwellSpot] ${actor.name} seeks "${spot.id}" at ` +
                     `"${spot.nodeId}".`
                 );
-<<<<<<< HEAD
-=======
-                actor.setState(EntityState.DWELLING);
-                context.stateMachine.transitionToDwelling(
-                    { id: pendingIdleNodeId },
-                    0
-                );
->>>>>>> b09e5f4 (Save uncommitted changes)
                 this.refresh();
 
             }
@@ -1475,7 +1317,6 @@ export class CharacterNavigationSystem {
             interaction.point
         );
         context.activeInteraction = null;
-        context.stateMachine.transitionToIdle();
 
     }
 
@@ -2186,10 +2027,7 @@ export class CharacterNavigationSystem {
                 if (!replanned) {
 
                     context.actor.pause();
-                    if (context.blockedElapsed === null) {
-                        context.blockedElapsed = 0;
-                        context.stateMachine.transitionToBlocked();
-                    }
+                    context.blockedElapsed ??= 0;
 
                 }
 
@@ -2225,7 +2063,6 @@ export class CharacterNavigationSystem {
         context.pendingInteraction = null;
         context.preparingInteraction = false;
         context.recoveryPending = true;
-        context.stateMachine.transitionToRecovering();
         this.graph.releaseReservations(context.actor);
         this.connector.releaseReservations(context.actor);
         console.log(
@@ -2249,7 +2086,6 @@ export class CharacterNavigationSystem {
                 context.recoveryPending = false;
                 actor.cancel();
                 this.helper?.highlightNode(current.id);
-                context.stateMachine.transitionToIdle();
                 return true;
 
             }
@@ -2265,10 +2101,6 @@ export class CharacterNavigationSystem {
 
             context.recoveryPending = false;
             context.destinationId = destinationId;
-            context.stateMachine.transitionToMoving({
-                kind: "recovery",
-                destinationId
-            });
             this.helper?.highlightNode(destinationId);
             actor.followWaypoints(
                 this.createTraversalWaypoints(context, path.nodeIds)
@@ -2303,10 +2135,6 @@ export class CharacterNavigationSystem {
 
         context.recoveryPending = false;
         context.destinationId = endpoint.id;
-        context.stateMachine.transitionToMoving({
-            kind: "recovery",
-            destinationId: endpoint.id
-        });
         this.graph.reserveNode(endpoint.id, actor);
         this.helper?.highlightNode(endpoint.id);
         actor.followWaypoints(this.graph.createWaypoints([endpoint.id]));
@@ -2467,9 +2295,3 @@ export class CharacterNavigationSystem {
     }
 
 }
-<<<<<<< HEAD
-=======
-
-
-
->>>>>>> b09e5f4 (Save uncommitted changes)
