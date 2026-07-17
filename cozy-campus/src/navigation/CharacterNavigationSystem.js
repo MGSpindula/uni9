@@ -5,7 +5,7 @@ import { NavigationNodeMode } from "./NavigationNodeMode";
 import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
 import { InteractionNavigation } from "./InteractionNavigation";
 import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
-import { CharacterCollisionSolver } from "./CharacterCollisionSolver";
+import { PhysicsWorld } from "../physics/PhysicsWorld";
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
@@ -27,7 +27,7 @@ export class CharacterNavigationSystem {
         this.traffic = new NavigationTrafficSystem(this);
         this.interactions = new InteractionNavigation(this);
         this.collisionFailsafe = new CharacterCollisionFailsafe(this);
-        this.collisionSolver = new CharacterCollisionSolver(this);
+        this.physics = new PhysicsWorld(this);
         this.grounding = null;
 
     }
@@ -121,13 +121,14 @@ export class CharacterNavigationSystem {
             this.graph.releaseReservations(actor);
             this.connector.releaseReservations(actor);
             this.traffic.cancel(actor);
+            this.collisionFailsafe.cancel(actor);
             this.refresh();
 
         });
-        actor.setMovementGuard((target, delta) =>
-            this.collisionFailsafe.canMove(actor, target, delta)
+        actor.setMovementGuard((target, _delta) =>
+            this.collisionFailsafe.canMove(actor, target)
         );
-        this.collisionSolver.register(actor);
+        this.physics.registerActor(actor);
 
         if (spawnId) this.placeActorAtNode(actor, spawnId);
 
@@ -146,7 +147,7 @@ export class CharacterNavigationSystem {
         this.dwellSpots.releaseActor(actor);
         this.traffic.unregister(actor);
         this.collisionFailsafe.unregister(actor);
-        this.collisionSolver.unregister(actor);
+        this.physics.unregisterActor(actor);
         actor.setMovementGuard(null);
         this.contexts.delete(actor);
         this.refresh();
@@ -190,7 +191,10 @@ export class CharacterNavigationSystem {
 
         const context = this.requireContext(actor);
 
-        if (replaceIntent) this.cancelDwellSearch(context);
+        if (replaceIntent) {
+            this.cancelDwellSearch(context);
+            this.cancelPendingDwellApproach(context);
+        }
 
         // Store the command before planning. Traffic, a temporary occupation
         // or even the absence of a route may reject this attempt, but they do
@@ -322,7 +326,10 @@ export class CharacterNavigationSystem {
 
         const context = this.requireContext(actor);
 
-        if (replaceIntent) this.cancelDwellSearch(context);
+        if (replaceIntent) {
+            this.cancelDwellSearch(context);
+            this.cancelPendingDwellApproach(context);
+        }
 
         // Pointer commands must survive failed preflight checks. The queue may
         // suspend this interaction, but only a newer Player command replaces it.
@@ -731,6 +738,7 @@ export class CharacterNavigationSystem {
         const reachedDestination =
             waypoint.id === context.destinationId ||
             (
+                actor.navigationIntentPolicy !== "persistent" &&
                 isFinalRouteWaypoint &&
                 context.pendingPosition !== null &&
                 context.pendingInteraction === null
@@ -795,8 +803,17 @@ export class CharacterNavigationSystem {
             context.destinationId = null;
             context.nodeMode = NavigationNodeMode.DWELL;
             actor.setState(EntityState.STOPPING);
+            const hasCommitments = this.graph.hasOtherNodeCommitments(
+                waypoint.id,
+                actor
+            );
+            const canLeaveCenterToReservedSpot = Boolean(
+                context.dwellSpot &&
+                context.dwellSpot.nodeId === waypoint.id &&
+                context.dwellSpot.isAvailable(actor)
+            );
 
-            if (this.graph.hasOtherNodeCommitments(waypoint.id, actor)) {
+            if (hasCommitments && !canLeaveCenterToReservedSpot) {
 
                 context.pendingParkNodeId = waypoint.id;
                 actor.setState(EntityState.WAITING);
@@ -989,6 +1006,22 @@ export class CharacterNavigationSystem {
 
         context.traversingDwellCurve = false;
         this.graph.clearActiveLaneCurve(actor);
+
+        const hasDifferentPersistentIntent =
+            actor.navigationIntentPolicy === "persistent" &&
+            (
+                context.pendingPosition !== null ||
+                context.pendingInteraction !== null
+            );
+
+        if (hasDifferentPersistentIntent) {
+
+            this.dwellSpots.releaseReservations(actor);
+            context.dwellSpot = null;
+            context.preparingDwellEntry = false;
+            return;
+
+        }
 
         // Dwell begins at physical arrival, before its entry animation. From
         // this instant the spot is occupied and the node is resting/passable.
@@ -1266,6 +1299,23 @@ export class CharacterNavigationSystem {
 
     }
 
+    cancelPendingDwellApproach(context) {
+
+        const { actor, dwellSpot } = context;
+
+        if (!context.traversingDwellCurve ||
+            dwellSpot?.occupant === actor) return;
+
+        actor.cancelTweens(actor.object3D.rotation, ["y"]);
+        this.dwellSpots.releaseReservations(actor);
+        context.dwellSpot = null;
+        context.traversingDwellCurve = false;
+        context.preparingDwellEntry = false;
+        context.dwellSearchSpot = null;
+        this.graph.clearActiveLaneCurve(actor);
+
+    }
+
     centerActorForDeparture(context) {
 
         const { actor } = context;
@@ -1494,7 +1544,8 @@ export class CharacterNavigationSystem {
             }
 
             if (context.traversingLaneCurve &&
-                actor.isState(EntityState.WAITING)) {
+                actor.isState(EntityState.WAITING) &&
+                !this.traffic.isWaitingForQueue(actor)) {
 
                 actor.resume();
                 continue;
@@ -1502,7 +1553,8 @@ export class CharacterNavigationSystem {
             }
 
             if (context.traversingInteractionCurve &&
-                actor.isState(EntityState.WAITING)) {
+                actor.isState(EntityState.WAITING) &&
+                !this.traffic.isWaitingForQueue(actor)) {
 
                 actor.resume();
                 continue;
@@ -1567,9 +1619,9 @@ export class CharacterNavigationSystem {
 
         }
 
-        // Scene updates every Character before this system. Resolve the final
-        // residual circle penetration once, after all desired movement exists.
-        this.collisionSolver.solve();
+        // Scene updates every Character before this system. Cannon resolves
+        // residual actor contacts after navigation has produced its intent.
+        this.physics.solve(delta);
 
     }
 
@@ -1670,9 +1722,20 @@ export class CharacterNavigationSystem {
     retryPendingPark(context) {
 
         const nodeId = context.pendingParkNodeId;
+        
+        if (!nodeId) return false;
 
-        if (!nodeId ||
-            this.graph.hasOtherNodeCommitments(nodeId, context.actor)) {
+        const hasCommitments = this.graph.hasOtherNodeCommitments(
+            nodeId,
+            context.actor
+        );
+        const canLeaveCenterToReservedSpot = Boolean(
+            context.dwellSpot &&
+            context.dwellSpot.nodeId === nodeId &&
+            context.dwellSpot.isAvailable(context.actor)
+        );
+
+        if (hasCommitments && !canLeaveCenterToReservedSpot) {
 
             return false;
 
@@ -1748,8 +1811,8 @@ export class CharacterNavigationSystem {
 
         const retreat = context.congestionAttempts > 1;
         const escapePosition = retreat
-            ? this.collisionSolver.findRetreatPosition(actor, target)
-            : this.collisionSolver.findEscapePosition(actor, target);
+            ? this.physics.findRetreatPosition(actor, target)
+            : this.physics.findEscapePosition(actor, target);
 
         context.congestionEscaping = true;
         actor.followWaypoints([{
@@ -1878,7 +1941,6 @@ export class CharacterNavigationSystem {
 
         // Abandon every old ownership claim and geometric sample. Only the
         // user/behavior target captured above survives this reset.
-        this.collisionFailsafe.cancel(actor);
         this.graph.releaseAgent(actor);
         this.connector.releaseAgent(actor);
         this.dwellSpots.releaseActor(actor);

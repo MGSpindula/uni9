@@ -38,9 +38,9 @@ export class Character extends Entity {
         this.navigationCancelledHandler = null;
         this.movementGuard = null;
 
-        // Slightly smaller than the primitive mesh: adjacent lanes should be
-        // used confidently, while genuine body overlap is still prevented.
-        this.collisionRadius = 0.36;
+        // Keep a wider base circle so contacts are predicted sooner and actors
+        // separate without vibrating while trying to occupy the same lane.
+        this.collisionRadius = 0.42;
         // Actors whose roots differ more than this are on separate vertical
         // layers and must not block or push one another in the XZ circle solver.
         this.collisionHeight = 1.2;
@@ -315,12 +315,21 @@ export class Character extends Entity {
 
         // Collision avoidance is an out-of-route locomotion maneuver. It must
         // keep updating while the original Navigation/Bézier is suspended.
-        if (this.movementGuard &&
-            !this.movementGuard(waypoint?.position ?? null, delta)) {
+        const movementDecision = this.movementGuard?.(
+            waypoint?.position ?? null,
+            delta
+        );
+
+        if (movementDecision === false ||
+            movementDecision?.allowed === false) {
 
             this.setState(EntityState.WAITING);
             return;
 
+        }
+
+        if (movementDecision?.target) {
+            waypoint = { ...waypoint, position: movementDecision.target };
         }
 
         if (this.navigation.isPaused()) return;
@@ -328,18 +337,17 @@ export class Character extends Entity {
         // The collision guard may have rebuilt the remaining Bézier while
         // resolving an avoidance. Never consume the stale waypoint reference
         // captured before that callback.
-        waypoint = this.navigation.getCurrentWaypoint();
+        const currentWaypoint = this.navigation.getCurrentWaypoint();
+        waypoint = movementDecision?.target
+            ? { ...currentWaypoint, position: movementDecision.target }
+            : currentWaypoint;
 
         if (!waypoint || !this.prepareTraversalTo(waypoint)) return;
 
-        if (this.isState(EntityState.WAITING)) {
-
-            this.setState(EntityState.WALKING);
-
-        }
-
         const reached = this.locomotion.moveTo(waypoint.position, delta, {
-            rotate: !waypoint.preserveFacing,
+            // A temporary sidestep is positional avoidance, not a new facing
+            // command. Keep the actor oriented along its authored route.
+            rotate: !waypoint.preserveFacing && !movementDecision?.temporary,
             // Every ordinary walk is surface-following: route owns XZ and
             // Grounding owns Y. Only explicit jump/fly waypoints are airborne.
             //
@@ -350,6 +358,13 @@ export class Character extends Entity {
             // must let CharacterGrounding determine their physical height.
             followSurface: waypoint.airborne !== true
         });
+
+        if (this.isState(EntityState.WAITING) &&
+            this.locomotion.getMotionState().moving) {
+
+            this.setState(EntityState.WALKING);
+
+        }
 
         if (!reached) {
 
@@ -362,6 +377,11 @@ export class Character extends Entity {
             return;
 
         }
+
+        // A social avoidance maneuver may reach its temporary offset target
+        // before the real navigation waypoint. Never consume the route
+        // waypoint until locomotion is moving toward its original position.
+        if (movementDecision?.temporary) return;
 
         // Position and facing are both part of arriving at authored animation
         // marks such as approach, seat and dwell spots. The callback runs only

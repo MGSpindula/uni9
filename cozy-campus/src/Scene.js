@@ -309,7 +309,8 @@ export class Scene {
         this.characterNavigation = new CharacterNavigationSystem({
             graph: this.navigationGraph,
             connector: this.navigationConnector,
-            dwellSpots: this.dwellSpots
+            dwellSpots: this.dwellSpots,
+            helper: this.navigationHelper
         });
         this.scene.add(this.navigationHelper);
         this.navigationHelper.highlightNode("spawn");

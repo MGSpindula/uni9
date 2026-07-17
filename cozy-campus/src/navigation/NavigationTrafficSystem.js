@@ -705,6 +705,16 @@ export class NavigationTrafficSystem {
 
     }
 
+    isWaitingForQueue(actor) {
+
+        const request = this.departures.getActorRequest(actor);
+
+        if (!request) return false;
+
+        return !this.departures.isFirst(request.originId, actor);
+
+    }
+
     getDebugState(actor) {
 
         return {

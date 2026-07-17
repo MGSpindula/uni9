@@ -1,14 +1,13 @@
 import * as THREE from "three";
 
-// Predictive brake only. CharacterCollisionSolver owns physical separation.
-// Keeping those jobs separate prevents collision recovery from becoming a
-// second navigation state machine that can pause and lose an actor's route.
+// Predictive right-of-way guard. It decides who should slow down before
+// contact; Cannon remains responsible only for residual physical separation.
 export class CharacterCollisionFailsafe {
 
     constructor(owner, {
         detectionRadius = 2.4,
-        predictionTime = 0.28,
-        safetyPadding = 0.05
+        predictionTime = 0.34,
+        safetyPadding = 0.1
     } = {}) {
 
         this.owner = owner;
@@ -16,6 +15,7 @@ export class CharacterCollisionFailsafe {
         this.predictionTime = predictionTime;
         this.safetyPadding = safetyPadding;
         this.waitingFor = new Map();
+        this.passing = new Map();
         this.velocity = new THREE.Vector3();
         this.otherVelocity = new THREE.Vector3();
         this.relativePosition = new THREE.Vector3();
@@ -48,10 +48,6 @@ export class CharacterCollisionFailsafe {
             );
 
             if (currentDistance > this.detectionRadius) continue;
-
-            // Two reserved lanes are already the collision solution. Do not
-            // apply a second, lane-unaware predictive brake while both actors
-            // are traversing the same connection on different sides.
             if (this.useDifferentLanes(actor, other)) continue;
 
             const requiredClearance =
@@ -59,17 +55,78 @@ export class CharacterCollisionFailsafe {
                 (other.collisionRadius ?? 0.36) +
                 this.safetyPadding;
 
-            // Once circles overlap, movement must remain enabled: walking away
-            // can resolve it and the solver guarantees physical separation at
-            // the end of this frame. Braking both here creates a deadlock.
-            if (currentDistance < requiredClearance) continue;
-
             const otherTarget = other.navigation.getCurrentWaypoint()?.position;
             this.getIntendedVelocity(other, otherTarget, this.otherVelocity);
-            const clearance = this.getPredictedClearance(actor, other);
+            // Once two circles are already touching, use the current clearance
+            // so one actor yields immediately instead of both pushing forever.
+            const clearance = currentDistance < requiredClearance
+                ? currentDistance
+                : this.getPredictedClearance(actor, other);
 
-            if (clearance >= requiredClearance ||
-                !this.shouldYield(actor, other)) continue;
+            const shouldYield = this.shouldYield(actor, other);
+            const passingTarget = !shouldYield
+                ? this.getPassingTarget(
+                    actor,
+                    other,
+                    target,
+                    requiredClearance,
+                    { requireAhead: true }
+                )
+                : null;
+
+            if (passingTarget) {
+
+                this.clearWait(actor);
+                return {
+                    allowed: true,
+                    target: passingTarget,
+                    temporary: true
+                };
+
+            }
+
+            if (clearance < requiredClearance && shouldYield) {
+
+                const lateralTarget = this.getLocalLateralTarget(
+                    actor,
+                    other,
+                    target,
+                    true
+                );
+
+                if (lateralTarget) {
+
+                    this.clearWait(actor);
+                    return {
+                        allowed: true,
+                        target: lateralTarget,
+                        temporary: true
+                    };
+
+                }
+
+            }
+
+            if (clearance >= requiredClearance || !shouldYield) continue;
+
+            const yieldingTarget = this.getPassingTarget(
+                actor,
+                other,
+                target,
+                requiredClearance,
+                { requireAhead: false }
+            );
+
+            if (yieldingTarget) {
+
+                this.clearWait(actor);
+                return {
+                    allowed: true,
+                    target: yieldingTarget,
+                    temporary: true
+                };
+
+            }
 
             if (clearance < closestClearance) {
 
@@ -83,6 +140,7 @@ export class CharacterCollisionFailsafe {
         if (!blocker) {
 
             this.clearWait(actor);
+            this.passing.delete(actor);
             return true;
 
         }
@@ -100,6 +158,206 @@ export class CharacterCollisionFailsafe {
         }
 
         return false;
+
+    }
+
+    getLocalLateralTarget(actor, other, target, shouldYield) {
+
+        if (!target) return null;
+
+        const relative = other.object3D.position
+            .clone()
+            .sub(actor.object3D.position)
+            .setY(0);
+        const forward = this.velocity.clone().setY(0);
+
+        if (forward.lengthSq() < 0.0001) {
+            forward.copy(relative);
+        }
+        if (forward.lengthSq() < 0.0001) return null;
+
+        forward.normalize();
+        const side = new THREE.Vector3(
+            forward.z,
+            0,
+            -forward.x
+        );
+        const step = Math.max(
+            (actor.collisionRadius ?? 0.42) +
+                (other.collisionRadius ?? 0.42) +
+                0.04,
+            0.9
+        );
+        const forwardStep = shouldYield
+            ? actor.locomotion.speed * 0.12
+            : actor.locomotion.speed * 0.24;
+        const origin = actor.object3D.position;
+        const previous = this.passing.get(actor);
+        const fixedSide = previous?.other === other && previous.lateral
+            ? previous.side
+            : null;
+        const left = origin.clone()
+            .addScaledVector(side, step)
+            .addScaledVector(forward, forwardStep);
+        const right = origin.clone()
+            .addScaledVector(side, -step)
+            .addScaledVector(forward, forwardStep);
+        const leftClearance = this.owner.physics.getClearanceForPosition(
+            actor,
+            left
+        );
+        const rightClearance = this.owner.physics.getClearanceForPosition(
+            actor,
+            right
+        );
+        const useLeft = fixedSide ?? leftClearance >= rightClearance;
+        const candidate = useLeft ? left : right;
+        const candidateClearance = useLeft
+            ? leftClearance
+            : rightClearance;
+
+        // Cannon still owns the final contact correction. The local maneuver
+        // only starts when the chosen side is already physically open.
+        if (candidateClearance < 0.04) return null;
+
+        if (!shouldYield) {
+            const approaching = relative.dot(forward) > -0.1;
+            if (!approaching) return null;
+        }
+
+        this.passing.set(actor, {
+            other,
+            target: candidate,
+            lateral: true,
+            side: useLeft
+        });
+        return candidate;
+
+    }
+
+    getPassingTarget(
+        actor,
+        other,
+        target,
+        requiredClearance,
+        { requireAhead = true } = {}
+    ) {
+
+        if (!target || (requireAhead &&
+            this.getCommitmentPriority(actor) <
+            this.getCommitmentPriority(other))) {
+
+            return null;
+
+        }
+
+        const first = actor.navigation.getTraversalState().currentConnection;
+        const second = other.navigation.getTraversalState().currentConnection;
+
+        if (!first || !second) return null;
+
+        const sameConnection =
+            (
+                first.fromId === second.fromId &&
+                first.toId === second.toId
+            ) ||
+            (
+                !requireAhead &&
+                first.fromId === second.toId &&
+                first.toId === second.fromId
+            );
+
+        if (!sameConnection) return null;
+
+        const connection = this.owner.graph.requireConnection(
+            first.fromId,
+            first.toId
+        );
+        const laneIndex = this.owner.graph.getConnectionLaneIndex(
+            first.fromId,
+            first.toId,
+            actor
+        );
+        const otherLaneIndex = this.owner.graph.getConnectionLaneIndex(
+            second.fromId,
+            second.toId,
+            other
+        );
+
+        if (laneIndex === null || otherLaneIndex !== laneIndex) return null;
+
+        const alternateLane = connection.lanes.find(lane =>
+            lane.index !== laneIndex
+        );
+
+        if (!alternateLane || alternateLane.occupants.size > 0) {
+
+            return null;
+
+        }
+
+        const direction = this.owner.graph
+            .requireNode(first.toId)
+            .position.clone()
+            .sub(this.owner.graph.requireNode(first.fromId).position)
+            .setY(0);
+
+        if (direction.lengthSq() < 0.0001) return null;
+        direction.normalize();
+
+        const relative = other.object3D.position
+            .clone()
+            .sub(actor.object3D.position)
+            .setY(0);
+        const along = relative.dot(direction);
+
+        // Passing is only useful when the other actor is ahead in the same
+        // direction. Yielding may use the same lateral maneuver for head-on
+        // traffic, but never changes the authored route.
+        if (requireAhead && (along < -0.1 || along > 2.4)) return null;
+
+        const side = new THREE.Vector3(
+            direction.z,
+            0,
+            -direction.x
+        );
+        const laneOffset = (alternateLane.index - laneIndex) *
+            connection.laneWidth;
+        const localOffset = side.clone().multiplyScalar(laneOffset);
+        const passDistance = requireAhead
+            ? Math.max(
+                connection.laneWidth,
+                actor.locomotion.speed * this.predictionTime
+            )
+            : Math.min(
+                connection.laneWidth * 0.5,
+                actor.locomotion.speed * this.predictionTime
+            );
+        const candidate = actor.object3D.position.clone()
+            .addScaledVector(direction, passDistance)
+            .add(localOffset);
+        const candidateClearance = this.owner.physics.getClearanceForPosition(
+            actor,
+            candidate
+        );
+
+        // Keep a small margin for a passing maneuver. The full predictive
+        // safety padding is for braking, while Cannon handles residual contact.
+        if (candidateClearance < Math.min(requiredClearance, 0.86)) {
+            return null;
+        }
+
+        const previous = this.passing.get(actor);
+        if (requireAhead && previous && previous.other === other &&
+            along > (actor.collisionRadius ?? 0.42) * 2.2) {
+
+            this.passing.delete(actor);
+            return null;
+
+        }
+
+        this.passing.set(actor, { other, target: candidate });
+        return candidate;
 
     }
 
@@ -189,8 +447,6 @@ export class CharacterCollisionFailsafe {
         if (!actorMoving) return false;
         if (!otherMoving) return true;
 
-        // Registration order is only a deterministic tie-breaker. Player and
-        // NPC otherwise obey the same collision and intent rules.
         const actors = [...this.owner.contexts.keys()];
         return actors.indexOf(actor) > actors.indexOf(other);
 
@@ -201,6 +457,7 @@ export class CharacterCollisionFailsafe {
         const context = this.owner.contexts.get(actor);
 
         if (!context) return 0;
+        if (actor.name === "Player") return 6;
         if (context.activeInteraction) return 5;
 
         const interaction = context.pendingInteraction?.point;
@@ -237,6 +494,7 @@ export class CharacterCollisionFailsafe {
     unregister(actor) {
 
         this.cancel(actor);
+        this.passing.delete(actor);
 
         for (const [waitingActor, blocker] of this.waitingFor) {
 
@@ -249,6 +507,7 @@ export class CharacterCollisionFailsafe {
     cancel(actor) {
 
         this.clearWait(actor);
+        this.passing.delete(actor);
 
     }
 

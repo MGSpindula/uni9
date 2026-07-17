@@ -91,12 +91,20 @@ export class Locomotion {
 
     recordMovement(distanceMoved, delta) {
 
-        this.motion.distanceMoved = distanceMoved;
+        // Contact correction and tiny avoidance nudges should not be treated
+        // as a full locomotion step, otherwise walk-cycle feedback jitters.
+        const effectiveDistance = distanceMoved < 0.012 ? 0 : distanceMoved;
+
+        this.motion.distanceMoved = effectiveDistance;
         this.motion.speed = delta > 0 ? distanceMoved / delta : 0;
         this.motion.normalizedSpeed = this.speed > 0
             ? Math.min(this.motion.speed / this.speed, 1)
             : 0;
-        this.motion.moving = distanceMoved > 0;
+        this.motion.moving = effectiveDistance > 0;
+        if (!this.motion.moving) {
+            this.motion.speed = 0;
+            this.motion.normalizedSpeed = 0;
+        }
 
     }
 
@@ -172,6 +180,12 @@ export class Locomotion {
     getMotionState() {
 
         return this.motion;
+
+    }
+
+    isBlockedBySlope() {
+
+        return false;
 
     }
 

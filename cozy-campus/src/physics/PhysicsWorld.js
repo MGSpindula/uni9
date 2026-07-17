@@ -1,203 +1,209 @@
 import * as CANNON from "cannon";
 import * as THREE from "three";
 
+// Cannon owns only physical separation. Navigation remains authoritative for
+// destinations, reservations and route progress.
 export class PhysicsWorld {
-  constructor(gravity = -9.81) {
-    this.world = new CANNON.World();
-    this.world.gravity.set(0, gravity, 0);
-    this.world.defaultContactMaterial.friction = 0.3;
-    this.world.defaultContactMaterial.restitution = 0.0;
-    
-    this.actorBodies = new Map();
-    this.staticBodies = [];
-    this.characterMaterial = new CANNON.Material("character");
-    this.groundMaterial = new CANNON.Material("ground");
-    
-    // Reduce friction between characters
-    const charCharContact = new CANNON.ContactMaterial(
-      this.characterMaterial,
-      this.characterMaterial,
-      {
-        friction: 0.0,
-        restitution: 0.0,
-        contactEquationStiffness: 1e7,
-        contactEquationRelaxation: 3
-      }
-    );
-    this.world.addContactMaterial(charCharContact);
-    
-    // Ground contact
-    const groundCharContact = new CANNON.ContactMaterial(
-      this.groundMaterial,
-      this.characterMaterial,
-      {
-        friction: 0.3,
-        restitution: 0.0
-      }
-    );
-    this.world.addContactMaterial(groundCharContact);
-  }
 
-  createActorBody(actor, radius = 0.35, height = 1.8) {
-    // Use sphere for simplicity (Cannon handles collision well)
-    // More accurate would be capsule, but sphere is sufficient for ground movement
-    const shape = new CANNON.Sphere(radius);
-    const body = new CANNON.Body({
-      mass: 75, // ~human mass in kg
-      shape: shape,
-      material: this.characterMaterial,
-      linearDamping: 0.5,
-      angularDamping: 0.99 // Prevent spinning
-    });
+    constructor(owner, {
+        fixedTimeStep = 1 / 60,
+        maxSubSteps = 3,
+        contactSkin = 0.025
+    } = {}) {
 
-    // Position body at actor location
-    if (actor.object3D && actor.object3D.position) {
-      body.position.set(
-        actor.object3D.position.x,
-        actor.object3D.position.y + radius,
-        actor.object3D.position.z
-      );
+        this.owner = owner;
+        this.fixedTimeStep = fixedTimeStep;
+        this.maxSubSteps = maxSubSteps;
+        this.contactSkin = contactSkin;
+        this.world = new CANNON.World();
+        this.world.gravity.set(0, 0, 0);
+        this.world.broadphase = new CANNON.SAPBroadphase(this.world);
+        this.world.defaultContactMaterial.friction = 0;
+        this.world.defaultContactMaterial.restitution = 0;
+        this.characterMaterial = new CANNON.Material("character");
+        this.actorBodies = new Map();
+
+        this.world.addContactMaterial(new CANNON.ContactMaterial(
+            this.characterMaterial,
+            this.characterMaterial,
+            {
+                friction: 0,
+                restitution: 0,
+                contactEquationStiffness: 1e7,
+                contactEquationRelaxation: 4
+            }
+        ));
+
     }
 
-    // Lock rotation (characters don't tumble)
-    body.quaternion.set(0, 0, 0, 1);
-    body.angularVelocity.set(0, 0, 0);
+    registerActor(actor) {
 
-    body.characterRadius = radius;
-    this.world.addBody(body);
-    this.actorBodies.set(actor, body);
-    
-    return body;
-  }
+        const radius = actor.collisionRadius ?? 0.36;
+        const body = new CANNON.Body({
+            mass: 1,
+            material: this.characterMaterial,
+            type: CANNON.Body.DYNAMIC,
+            fixedRotation: true,
+            linearDamping: 0.05,
+            angularDamping: 1,
+            allowSleep: false
+        });
 
-  createTerrainBodyFromMesh(mesh) {
-    if (!mesh?.isMesh || !mesh.geometry) return null;
-
-    mesh.updateWorldMatrix(true, false);
-
-    const position = new THREE.Vector3();
-    const quaternion = new THREE.Quaternion();
-    const scale = new THREE.Vector3();
-    mesh.matrixWorld.decompose(position, quaternion, scale);
-
-    const geometry = mesh.geometry;
-    const body = new CANNON.Body({
-      mass: 0,
-      material: this.groundMaterial
-    });
-
-    const vertices = [];
-    const indices = [];
-    const posAttr = geometry.getAttribute("position");
-
-    if (!posAttr) return null;
-
-    for (let i = 0; i < posAttr.count; i++) {
-      vertices.push(
-        posAttr.getX(i) * scale.x,
-        posAttr.getY(i) * scale.y,
-        posAttr.getZ(i) * scale.z
-      );
-    }
-
-    const indexAttr = geometry.getIndex();
-    if (indexAttr) {
-      for (let i = 0; i < indexAttr.count; i++) {
-        indices.push(indexAttr.getX(i));
-      }
-    } else {
-      for (let i = 0; i < posAttr.count; i++) {
-        indices.push(i);
-      }
-    }
-
-    const shape = new CANNON.Trimesh(vertices, indices);
-    body.addShape(shape);
-    body.position.set(position.x, position.y, position.z);
-    body.quaternion.set(quaternion.x, quaternion.y, quaternion.z, quaternion.w);
-    this.world.addBody(body);
-    this.staticBodies.push(body);
-
-    return body;
-  }
-
-  createTerrainBody(geometry, position = new THREE.Vector3(0, 0, 0), scale = 1) {
-    // Static trimesh body from Three.js geometry
-    const body = new CANNON.Body({
-      mass: 0, // Static
-      material: this.groundMaterial
-    });
-
-    const vertices = [];
-    const indices = [];
-    
-    const posAttr = geometry.getAttribute("position");
-    if (posAttr) {
-      for (let i = 0; i < posAttr.count; i++) {
-        vertices.push(
-          posAttr.getX(i) * scale,
-          posAttr.getY(i) * scale,
-          posAttr.getZ(i) * scale
+        body.addShape(new CANNON.Sphere(radius + this.contactSkin));
+        body.position.set(
+            actor.object3D.position.x,
+            actor.object3D.position.y + radius,
+            actor.object3D.position.z
         );
-      }
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+        body.characterRadius = radius;
+        body.collisionResponse = true;
+        this.world.addBody(body);
+        this.actorBodies.set(actor, body);
+
     }
 
-    const indexAttr = geometry.getIndex();
-    if (indexAttr) {
-      for (let i = 0; i < indexAttr.count; i++) {
-        indices.push(indexAttr.getX(i));
-      }
+    unregisterActor(actor) {
+
+        const body = this.actorBodies.get(actor);
+
+        if (!body) return;
+
+        this.world.removeBody(body);
+        this.actorBodies.delete(actor);
+
     }
 
-    if (vertices.length > 0 && indices.length > 0) {
-      const shape = new CANNON.Trimesh(vertices, indices);
-      body.addShape(shape);
+    solve(delta) {
+
+        const safeDelta = Math.max(delta, 1 / 120);
+
+        for (const [actor, body] of this.actorBodies) {
+
+            if (!actor.isActive()) continue;
+
+            // Navigation/locomotion own intent. Cannon only separates overlaps
+            // from the already chosen frame position. Use velocity-to-target
+            // instead of teleporting X/Z so contacts are resolved in-between.
+            const targetX = actor.object3D.position.x;
+            const targetZ = actor.object3D.position.z;
+            const deltaX = targetX - body.position.x;
+            const deltaZ = targetZ - body.position.z;
+
+            // Commands like spawn/warp may intentionally jump far; snap those
+            // to keep navigation deterministic while still letting normal walk
+            // movement use physical contact resolution.
+            if (Math.hypot(deltaX, deltaZ) > 1.25) {
+
+                body.position.x = targetX;
+                body.position.z = targetZ;
+                body.velocity.x = 0;
+                body.velocity.z = 0;
+
+            } else {
+
+                body.velocity.x = deltaX / safeDelta;
+                body.velocity.z = deltaZ / safeDelta;
+
+            }
+
+            body.position.y = actor.object3D.position.y + body.characterRadius;
+            body.velocity.y = 0;
+            body.angularVelocity.set(0, 0, 0);
+            body.wakeUp();
+
+        }
+
+        this.world.step(this.fixedTimeStep, delta, this.maxSubSteps);
+
+        for (const [actor, body] of this.actorBodies) {
+
+            if (!actor.isActive()) continue;
+
+            actor.object3D.position.x = body.position.x;
+            actor.object3D.position.z = body.position.z;
+
+        }
+
     }
 
-    body.position.set(position.x, position.y, position.z);
-    this.world.addBody(body);
-    this.staticBodies.push(body);
-    
-    return body;
-  }
+    findEscapePosition(actor, target = null, distance = 0.9) {
 
-  getActorBody(actor) {
-    return this.actorBodies.get(actor);
-  }
+        const origin = actor.object3D.position;
+        const radius = this.getActorRadius(actor);
+        const forward = target
+            ? target.clone().sub(origin)
+            : new THREE.Vector3(0, 0, 1).applyQuaternion(actor.object3D.quaternion);
+        forward.y = 0;
 
-  removeActor(actor) {
-    const body = this.actorBodies.get(actor);
-    if (body) {
-      this.world.removeBody(body);
-      this.actorBodies.delete(actor);
+        if (forward.lengthSq() < 0.0001) {
+
+            forward.set(0, 0, 1).applyQuaternion(actor.object3D.quaternion);
+            forward.y = 0;
+
+        }
+
+        forward.normalize();
+        const left = forward.clone();
+        left.set(-forward.z, 0, forward.x);
+        const right = left.clone().negate();
+        const step = Math.max(distance, radius * 2.2);
+        const leftCandidate = origin.clone().addScaledVector(left, step);
+        const rightCandidate = origin.clone().addScaledVector(right, step);
+        const leftClearance = this.getClearanceForPosition(actor, leftCandidate);
+        const rightClearance = this.getClearanceForPosition(actor, rightCandidate);
+
+        return leftClearance >= rightClearance
+            ? leftCandidate
+            : rightCandidate;
+
     }
-  }
 
-  step(deltaTime) {
-    const fixedTimeStep = 1 / 60; // 60 FPS physics
-    const maxSubSteps = 3;
-    
-    this.world.step(fixedTimeStep, deltaTime, maxSubSteps);
-  }
+    findRetreatPosition(actor, target, distance = 1.1) {
 
-  syncActorPositions() {
-    for (const [actor, body] of this.actorBodies) {
-      if (!actor.object3D) continue;
+        const origin = actor.object3D.position;
+        const away = origin.clone().sub(target).setY(0);
 
-      const followsPhysics =
-        actor.isState?.("walking") || actor.isState?.("waiting");
+        if (away.lengthSq() < 0.0001) {
 
-      if (followsPhysics) {
-        actor.object3D.position.x = body.position.x;
-        actor.object3D.position.z = body.position.z;
-        actor.object3D.position.y = body.position.y - (body.characterRadius ?? 0);
-      } else {
-        body.position.x = actor.object3D.position.x;
-        body.position.z = actor.object3D.position.z;
-        body.position.y = actor.object3D.position.y + (body.characterRadius ?? 0);
-        body.velocity.x = 0;
-        body.velocity.z = 0;
-      }
+            away.set(0, 0, -1);
+
+        }
+
+        const radius = this.getActorRadius(actor);
+        const step = Math.max(distance, radius * 2.6);
+
+        return origin.clone().addScaledVector(away.normalize(), step);
+
     }
-  }
+
+    getClearanceForPosition(actor, position) {
+
+        let minimum = Infinity;
+
+        for (const [other, body] of this.actorBodies) {
+
+            if (other === actor || !other.isActive()) continue;
+
+            const distance = Math.hypot(
+                position.x - body.position.x,
+                position.z - body.position.z
+            ) - this.getActorRadius(actor) - this.getActorRadius(other);
+            minimum = Math.min(minimum, distance);
+
+        }
+
+        return minimum;
+
+    }
+
+    getActorRadius(actor) {
+
+        const body = this.actorBodies.get(actor);
+
+        return body?.characterRadius ?? actor.collisionRadius ?? 0.36;
+
+    }
+
 }

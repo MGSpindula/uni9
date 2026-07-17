@@ -201,24 +201,73 @@ export class NavigationGraphHelper extends THREE.Group {
 
     addActiveLaneCurves() {
 
-        const segments = [];
+        const curveColor = 0x33ffff;
 
         for (const points of this.graph.activeLaneCurves.values()) {
 
-            for (let index = 0; index < points.length - 1; index++) {
+            if (points.length < 2) continue;
 
-                const start = points[index].clone();
-                const end = points[index + 1].clone();
+            const curvePoints = points.map(point => {
 
-                start.y += this.height + 0.03;
-                end.y += this.height + 0.03;
-                segments.push(start, end);
+                const elevated = point.clone();
+                elevated.y += this.height + 0.03;
+                return elevated;
+
+            });
+
+            // Render the sampled Bezier path as one continuous line. The graph
+            // stores the samples because they are also consumed as waypoints.
+            const curve = new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints(curvePoints),
+                new THREE.LineBasicMaterial({
+                    color: curveColor,
+                    depthTest: false
+                })
+            );
+            curve.name = "NavigationBezierCurve";
+            curve.renderOrder = 1001;
+            curve.raycast = () => {};
+            this.add(curve);
+
+            // Keep the samples visible so authored lane transitions and
+            // collision-rebuilt curves can be inspected precisely.
+            const sampleMarkers = new THREE.Points(
+                new THREE.BufferGeometry().setFromPoints(curvePoints),
+                new THREE.PointsMaterial({
+                    color: 0xffffff,
+                    size: this.nodeSize * 0.7,
+                    sizeAttenuation: false,
+                    depthTest: false
+                })
+            );
+            sampleMarkers.name = "NavigationBezierSamples";
+            sampleMarkers.renderOrder = 1002;
+            sampleMarkers.raycast = () => {};
+            this.add(sampleMarkers);
+
+            const start = curvePoints[0];
+            const end = curvePoints[curvePoints.length - 1];
+            const direction = end.clone().sub(start);
+            direction.y = 0;
+
+            if (direction.lengthSq() > 0.0001) {
+
+                const arrow = new THREE.ArrowHelper(
+                    direction.normalize(),
+                    end,
+                    Math.min(0.45, direction.length()),
+                    curveColor,
+                    0.12,
+                    0.08
+                );
+                arrow.name = "NavigationBezierDirection";
+                arrow.line.raycast = () => {};
+                arrow.cone.raycast = () => {};
+                this.add(arrow);
 
             }
 
         }
-
-        this.addEdges(segments, 0x33ffff, "ActiveBezier");
 
     }
 
@@ -554,7 +603,12 @@ export class NavigationGraphHelper extends THREE.Group {
         if (node.occupants.size > 0 &&
             !this.graph.isNodePassable(node.id)) return this.occupiedColor;
         if (highlighted) return 0x33ff66;
-        if (node.reservations.size > 0) return this.reservedColor;
+        if (node.reservations.size > 0 ||
+            node.transitReservations.size > 0) {
+
+            return this.reservedColor;
+
+        }
 
         return this.nodeColor;
 
@@ -618,7 +672,8 @@ export class NavigationGraphHelper extends THREE.Group {
                         : "#66ff8a"
                     : highlighted
                         ? "#66ff8a"
-                    : node.reservations.size > 0
+                    : node.reservations.size > 0 ||
+                        node.transitReservations.size > 0
                         ? "#66ddff"
                         : "#ffe680";
 
@@ -634,8 +689,11 @@ export class NavigationGraphHelper extends THREE.Group {
                 ? this.graph.isNodePassable(node.id)
                     ? "resting, passable"
                     : "occupied, impassable"
-                : node.reservations.size > 0
-                    ? "reserved"
+                : node.reservations.size > 0 ||
+                    node.transitReservations.size > 0
+                    ? node.reservations.size > 0
+                        ? "reserved"
+                        : "transit reserved"
                     : null;
 
         context.fillText(
