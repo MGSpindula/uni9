@@ -61,26 +61,9 @@ export class PhysicsWorld {
         body.velocity.set(0, 0, 0);
         body.angularVelocity.set(0, 0, 0);
         body.characterRadius = radius;
-        body.dwellProtected = false;
         body.collisionResponse = true;
         this.world.addBody(body);
         this.actorBodies.set(actor, body);
-
-    }
-
-    setDwellProtected(actor, protectedState) {
-
-        const body = this.actorBodies.get(actor);
-        if (!body) return;
-
-        body.dwellProtected = protectedState;
-        body.type = protectedState
-            ? CANNON.Body.KINEMATIC
-            : CANNON.Body.DYNAMIC;
-        body.updateMassProperties();
-        body.velocity.set(0, 0, 0);
-        body.angularVelocity.set(0, 0, 0);
-        body.wakeUp();
 
     }
 
@@ -102,18 +85,6 @@ export class PhysicsWorld {
         for (const [actor, body] of this.actorBodies) {
 
             if (!actor.isActive()) continue;
-
-            if (body.dwellProtected) {
-
-                body.position.x = actor.object3D.position.x;
-                body.position.z = actor.object3D.position.z;
-                body.position.y = actor.object3D.position.y +
-                    body.characterRadius;
-                body.velocity.set(0, 0, 0);
-                body.angularVelocity.set(0, 0, 0);
-                continue;
-
-            }
 
             // Navigation/locomotion own intent. Cannon only separates overlaps
             // from the already chosen frame position. Use velocity-to-target
@@ -190,10 +161,6 @@ export class PhysicsWorld {
 
                 if (distance >= minimumDistance) continue;
 
-                if (firstBody.dwellProtected && secondBody.dwellProtected) {
-                    continue;
-                }
-
                 if (distance < 0.0001) {
 
                     const sign = firstIndex % 2 === 0 ? 1 : -1;
@@ -204,8 +171,7 @@ export class PhysicsWorld {
                 }
 
                 const correction = (minimumDistance - distance) / distance;
-                const correctionShare = firstBody.dwellProtected ? 0 :
-                    secondBody.dwellProtected ? 1 : 0.5;
+                const correctionShare = 0.5;
                 const moveX = deltaX * correction * correctionShare;
                 const moveZ = deltaZ * correction * correctionShare;
 

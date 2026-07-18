@@ -24,13 +24,14 @@ import { NavigationGraph } from "./navigation/NavigationGraph";
 import { NavigationGraphHelper } from "./navigation/NavigationGraphHelper";
 import { NavigationConnector } from "./navigation/NavigationConnector";
 import { CharacterNavigationSystem } from "./navigation/CharacterNavigationSystem";
-import { DwellSpotRegistry } from "./navigation/DwellSpotRegistry";
 import { CharacterDebugPanel } from "./debug/CharacterDebugPanel";
 import { PerformanceDebugPanel } from "./debug/PerformanceDebugPanel";
 import {
-    configureCozyCampusDwellSpots,
     configureCozyCampusNavigation
 } from "./levels/CozyCampusNavigation";
+import {
+    CozyCampusInteractionPoints
+} from "./levels/CozyCampusInteractionPoints";
 
 export class Scene {
 
@@ -199,16 +200,6 @@ export class Scene {
             spawnId: "spawn"
         });
 
-        // Scene connects the floor interaction to the player command.
-        this.floor.setDestinationHandler(position => {
-
-            this.characterNavigation.moveToClosestNode(
-                this.player,
-                position
-            );
-
-        });
-
         this.add(this.floor);
 
         this.add(this.player);
@@ -222,6 +213,21 @@ export class Scene {
         this.chair = new Chair();
 
         this.add(this.chair);
+
+        this.ambientActionPoints =
+            new CozyCampusInteractionPoints();
+
+        this.add(
+            this.ambientActionPoints
+        );
+
+        this.registerNavigationInteractions(
+            this.ambientActionPoints
+        );
+
+        this.interactionSystem.registerTarget(
+            this.ambientActionPoints
+        );
 
         this.registerNavigationInteractions(
             this.chair
@@ -267,19 +273,15 @@ export class Scene {
                         this.interactionSystem,
 
                     tags: [
-                        "sit"
+                        "npc-action"
                     ]
                 });
 
             const controller =
                 new NPCController({
                     npc,
-                    graph:
-                        this.navigationGraph,
-
                     navigationSystem:
                         this.characterNavigation,
-
                     interactionBehavior
                 });
 
@@ -297,14 +299,6 @@ export class Scene {
             selectionRadius: 1.25
         });
         configureCozyCampusNavigation(this.navigationGraph);
-        this.dwellSpots = new DwellSpotRegistry(
-            this.navigationGraph
-        );
-
-        configureCozyCampusDwellSpots(
-            this.dwellSpots,
-            this.navigationGraph
-        );
 
         if (!this.navigationGraph.isValid()) {
 
@@ -318,16 +312,25 @@ export class Scene {
         this.navigationConnector = new NavigationConnector(
             this.navigationGraph
         );
-        this.navigationHelper = new NavigationGraphHelper(this.navigationGraph, {
-            connector: this.navigationConnector,
-            dwellSpots: this.dwellSpots
-        });
-        this.characterNavigation = new CharacterNavigationSystem({
-            graph: this.navigationGraph,
-            connector: this.navigationConnector,
-            dwellSpots: this.dwellSpots,
-            helper: this.navigationHelper
-        });
+        this.navigationHelper =
+            new NavigationGraphHelper(
+                this.navigationGraph,
+                {
+                    connector:
+                        this.navigationConnector
+                }
+            );
+        this.characterNavigation =
+            new CharacterNavigationSystem({
+                graph:
+                    this.navigationGraph,
+
+                connector:
+                    this.navigationConnector,
+
+                helper:
+                    this.navigationHelper
+            });
         this.scene.add(this.navigationHelper);
         this.navigationHelper.highlightNode("spawn");
 
@@ -356,15 +359,28 @@ export class Scene {
 
     registerNavigationInteractions(entity) {
 
-        if (entity.interactionPoints.length === 0) return;
+        if (
+            entity.interactionPoints.length === 0
+        ) {
 
-        for (const point of entity.interactionPoints) {
-
-            this.navigationConnector.register(point);
+            return;
 
         }
 
-        if (this.navigationHelper?.isVisible) {
+        for (
+            const point of
+            entity.interactionPoints
+        ) {
+
+            this.navigationConnector.register(
+                point
+            );
+
+        }
+
+        if (
+            this.navigationHelper?.isVisible
+        ) {
 
             this.navigationHelper.refresh();
 

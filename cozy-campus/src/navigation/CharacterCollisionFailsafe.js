@@ -497,8 +497,8 @@ export class CharacterCollisionFailsafe {
         const context = this.owner.contexts.get(actor);
 
         if (!context) return 0;
-        if (actor.name === "Player") return 6;
-        if (context.activeInteraction) return 5;
+        if (actor.name === "Player") return 4;
+        if (context.activeInteraction) return 3;
 
         const interaction = context.pendingInteraction?.point;
         const approach = interaction?.via;
@@ -509,10 +509,8 @@ export class CharacterCollisionFailsafe {
             approach?.occupants.has(actor)
         );
 
-        if (reserved) return 4;
-        if (context.interactionPoint) return 3;
-        if (context.dwellSpot?.occupant === actor) return 2;
-        if (context.dwellSpot?.reservedBy === actor) return 1;
+        if (reserved) return 2;
+        if (context.interactionPoint) return 1;
         return 0;
 
     }

@@ -81,5 +81,5 @@ canvas {
 .character-debug dd { margin: 0; overflow-wrap: anywhere; }
 .character-debug-state { color: #7ed6a5; }
 .character-debug-state.waiting { color: #ffd166; }
-.character-debug-state.idle, .character-debug-state.dwelling { color: #9fc5ff; }
+.character-debug-state.idle {color: #9fc5ff;}
 .character-debug.collapsed { width: 190px; overflow: hidden; }

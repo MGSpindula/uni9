@@ -25,11 +25,6 @@ export class Character extends Entity {
         this.animation = null;
         this.grounding = null;
 
-        // Most autonomous characters must clear a destination that has no
-        // authored dwell spot. Player enables this override because direct
-        // control may intentionally leave them standing anywhere.
-        this.canDwellWithoutSpot = false;
-
         this.waypointReachedHandler = null;
         this.waypointArrivalGuard = null;
         this.segmentRequestedHandler = null;
@@ -213,93 +208,7 @@ export class Character extends Entity {
     // Navigation presentation hooks
     // -----------------------------
 
-    performDwellSpotSearch({ nodeId, spot, onComplete = null }) {
-
-        console.log(
-            `[DwellSpot] ${this.name} looks around at "${nodeId}" ` +
-            `before choosing "${spot.id}".`
-        );
-
-        // Prototype for a future bone animation: look to one side, scan the
-        // other side, then restore the original facing. Override this method
-        // in a character class when an AnimationMixer clip becomes available.
-        const initialRotation = this.object3D.rotation.y;
-
-        AnimationPresets.to(this, {
-            object: this.object3D.rotation,
-            property: "y",
-            to: initialRotation + 0.55,
-            duration: 0.35,
-            easing: Tween.easeInOutQuad,
-            onComplete: () => AnimationPresets.to(this, {
-                object: this.object3D.rotation,
-                property: "y",
-                to: initialRotation - 0.55,
-                duration: 0.55,
-                easing: Tween.easeInOutQuad,
-                onComplete: () => AnimationPresets.to(this, {
-                    object: this.object3D.rotation,
-                    property: "y",
-                    to: initialRotation,
-                    duration: 0.35,
-                    easing: Tween.easeInOutQuad,
-                    onComplete
-                })
-            })
-        });
-
-    }
-
-    performDwellEntry(spot, onComplete = null) {
-
-        console.log(`[DwellSpot] ${this.name} enters "${spot.id}".`);
-        AnimationPresets.scaleBounce(this, {
-            target: this.visual,
-            multiplier: 1.035,
-            outDuration: 0.1,
-            returnDuration: 0.12,
-            onComplete
-        });
-
-    }
-
-    performDwellExit(spot, onComplete = null) {
-
-        console.log(`[DwellSpot] ${this.name} exits "${spot.id}".`);
-
-        if (!this.visual) {
-
-            onComplete?.();
-            return;
-
-        }
-
-        const initialRootRotation = this.object3D.rotation.y;
-
-        // The cylinder is symmetrical and its forward arrow belongs to
-        // object3D, so this visible mock rotates the root while navigation is
-        // paused. A future bone clip should replace this presentation hook.
-        AnimationPresets.to(this, {
-            object: this.object3D.rotation,
-            property: "y",
-            to: initialRootRotation + Math.PI,
-            // Deliberately slow enough to read the complete 180° turn.
-            duration: 0.65,
-            easing: Tween.easeInOutQuad,
-            onComplete: () => {
-
-                onComplete?.();
-            }
-        });
-
-        AnimationPresets.scaleBounce(this, {
-            target: this.visual,
-            multiplier: 0.975,
-            outDuration: 0.07,
-            returnDuration: 0.09
-        });
-
-    }
+    
 
     // -----------------------------
     // Lifecycle

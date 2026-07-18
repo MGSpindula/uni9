@@ -1,4 +1,6 @@
-import { NavigationNodeMode } from "./NavigationNodeMode";
+import {
+    EntityState
+} from "../core/EntityState";
 
 export class InteractionNavigation {
 
@@ -78,18 +80,8 @@ export class InteractionNavigation {
             if (traversal.currentNodeId) {
 
                 this.graph.releaseNode(traversal.currentNodeId, actor);
-                this.owner.retryFreedDwellSpot(
-                    traversal.currentNodeId,
-                    actor
-                );
 
             }
-
-            // A dwell spot is a separate resource from its navigation node.
-            // Leaving the graph for a chair, item or other interaction must
-            // release both; otherwise the helper keeps showing a ghost owner.
-            this.owner.releaseDwellOccupancy(actor);
-            this.owner.releaseDwellReservation(actor);
 
             if (traversal.currentConnection) {
 
@@ -161,22 +153,23 @@ export class InteractionNavigation {
 
         }
 
-        if (interaction?.point === waypoint.interactionPoint) {
-
-            context.pendingInteraction = null;
+        if (
+            interaction?.point ===
+            waypoint.interactionPoint
+        ) {
 
             const entered =
                 interaction.onArrive?.();
 
+            context.pendingInteraction =
+                null;
+
             if (entered === false) {
 
-                this.connector.releasePoint(
-                    waypoint.interactionPoint,
-                    actor
-                );
-
-                context.interactionPoint = null;
-                context.activeInteraction = null;
+                this.owner
+                    .leaveInteractionPoint(
+                        context
+                    );
 
                 actor.cancel();
 
@@ -188,11 +181,18 @@ export class InteractionNavigation {
 
             context.activeInteraction = {
                 target:
-                    waypoint.interactionPoint.entity,
+                    waypoint
+                        .interactionPoint
+                        .entity,
 
                 point:
-                    waypoint.interactionPoint
+                    waypoint
+                        .interactionPoint
             };
+
+            actor.setState(
+                EntityState.IDLE
+            );
 
         }
 

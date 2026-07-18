@@ -36,11 +36,11 @@ export class NavigationDepartureQueue {
             actorEntries.set(originId, request);
 
             const position = queue.indexOf(request) + 1;
-            console.log(
+            /* console.log(
                 `[NavigationQueue] + ${actor.name} queued at "${originId}" ` +
                 `(position ${position}, ` +
-                `${priority > 0 ? "transit priority" : "dwell"}).`
-            );
+                `${priority > 0 ? "transit priority" : "local action"}).`
+            ); */
 
         } else if (priority > request.priority) {
 
@@ -118,10 +118,10 @@ export class NavigationDepartureQueue {
         if (index >= 0) {
 
             queue.splice(index, 1);
-            console.log(
+            /* console.log(
                 `[NavigationQueue] ✓ ${actor.name} completed "${originId}". ` +
                 `Next: ${queue[0]?.actor.name ?? "none"}.`
-            );
+            ); */
 
         }
 
@@ -178,7 +178,7 @@ export class NavigationDepartureQueue {
                 origin: originId,
                 position: index + 1,
                 actor: request.actor.name,
-                mode: request.priority > 0 ? "TRANSIT" : "DWELL",
+                priority: request.priority,
                 order: request.order
             }));
 

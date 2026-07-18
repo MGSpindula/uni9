@@ -7,11 +7,6 @@ export class Player extends Character {
 
         super("Player");
 
-        // Override da política de dwell: o player pode ficar no ponto em que
-        // parou mesmo sem DwellSpot. Troque para false se o controle futuro
-        // exigir que ele sempre procure um local de espera autorizado.
-        this.canDwellWithoutSpot = true;
-
         const visual = new THREE.Mesh(
             new THREE.CylinderGeometry(0.45, 0.45, 1.7, 16),
             new THREE.MeshStandardMaterial({ color: 0x4d8edb })

@@ -40,6 +40,25 @@ export class NavigationConnector {
 
     }
 
+    unregister(point) {
+
+        if (!point) return false;
+
+        point.occupants.clear();
+        point.reservations.clear();
+
+        this.points.delete(point.id);
+
+        this.anchors.delete(
+            `generated:${point.id}`
+        );
+
+        point.connection = null;
+
+        return true;
+
+    }
+
     connect(point, { silent = false } = {}) {
 
         point.connection = null;
@@ -93,7 +112,7 @@ export class NavigationConnector {
 
         if (!nearest ||
             nearest.distanceSquared >
-                point.maxConnectionDistance * point.maxConnectionDistance) {
+            point.maxConnectionDistance * point.maxConnectionDistance) {
 
             if (!silent) {
 
@@ -292,7 +311,7 @@ export class NavigationConnector {
             : THREE.MathUtils.clamp(
                 ((projection.projectedPosition.x - from.x) * directionX +
                     (projection.projectedPosition.z - from.z) * directionZ) /
-                    lengthSquared,
+                lengthSquared,
                 0,
                 1
             );

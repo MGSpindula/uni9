@@ -1,47 +1,43 @@
-import { InteractionIntent } from "./interactions/InteractionIntent";
-import { InteractionQuery } from "./interactions/InteractionQuery";
-import { InteractionPlanner } from "./interactions/InteractionPlanner";
+import {
+    InteractionQuery
+} from "./interactions/InteractionQuery";
 
 export class InteractionSystem {
 
     constructor() {
 
-        // Actor -> navigation adapter.
-        this.actorNavigators = new Map();
+        this.actorNavigators =
+            new Map();
 
-        // Entities that offer InteractionDefinitions.
-        this.targets = new Set();
+        this.targets =
+            new Set();
 
         this.query =
             new InteractionQuery(
                 this.targets
             );
 
-        this.planner =
-            new InteractionPlanner(
-                this.query
-            );
-
     }
-
-    // -----------------------------
-    // Actors
-    // -----------------------------
 
     registerActor(actor, navigate) {
 
         if (!actor) {
 
             throw new Error(
-                "InteractionSystem.registerActor requires an actor."
+                "InteractionSystem.registerActor " +
+                "requires an actor."
             );
 
         }
 
-        if (typeof navigate !== "function") {
+        if (
+            typeof navigate !==
+            "function"
+        ) {
 
             throw new Error(
-                `Actor "${actor.name}" requires a navigation adapter.`
+                `Actor "${actor.name}" ` +
+                `requires a navigation adapter.`
             );
 
         }
@@ -55,28 +51,32 @@ export class InteractionSystem {
 
     unregisterActor(actor) {
 
-        this.actorNavigators.delete(actor);
+        this.actorNavigators.delete(
+            actor
+        );
 
     }
 
-    // -----------------------------
-    // Targets
-    // -----------------------------
-
     registerTarget(target) {
 
-        if (!target) return;
+        if (!target) return false;
 
         const definitions =
-            target.getInteractionDefinitions?.() ?? [];
+            target
+                .getInteractionDefinitions?.() ??
+            [];
 
-        if (definitions.length === 0) {
+        if (
+            definitions.length === 0
+        ) {
 
-            return;
+            return false;
 
         }
 
         this.targets.add(target);
+
+        return true;
 
     }
 
@@ -86,81 +86,128 @@ export class InteractionSystem {
 
     }
 
-    // -----------------------------
-    // Intent execution
-    // -----------------------------
+    find(request) {
 
-    request(intentData) {
+        return this.query.findNearest({
+            actor:
+                request.actor,
 
-        const intent =
-            intentData instanceof InteractionIntent
-                ? intentData
-                : new InteractionIntent(intentData);
+            target:
+                request.target ?? null,
+
+            interactionId:
+                request.interactionId ??
+                null,
+
+            tags:
+                request.tags ?? [],
+
+            available:
+                true,
+
+            excludePoint:
+                request.excludePoint ??
+                null
+        });
+
+    }
+
+    request(request) {
+
+        const actor =
+            request?.actor;
+
+        if (!actor) {
+
+            return false;
+
+        }
 
         const navigate =
             this.actorNavigators.get(
-                intent.actor
+                actor
             );
 
         if (!navigate) {
 
             console.log(
-                `[InteractionSystem] Actor ` +
-                `"${intent.actor?.name ?? "unknown"}" ` +
-                `has no navigation adapter.`
+                `[InteractionSystem] ` +
+                `"${actor.name}" has no ` +
+                `navigation adapter.`
             );
 
             return false;
 
         }
 
-        const result =
-            this.planner.plan(intent);
+        const match =
+            this.find(request);
 
-        if (!result) {
+        if (!match) {
 
             return false;
 
         }
 
-        const context = {
-            actor: intent.actor,
-            target: result.target,
-            definition: result.definition,
-            point: result.point,
-            intent,
-            navigate
-        };
+        const {
+            target,
+            definition,
+            point
+        } = match;
 
-        const accepted =
-            result.plan.execute(context);
+        const onArrive = () => {
 
-        return accepted !== false;
+            const context = {
+                actor,
+                target,
+                definition,
+                point
+            };
 
-    }
+            if (
+                !definition.canExecute(
+                    context
+                )
+            ) {
 
-    // -----------------------------
-    // Runtime queries
-    // -----------------------------
-
-    findActiveInteraction(actor) {
-
-        for (const target of this.targets) {
-
-            if (!target.isInteractingWith?.(actor)) {
-
-                continue;
+                return false;
 
             }
 
-            return {
-                actor,
+            return definition.execute(
+                context
+            );
+
+        };
+
+        return navigate({
+            point,
+            onArrive
+        });
+
+    }
+
+    isActorUsingTarget(actor) {
+
+        for (
+            const target of
+            this.targets
+        ) {
+
+            if (
                 target
-            };
+                    .isInteractingWith?.(
+                        actor
+                    )
+            ) {
+
+                return true;
+
+            }
 
         }
 
-        return null;
+        return false;
 
     }
 

@@ -4,7 +4,6 @@ export class NavigationGraphHelper extends THREE.Group {
 
     constructor(graph, {
         connector = null,
-        dwellSpots = null,
         nodeColor = 0xffcc33,
         edgeColor = 0x3366ff,
         blockedColor = 0xff3344,
@@ -19,7 +18,6 @@ export class NavigationGraphHelper extends THREE.Group {
 
         this.graph = graph;
         this.connector = connector;
-        this.dwellSpots = dwellSpots;
         this.nodeColor = nodeColor;
         this.edgeColor = edgeColor;
         this.blockedColor = blockedColor;
@@ -195,7 +193,6 @@ export class NavigationGraphHelper extends THREE.Group {
         this.addActiveLaneCurves();
         this.addInteractionPoints();
         this.addGeneratedAccessAnchors();
-        this.addDwellSpots();
 
     }
 
@@ -337,97 +334,6 @@ export class NavigationGraphHelper extends THREE.Group {
 
         this.addEdges(portalSegments, 0x33ffff, "GeneratedAnchorPortals");
         this.addEdges(approachSegments, 0xff55dd, "GeneratedAnchorApproach");
-
-    }
-
-    addDwellSpots() {
-
-        if (!this.dwellSpots) return;
-
-        for (const spot of this.dwellSpots.spots.values()) {
-
-            const color = spot.occupant
-                ? this.occupiedColor
-                : spot.reservedBy
-                    ? this.reservedColor
-                    : spot.pose === "lean"
-                        ? 0xbb66ff
-                        : 0x66ff99;
-            const marker = new THREE.Mesh(
-                new THREE.CircleGeometry(this.nodeSize * 1.6, 16),
-                new THREE.MeshBasicMaterial({
-                    color,
-                    side: THREE.DoubleSide,
-                    depthTest: false
-                })
-            );
-
-            marker.name = `DwellSpot:${spot.id}:${spot.pose}`;
-            marker.rotation.x = -Math.PI / 2;
-            marker.position.copy(spot.position);
-            marker.position.y += this.height + 0.04;
-            marker.renderOrder = 1002;
-            marker.raycast = () => {};
-            this.add(marker);
-
-            // Use the same +Z/quaternion convention as Character.object3D.
-            // This avoids a debug arrow disagreeing with the final actor pose.
-            const direction = spot.getDirection();
-            const arrow = new THREE.ArrowHelper(
-                direction,
-                spot.position.clone().add(
-                    new THREE.Vector3(0, this.height + 0.08, 0)
-                ),
-                0.65,
-                color,
-                0.18,
-                0.1
-            );
-
-            arrow.name = `DwellSpotDirection:${spot.id}`;
-            arrow.line.raycast = () => {};
-            arrow.cone.raycast = () => {};
-            this.add(arrow);
-
-            this.add(this.createDwellSpotLabel(spot, color));
-
-        }
-
-    }
-
-    createDwellSpotLabel(spot, color) {
-
-        const canvas = document.createElement("canvas");
-        const context = canvas.getContext("2d");
-
-        canvas.width = 512;
-        canvas.height = 96;
-        context.font = "bold 30px sans-serif";
-        context.textAlign = "center";
-        context.textBaseline = "middle";
-        context.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-        context.fillText(
-            `${spot.id} [${spot.pose}]`,
-            canvas.width / 2,
-            canvas.height / 2
-        );
-
-        const texture = new THREE.CanvasTexture(canvas);
-        texture.colorSpace = THREE.SRGBColorSpace;
-        const label = new THREE.Sprite(new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: false
-        }));
-
-        label.name = `DwellSpotLabel:${spot.id}`;
-        label.position.copy(spot.position);
-        label.position.y += this.height + 0.42;
-        label.scale.set(2.7, 0.5, 1);
-        label.renderOrder = 1003;
-        label.raycast = () => {};
-
-        return label;
 
     }
 

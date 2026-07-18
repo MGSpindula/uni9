@@ -1,5 +1,4 @@
 import { Input } from "../core/Input";
-import { InteractionIntent } from "../core/interactions/InteractionIntent";
 
 export class PlayerController {
 
@@ -41,11 +40,13 @@ export class PlayerController {
     handleClick(event) {
 
         const hit =
-            this.selection.handleClick(event);
+            this.selection.handleClick(
+                event
+            );
 
         if (!hit) {
 
-            return;
+            return false;
 
         }
 
@@ -56,26 +57,31 @@ export class PlayerController {
             );
 
         if (
-            pointerResult?.type === "INTERACT"
+            !pointerResult ||
+            pointerResult.type !==
+            "INTERACT"
         ) {
 
-            const intent =
-                new InteractionIntent({
-                    actor: this.player,
-                    target: hit.entity,
-                    interactionId:
-                        pointerResult.interactionId,
-                    tags:
-                        pointerResult.tags ?? []
-                });
-
-            this.interactionSystem.request(
-                intent
-            );
+            return false;
 
         }
 
-        return true;
+        return this.interactionSystem
+            .request({
+                actor:
+                    this.player,
+
+                target:
+                    hit.entity,
+
+                interactionId:
+                    pointerResult
+                        .interactionId,
+
+                tags:
+                    pointerResult.tags ??
+                    []
+            });
 
     }
 

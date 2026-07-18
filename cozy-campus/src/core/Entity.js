@@ -179,6 +179,7 @@ export class Entity {
     addInteractionPoint(point) {
 
         point.attach(this);
+
         this.interactionPoints.push(point);
 
         return point;

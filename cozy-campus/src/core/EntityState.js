@@ -6,11 +6,8 @@ export const EntityState = Object.freeze({
 
     WAITING: "waiting",
 
-    // Reached a destination but is still occupying the graph center.
+    // Finishing locomotion or an action transition.
     STOPPING: "stopping",
-
-    // Moved to an idle spot and is no longer obstructing circulation.
-    DWELLING: "dwelling",
 
     HOVERED: "hovered",
 

@@ -5,8 +5,7 @@ export const WaitReason = {
     NODE_OCCUPIED:  "NODE_OCCUPIED",
     ENDPOINT_WAIT:  "ENDPOINT_WAIT",
     HARD_BLOCKED:   "HARD_BLOCKED",
-    REALIGNING:     "REALIGNING",
-    DWELL_COOLDOWN: "DWELL_COOLDOWN"
+    REALIGNING:     "REALIGNING"
 };
 
 export const WaitReasonLabel = {
@@ -16,6 +15,5 @@ export const WaitReasonLabel = {
     [WaitReason.NODE_OCCUPIED]:  "node is occupied",
     [WaitReason.ENDPOINT_WAIT]:  "waiting at lane endpoint",
     [WaitReason.HARD_BLOCKED]:   "hard-blocked",
-    [WaitReason.REALIGNING]:     "returning to graph axis",
-    [WaitReason.DWELL_COOLDOWN]: "dwell spot cooldown"
+    [WaitReason.REALIGNING]:     "returning to graph axis"
 };

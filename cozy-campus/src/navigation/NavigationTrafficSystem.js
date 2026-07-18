@@ -1,7 +1,6 @@
 import { AnimationPresets } from "../core/AnimationPresets";
 import { Tween } from "../core/Tween";
 import { NavigationDepartureQueue } from "./NavigationDepartureQueue";
-import { NavigationNodeMode } from "./NavigationNodeMode";
 import { WaitReason, WaitReasonLabel } from "./WaitReason";
 
 export class NavigationTrafficSystem {
@@ -70,13 +69,8 @@ export class NavigationTrafficSystem {
 
         }
 
-        const context = this.owner.requireContext(actor);
-
         this.departures.enqueue(originId, actor, {
-            priority: this.getActorPriority(
-                actor,
-                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
-            )
+            priority: this.getActorPriority(actor, 1)
         });
 
         if (!this.departures.isFirst(originId, actor)) {
@@ -122,10 +116,7 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(fromId, actor, {
-            priority: this.getActorPriority(
-                actor,
-                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
-            )
+            priority: this.getActorPriority(actor, 1)
         });
         this.arrivals.enqueue(toId, actor, {
             priority: this.getActorPriority(actor, 1)
@@ -157,10 +148,6 @@ export class NavigationTrafficSystem {
         if (!endpointReserved) {
             this.setWaitReason(actor, toId, WaitReason.ENDPOINT_WAIT);
         }
-
-        // Dwell exit is prepared only after the lane and destination have been
-        // secured. During its animation the actor still owns the spot/node.
-        if (!this.owner.prepareDwellExit(context)) return false;
 
         const laneStart = this.graph.getConnectionLaneNodePosition(
             fromId,
@@ -232,7 +219,6 @@ export class NavigationTrafficSystem {
         }
 
         this.owner.centerActorForDeparture(context);
-        context.nodeMode = NavigationNodeMode.TRANSIT;
         context.currentTraversal = connection.metadata.traversal ?? "flat";
         actor.traversalType = context.currentTraversal;
         this.graph.occupyConnectionLane(fromId, toId, actor, laneIndex);
@@ -242,9 +228,7 @@ export class NavigationTrafficSystem {
             waypoint.position.copy(laneEnd);
 
         }
-        this.owner.releaseDwellOccupancy(actor);
         this.graph.releaseNode(fromId, actor);
-        this.owner.retryFreedDwellSpot(fromId, actor);
         // Every clearance request attached to this actor asked it to vacate
         // fromId. Entering the connection fulfills all of them, including a
         // node swap with the actor at the opposite endpoint.
@@ -283,10 +267,7 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(originId, actor, {
-            priority: this.getActorPriority(
-                actor,
-                context.nodeMode === NavigationNodeMode.TRANSIT ? 1 : 0
-            )
+            priority: this.getActorPriority(actor, 1)
         });
 
         if (!this.departures.isFirst(originId, actor)) {
@@ -295,8 +276,6 @@ export class NavigationTrafficSystem {
             return false;
 
         }
-
-        if (!this.owner.prepareDwellExit(context)) return false;
 
         if (actor.visual && Math.abs(actor.visual.position.x) > 0.01) {
 
@@ -330,7 +309,6 @@ export class NavigationTrafficSystem {
 
         }
 
-        context.nodeMode = NavigationNodeMode.TRANSIT;
         this.owner.centerActorForDeparture(context);
         this.clearWaitReason(actor);
         return true;
@@ -460,7 +438,6 @@ export class NavigationTrafficSystem {
         this.graph.occupyConnectionLane(fromId, toId, actor, laneIndex);
         actor.navigation.beginConnection(fromId, toId);
 
-        context.nodeMode = NavigationNodeMode.TRANSIT;
         this.owner.centerActorForDeparture(context);
 
         if (waypoint && portal) {
@@ -665,7 +642,6 @@ export class NavigationTrafficSystem {
         this.departures.cancel(actor);
         this.arrivals.cancel(actor);
         this.graph.releaseReservations(actor);
-        this.owner.releaseDwellReservation(actor);
         this.graph.clearActiveLaneCurve(actor);
         const context = this.owner.contexts.get(actor);
 
@@ -673,7 +649,6 @@ export class NavigationTrafficSystem {
 
             context.traversingLaneCurve = false;
             context.traversingInteractionCurve = false;
-            context.traversingDwellCurve = false;
             context.transitTangent = null;
             context.arrivalFromNodeId = null;
 

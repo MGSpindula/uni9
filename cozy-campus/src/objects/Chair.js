@@ -98,41 +98,66 @@ export class Chair extends Entity {
 
         // Local position in front of the chair. Blender empties will eventually
         // provide this transform without changing the navigation code.
-        //
-        // Manual navigation options:
-        // accessible: false                         -> exclude this point.
-        // connectTo: "west-1"                      -> force a node connection.
-        // connectTo: ["west-1", "west-exit"]      -> force projection on an edge.
-        this.approachPoint = this.addInteractionPoint(
-            new InteractionPoint("chair-01:approach", {
-                position: new THREE.Vector3(0, 0, 1),
-                rotationY: Math.PI,
-                maxConnectionDistance: 2.5,
-                metadata: { action: "sit" }
-            })
-        );
+        this.approachPoint =
+            this.addInteractionPoint(
+                new InteractionPoint(
+                    "chair-01:approach",
+                    {
+                        position:
+                            new THREE.Vector3(
+                                0,
+                                0,
+                                1
+                            ),
+
+                        rotationY:
+                            Math.PI,
+
+                        maxConnectionDistance:
+                            2.5,
+
+                        terminal:
+                            false,
+
+                        metadata: {
+                            action: "sit",
+                            role: "approach"
+                        }
+                    }
+                )
+            );
 
         // This second empty represents being at/in the chair. It is reached
         // through approachPoint, but occupies a different navigation resource.
-        this.seatPoint = this.addInteractionPoint(
-            new InteractionPoint("chair-01:seat", {
-                position: new THREE.Vector3(0, 0, 0),
-                // Local rotation relative to Chair.object3D. The navigation
-                // helper draws its resulting world direction. Change only
-                // this value to turn the seated actor without turning Chair.
-                rotationY: 0,
-                via: this.approachPoint,
-                // Only terminal interaction poses need a facing arrow in the
-                // helper. Set showDirection on other points when useful.
-                metadata: {
-                    action: "sit",
-                    showDirection: true,
-                    // approach <-> seat is animated movement. Navigation keeps
-                    // the approach facing; the sitting clip will turn the actor.
-                    preserveFacing: true
-                }
-            })
-        );
+        this.interactionPoint =
+            this.addInteractionPoint(
+                new InteractionPoint(
+                    "chair-01:action",
+                    {
+                        position:
+                            new THREE.Vector3(
+                                0,
+                                0,
+                                0
+                            ),
+
+                        rotationY: 0,
+
+                        via:
+                            this.approachPoint,
+
+                        terminal:
+                            true,
+
+                        metadata: {
+                            action: "sit",
+                            role: "action",
+                            showDirection: true,
+                            preserveFacing: true
+                        }
+                    }
+                )
+            );
 
     }
 
@@ -143,11 +168,12 @@ export class Chair extends Entity {
                 id: "sit",
 
                 tags: [
+                    "npc-action",
                     "sit",
                     "rest"
                 ],
 
-                point: this.seatPoint,
+                point: this.interactionPoint,
 
                 requirements: [
                     ({ actor }) =>
@@ -435,7 +461,7 @@ export class Chair extends Entity {
 
         // Optional cooldown pattern kept as a reference. To use it, set the
         // entity to COOLDOWN and assign this.cooldown when an action starts.
-        // The current chair uses DISABLED while an actor occupies seatPoint,
+        // The current chair uses DISABLED while an actor occupies interactionPoint,
         // so this block remains inactive during normal sitting.
         if (!this.isState(EntityState.COOLDOWN)) return;
 

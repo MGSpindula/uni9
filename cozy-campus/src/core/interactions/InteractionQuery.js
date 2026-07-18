@@ -14,7 +14,8 @@ export class InteractionQuery {
         target = null,
         interactionId = null,
         tags = [],
-        available = true
+        available = true,
+        excludePoint = null
     }) {
 
         if (!actor?.object3D) {
@@ -29,27 +30,49 @@ export class InteractionQuery {
                 : this.targets;
 
         let nearest = null;
-        let nearestDistanceSquared = Infinity;
 
-        for (const candidate of candidates) {
+        let nearestDistanceSquared =
+            Infinity;
+
+        for (
+            const candidate of
+            candidates
+        ) {
 
             if (!candidate) continue;
 
             const definitions =
-                candidate.getInteractionDefinitions?.() ?? [];
+                candidate
+                    .getInteractionDefinitions?.() ??
+                [];
 
-            for (const definition of definitions) {
+            for (
+                const definition of
+                definitions
+            ) {
 
                 if (
-                    interactionId &&
-                    definition.id !== interactionId
+                    definition.point ===
+                    excludePoint
                 ) {
 
                     continue;
 
                 }
 
-                if (!definition.hasTags(tags)) {
+                if (
+                    interactionId &&
+                    definition.id !==
+                    interactionId
+                ) {
+
+                    continue;
+
+                }
+
+                if (
+                    !definition.hasTags(tags)
+                ) {
 
                     continue;
 
@@ -59,26 +82,32 @@ export class InteractionQuery {
                     actor,
                     target: candidate,
                     definition,
-                    point: definition.point
+                    point:
+                        definition.point
                 };
 
                 if (
                     available &&
-                    !definition.canExecute(context)
+                    !definition.canExecute(
+                        context
+                    )
                 ) {
 
                     continue;
 
                 }
 
-                const pointPosition =
-                    definition.point.getWorldPosition(
-                        this.worldPosition
-                    );
+                const position =
+                    definition.point
+                        .getWorldPosition(
+                            this.worldPosition
+                        );
 
                 const distanceSquared =
                     actor.object3D.position
-                        .distanceToSquared(pointPosition);
+                        .distanceToSquared(
+                            position
+                        );
 
                 if (
                     distanceSquared >=
@@ -95,7 +124,9 @@ export class InteractionQuery {
                 nearest = {
                     target: candidate,
                     definition,
-                    point: definition.point,
+                    point:
+                        definition.point,
+
                     distanceSquared
                 };
 

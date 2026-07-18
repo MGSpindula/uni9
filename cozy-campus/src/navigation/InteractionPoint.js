@@ -10,26 +10,48 @@ export class InteractionPoint {
         connectTo = null,
         via = null,
         capacity = 1,
+        terminal = true,
         metadata = {}
     } = {}) {
 
+        if (!id) {
+
+            throw new Error(
+                "InteractionPoint requires an id."
+            );
+
+        }
+
         this.id = id;
         this.accessible = accessible;
-        this.maxConnectionDistance = maxConnectionDistance;
+        this.maxConnectionDistance =
+            maxConnectionDistance;
 
-        // null uses automatic projection. A node id or [fromId, toId]
-        // explicitly chooses where this local access joins the main graph.
         this.connectTo = connectTo;
         this.via = via;
+
         this.capacity = capacity;
+        this.terminal = terminal;
+
         this.occupants = new Set();
         this.reservations = new Set();
-        this.metadata = { ...metadata };
 
-        this.object3D = new THREE.Object3D();
-        this.object3D.name = `InteractionPoint:${id}`;
-        this.object3D.position.copy(position);
-        this.object3D.rotation.y = rotationY;
+        this.metadata = {
+            ...metadata
+        };
+
+        this.object3D =
+            new THREE.Object3D();
+
+        this.object3D.name =
+            `InteractionPoint:${id}`;
+
+        this.object3D.position.copy(
+            position
+        );
+
+        this.object3D.rotation.y =
+            rotationY;
 
         this.entity = null;
         this.connection = null;
@@ -38,28 +60,79 @@ export class InteractionPoint {
 
     attach(entity) {
 
+        if (!entity?.object3D) {
+
+            throw new Error(
+                `InteractionPoint "${this.id}" ` +
+                `cannot attach to entity ` +
+                `"${entity?.name ?? "unknown"}": ` +
+                `the entity has no object3D.`
+            );
+
+        }
+
         this.entity = entity;
-        entity.object3D.add(this.object3D);
+
+        entity.object3D.add(
+            this.object3D
+        );
 
         return this;
 
     }
 
-    getWorldPosition(target = new THREE.Vector3()) {
+    isAvailable(actor = null) {
 
-        this.object3D.updateWorldMatrix(true, false);
+        const users = new Set([
+            ...this.occupants,
+            ...this.reservations
+        ]);
 
-        return this.object3D.getWorldPosition(target);
+        if (actor) {
+
+            users.delete(actor);
+
+        }
+
+        return (
+            this.accessible &&
+            users.size < this.capacity
+        );
 
     }
 
-    getWorldDirection(target = new THREE.Vector3()) {
+    getWorldPosition(
+        target = new THREE.Vector3()
+    ) {
 
-        this.object3D.updateWorldMatrix(true, false);
-
-        target.set(0, 0, 1).applyQuaternion(
-            this.object3D.getWorldQuaternion(new THREE.Quaternion())
+        this.object3D.updateWorldMatrix(
+            true,
+            false
         );
+
+        return this.object3D
+            .getWorldPosition(target);
+
+    }
+
+    getWorldDirection(
+        target = new THREE.Vector3()
+    ) {
+
+        this.object3D.updateWorldMatrix(
+            true,
+            false
+        );
+
+        target
+            .set(0, 0, 1)
+            .applyQuaternion(
+                this.object3D
+                    .getWorldQuaternion(
+                        new THREE.Quaternion()
+                    )
+            );
+
         target.y = 0;
 
         return target.lengthSq() > 0.0001
