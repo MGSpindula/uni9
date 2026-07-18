@@ -4,6 +4,8 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 
+
+
 export class PostProcessing {
 
     constructor(renderer, scene, camera) {
@@ -30,7 +32,9 @@ export class PostProcessing {
                 renderTarget
             );
 
-        this.composer.setPixelRatio(window.devicePixelRatio);
+        this.composer.setPixelRatio(
+            renderer.getPixelRatio()
+        );
 
         this.composer.setSize(
             window.innerWidth,
@@ -98,7 +102,9 @@ export class PostProcessing {
 
     resize(width, height) {
 
-        this.composer.setPixelRatio(window.devicePixelRatio);
+        this.composer.setPixelRatio(
+            this.renderer.getPixelRatio()
+        );
 
         this.composer.setSize(width, height);
 
@@ -107,6 +113,22 @@ export class PostProcessing {
             effect.resize(width, height);
 
         }
+
+    }
+
+    dispose() {
+
+        for (const effect of [...this.effects]) {
+
+            this.removeEffect(effect);
+
+        }
+
+        this.renderPass.dispose?.();
+        this.outputPass.dispose?.();
+        this.composer.dispose?.();
+
+        this.effects.length = 0;
 
     }
 

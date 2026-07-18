@@ -2,11 +2,9 @@ import * as THREE from "three";
 
 export class Raycast {
 
-    constructor(camera, scene, element = null) {
+    constructor(camera, element = null) {
 
-        // Camera and scene used to cast rays into the Three.js world.
         this.camera = camera;
-        this.scene = scene;
         this.element = element;
 
         this.raycaster = new THREE.Raycaster();
@@ -20,12 +18,13 @@ export class Raycast {
 
     updateMouse(event) {
 
-        const rect = this.element?.getBoundingClientRect() ?? {
-            left: 0,
-            top: 0,
-            width: window.innerWidth,
-            height: window.innerHeight
-        };
+        const rect =
+            this.element?.getBoundingClientRect() ?? {
+                left: 0,
+                top: 0,
+                width: window.innerWidth,
+                height: window.innerHeight
+            };
 
         this.mouse.x =
             ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -44,34 +43,37 @@ export class Raycast {
             this.camera
         );
 
-        const hits = this.raycaster.intersectObjects(
-            this.scene.children,
-            true
-        );
+        const targets =
+            registry.getRaycastTargets();
 
-        if (hits.length === 0) {
+        if (targets.length === 0) {
 
             return null;
 
         }
 
-        const object = hits[0].object;
+        const hits =
+            this.raycaster.intersectObjects(
+                targets,
+                true
+            );
 
-        const entity = registry.get(object);
+        for (const hit of hits) {
 
-        if (!entity) {
+            const entity =
+                registry.get(hit.object);
 
-            return null;
+            if (!entity) continue;
+
+            return {
+                entity,
+                object: hit.object,
+                point: hit.point
+            };
 
         }
 
-        return {
-
-            entity,
-            object,
-            point: hits[0].point
-
-        };
+        return null;
 
     }
 

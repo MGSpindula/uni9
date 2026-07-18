@@ -34,13 +34,23 @@ export class OutlineEffect extends Effect {
         this.pass.hiddenEdgeColor.set(0xffffff);
 
         this.hasSelection = false;
+        this.pass.enabled = false;
 
     }
 
-    setObjects(objects) {
+    setObjects(objects = []) {
 
-        this.pass.selectedObjects = objects;
-        this.hasSelection = objects && objects.length > 0;
+        const selectedObjects =
+            Array.isArray(objects)
+                ? objects.filter(Boolean)
+                : [];
+
+        this.pass.selectedObjects = selectedObjects;
+        this.hasSelection = selectedObjects.length > 0;
+
+        this.pass.enabled =
+            this.enabled &&
+            this.hasSelection;
 
     }
 
@@ -75,21 +85,19 @@ export class OutlineEffect extends Effect {
 
         }
 
-        this.pass.selectedObjects = [object];
-        this.hasSelection = true;
+        this.setObjects([object]);
 
     }
 
     unhover(entity, object) {
 
-        if (!this.enabled || !entity.hasOutline()) {
+        if (!entity.hasOutline()) {
 
             return;
 
         }
 
-        this.pass.selectedObjects = [];
-        this.hasSelection = false;
+        this.setObjects([]);
 
     }
 
@@ -97,10 +105,24 @@ export class OutlineEffect extends Effect {
     // Hover effect
     // -----------------------------
 
+    enable() {
+
+        this.enabled = true;
+        this.pass.enabled = this.hasSelection;
+
+    }
+
     disable() {
 
         super.disable();
-        this.pass.selectedObjects = [];
+        this.setObjects([]);
+
+    }
+
+    dispose() {
+
+        this.setObjects([]);
+        this.pass.dispose?.();
 
     }
 

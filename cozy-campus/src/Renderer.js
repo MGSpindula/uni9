@@ -15,14 +15,15 @@ export class Renderer {
             window.innerHeight
         );
         this.renderer.setPixelRatio(
-            window.devicePixelRatio
+            Math.min(window.devicePixelRatio, 1.5)
         );
         document.body.appendChild(
             this.renderer.domElement
         );
+        this.handleResize = () => this.resize();
         window.addEventListener(
             "resize",
-            () => this.resize()
+            this.handleResize
         );
     }
 
@@ -33,7 +34,7 @@ export class Renderer {
     resize() {
 
         this.renderer.setPixelRatio(
-            window.devicePixelRatio
+            Math.min(window.devicePixelRatio, 1.5)
         );
 
         this.renderer.setSize(
@@ -46,6 +47,18 @@ export class Renderer {
     render(postProcessing, delta) {
 
         postProcessing.render(delta);
+
+    }
+
+    dispose() {
+
+        window.removeEventListener(
+            "resize",
+            this.handleResize
+        );
+
+        this.renderer.dispose();
+        this.renderer.domElement.remove();
 
     }
 }

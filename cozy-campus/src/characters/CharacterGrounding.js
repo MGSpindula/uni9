@@ -15,32 +15,125 @@ export class CharacterGrounding {
         this.raycaster = new THREE.Raycaster();
         this.origin = new THREE.Vector3();
         this.down = new THREE.Vector3(0, -1, 0);
+        this.lastPositions = new WeakMap();
+        this.positionEpsilon = 0.0001;
 
     }
 
     update(actor) {
 
-        this.origin.copy(actor.object3D.position);
+        const position =
+            actor.object3D.position;
+
+        const lastPosition =
+            this.lastPositions.get(actor);
+
+        if (lastPosition) {
+
+            const deltaX =
+                position.x - lastPosition.x;
+
+            const deltaY =
+                position.y - lastPosition.y;
+
+            const deltaZ =
+                position.z - lastPosition.z;
+
+            const distanceSquared =
+                deltaX * deltaX +
+                deltaY * deltaY +
+                deltaZ * deltaZ;
+
+            if (distanceSquared <=
+                this.positionEpsilon *
+                this.positionEpsilon) {
+
+                return false;
+
+            }
+
+        }
+
+        this.origin.copy(position);
         this.origin.y += this.castHeight;
-        this.raycaster.set(this.origin, this.down);
-        this.raycaster.far = this.castHeight + this.maxSnapDistance;
 
-        const hits = this.raycaster.intersectObjects(
-            this.surfaces,
-            false
+        this.raycaster.set(
+            this.origin,
+            this.down
         );
-        const hit = actor.traversalType === "slope"
-            ? hits[0]
-            : this.findClosestHeightHit(hits, actor.object3D.position.y);
 
-        if (!hit) return false;
+        this.raycaster.far =
+            this.castHeight +
+            this.maxSnapDistance;
 
-        const difference = hit.point.y - actor.object3D.position.y;
+        const hits =
+            this.raycaster.intersectObjects(
+                this.surfaces,
+                false
+            );
 
-        if (Math.abs(difference) > this.maxSnapDistance) return false;
+        const hit =
+            actor.traversalType === "slope"
+                ? hits[0]
+                : this.findClosestHeightHit(
+                    hits,
+                    position.y
+                );
 
-        actor.object3D.position.y = hit.point.y;
+        if (!hit) {
+
+            this.rememberPosition(actor);
+            return false;
+
+        }
+
+        const difference =
+            hit.point.y - position.y;
+
+        if (Math.abs(difference) >
+            this.maxSnapDistance) {
+
+            this.rememberPosition(actor);
+            return false;
+
+        }
+
+        position.y = hit.point.y;
+
+        this.rememberPosition(actor);
+
         return true;
+
+    }
+
+    rememberPosition(actor) {
+
+        let storedPosition =
+            this.lastPositions.get(actor);
+
+        if (!storedPosition) {
+
+            storedPosition =
+                new THREE.Vector3();
+
+            this.lastPositions.set(
+                actor,
+                storedPosition
+            );
+
+        }
+
+        storedPosition.copy(
+            actor.object3D.position
+        );
+
+    }
+
+    // Caso teleporte manualmente o ator, use `this.characterGrounding.invalidate(actor);` antes ou depois de alterar sua posição.
+
+    invalidate(actor) {
+
+        this.lastPositions.delete(actor);
 
     }
 
@@ -75,11 +168,11 @@ export class CharacterGrounding {
 
         return hits.reduce((closest, hit) =>
             !closest ||
-            Math.abs(hit.point.y - referenceY) <
+                Math.abs(hit.point.y - referenceY) <
                 Math.abs(closest.point.y - referenceY)
                 ? hit
                 : closest
-        , null);
+            , null);
 
     }
 

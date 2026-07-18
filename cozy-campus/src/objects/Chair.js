@@ -3,6 +3,7 @@ import { AnimationPresets } from "../core/AnimationPresets";
 import { Entity } from "../core/Entity";
 import { EntityState } from "../core/EntityState";
 import { Tween } from "../core/Tween";
+import { InteractionDefinition } from "../core/interactions/InteractionDefinition";
 import { InteractionPoint } from "../navigation/InteractionPoint";
 
 export class Chair extends Entity {
@@ -28,6 +29,7 @@ export class Chair extends Entity {
         this.createBack();
         this.createLegs();
         this.createInteractionPoints();
+        this.createInteractionDefinitions();
 
         this.enableOutline();
 
@@ -134,6 +136,46 @@ export class Chair extends Entity {
 
     }
 
+    createInteractionDefinitions() {
+
+        this.addInteractionDefinition(
+            new InteractionDefinition({
+                id: "sit",
+
+                tags: [
+                    "sit",
+                    "rest"
+                ],
+
+                point: this.seatPoint,
+
+                requirements: [
+                    ({ actor }) =>
+                        actor !== null &&
+                        actor !== undefined
+                ],
+
+                available: ({ target }) =>
+                    target.canInteract() &&
+                    !target.hasInteractingActors(),
+
+                execute: ({
+                    actor,
+                    target,
+                    point
+                }) => {
+
+                    target.beginInteraction(
+                        actor,
+                        point
+                    );
+
+                }
+            })
+        );
+
+    }
+
     // -----------------------------
     // Interaction hooks
     // -----------------------------
@@ -170,29 +212,15 @@ export class Chair extends Entity {
 
     onPointerInteract() {
 
-        if (!this.isState(EntityState.IDLE)) return;
+        if (!this.canInteract()) {
 
-        // Immediate mouse feedback belongs here: bounce, glow, sound, UI, etc.
-        // It confirms the click but does not mean that the Player has reached
-        // or started using the chair yet.
+            return null;
 
-        return this.createUseRequest();
+        }
 
-    }
-
-    createUseRequest() {
-
-        // PlayerController submits this after a click. NPC behavior can submit
-        // the exact same object through InteractionSystem without using mouse.
-        // interactionSystem.request({
-        //     actor: npc,
-        //     target: chair,
-        //     ...chair.createUseRequest()
-        // });
         return {
-            point: this.seatPoint,
-            action: ({ actor, point }) =>
-                this.beginInteraction(actor, point)
+            type: "INTERACT",
+            interactionId: "sit"
         };
 
     }

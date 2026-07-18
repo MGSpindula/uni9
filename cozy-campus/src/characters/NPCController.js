@@ -2,21 +2,29 @@ import { EntityState } from "../core/EntityState";
 
 export class NPCController {
 
-    constructor({ npc, chair, graph, navigationSystem, interactionSystem }) {
+    constructor({
+        npc,
+        graph,
+        navigationSystem,
+        interactionBehavior
+    }) {
 
         this.npc = npc;
-        this.chair = chair;
         this.graph = graph;
-        this.navigationSystem = navigationSystem;
-        this.interactionSystem = interactionSystem;
+        this.navigationSystem =
+            navigationSystem;
+
+        this.interactionBehavior =
+            interactionBehavior;
 
         this.state = "idle";
         this.elapsed = 0;
+
         this.idleDuration = 1.5;
-        this.sittingDuration = 5;
-        this.chairRetryDuration = 5;
-        this.chairRetryRemaining = 0;
-        this.chairUnavailableRevision = null;
+        this.interactionDuration = 5;
+
+        this.interactionRetryDuration = 5;
+        this.interactionRetryRemaining = 0;
 
     }
 
@@ -26,114 +34,191 @@ export class NPCController {
 
     update(delta) {
 
-        if (this.chairUnavailableRevision !== null &&
-            this.chairUnavailableRevision !== this.graph.revision) {
+        this.interactionRetryRemaining =
+            Math.max(
+                0,
+                this.interactionRetryRemaining -
+                delta
+            );
 
-            // A topology edit may have restored access to the chair.
-            this.chairUnavailableRevision = null;
-            this.chairRetryRemaining = 0;
+        if (
+            this.interactionBehavior
+                .isActive(this.npc)
+        ) {
 
-        }
-
-        this.chairRetryRemaining = Math.max(
-            0,
-            this.chairRetryRemaining - delta
-        );
-
-        if (this.chair.isInteractingWith(this.npc)) {
-
-            this.state = "sitting";
-            this.elapsed += delta;
-
-            if (this.elapsed >= this.sittingDuration) {
-
-                this.elapsed = 0;
-                this.moveToRandomNode();
-
-            }
+            this.updateActiveInteraction(
+                delta
+            );
 
             return;
 
         }
 
-        if (this.npc.isState(EntityState.WALKING) ||
-            this.npc.isState(EntityState.WAITING) ||
-            this.npc.isState(EntityState.STOPPING)) return;
+        if (
+            this.npc.isState(
+                EntityState.WALKING
+            ) ||
+            this.npc.isState(
+                EntityState.WAITING
+            ) ||
+            this.npc.isState(
+                EntityState.STOPPING
+            )
+        ) {
 
-        // A previously accepted chair route may become structurally blocked.
-        // Navigation abandons it after its timeout; the NPC then resumes its
-        // normal routine instead of requesting the same chair forever.
-        if (this.state === "moving-to-chair") {
+            return;
 
-            this.state = "idle";
-            this.elapsed = 0;
-            this.chairRetryRemaining = this.chairRetryDuration;
-            this.chairUnavailableRevision = this.graph.revision;
-            console.log(
-                `[NPC] ${this.npc.name} abandons the chair until ` +
-                `navigation topology changes.`
-            );
-            this.moveToRandomNode();
+        }
+
+        if (
+            this.state ===
+            "moving-to-interaction"
+        ) {
+
+            this.handleAbandonedInteraction();
             return;
 
         }
 
         this.elapsed += delta;
 
-        if (this.elapsed < this.idleDuration) return;
+        if (
+            this.elapsed <
+            this.idleDuration
+        ) {
+
+            return;
+
+        }
 
         this.elapsed = 0;
 
-        const mayRetryChair =
-            this.chairUnavailableRevision === null &&
-            this.chairRetryRemaining <= 0;
+        if (
+            this.mayRetryInteraction() &&
+            this.tryUseInteraction()
+        ) {
 
-        if (mayRetryChair && this.tryUseChair()) return;
+            return;
+
+        }
 
         this.moveToRandomNode();
 
     }
 
-    tryUseChair() {
+    // -----------------------------
+    // Interaction behavior
+    // -----------------------------
 
-        if (!this.chair.canInteract()) return false;
+    updateActiveInteraction(delta) {
 
-        const accepted = this.interactionSystem.request({
-            actor: this.npc,
-            target: this.chair,
-            ...this.chair.createUseRequest()
-        });
+        this.state = "interacting";
+        this.elapsed += delta;
 
-        if (accepted) {
+        if (
+            this.elapsed <
+            this.interactionDuration
+        ) {
 
-            this.state = "moving-to-chair";
-            this.chairUnavailableRevision = null;
-
-        } else {
-
-            this.chairRetryRemaining = this.chairRetryDuration;
-            this.chairUnavailableRevision = this.graph.revision;
-            console.log(
-                `[NPC] ${this.npc.name} postpones the chair until ` +
-                `navigation topology changes.`
-            );
+            return;
 
         }
 
-        return accepted;
+        this.elapsed = 0;
+
+        // CharacterNavigationSystem sees the active interaction
+        // and performs its normal exit before following the new route.
+        this.moveToRandomNode();
 
     }
+
+    mayRetryInteraction() {
+
+        return (
+            this.interactionRetryRemaining <= 0
+        );
+
+    }
+
+    tryUseInteraction() {
+
+        const accepted =
+            this.interactionBehavior
+                .tryStart(this.npc);
+
+        if (accepted) {
+
+            this.state =
+                "moving-to-interaction";
+
+            return true;
+
+        }
+
+        this.postponeInteraction();
+
+        return false;
+
+    }
+
+    postponeInteraction() {
+
+        this.interactionRetryRemaining =
+            this.interactionRetryDuration;
+
+        this.unavailableTopologyRevision =
+            null;
+
+        console.log(
+            `[NPC] ${this.npc.name} postpones ` +
+            `its interaction for ` +
+            `${this.interactionRetryDuration} seconds.`
+        );
+
+    }
+
+    handleAbandonedInteraction() {
+
+        this.state = "idle";
+        this.elapsed = 0;
+
+        this.interactionRetryRemaining =
+            this.interactionRetryDuration;
+
+        this.unavailableTopologyRevision =
+            null;
+
+        console.log(
+            `[NPC] ${this.npc.name} abandons ` +
+            `its current interaction attempt and ` +
+            `will search again later.`
+        );
+
+        this.moveToRandomNode();
+
+    }
+
+    // -----------------------------
+    // Roaming
+    // -----------------------------
 
     moveToRandomNode() {
 
         const currentNodeId =
-            this.npc.navigation.getTraversalState().currentNodeId;
-        const candidates = [...this.graph.nodes.values()]
-            .filter(node =>
-                node.id !== currentNodeId &&
-                !node.blocked &&
-                this.graph.isNodeAvailable(node.id, this.npc)
-            );
+            this.npc.navigation
+                .getTraversalState()
+                .currentNodeId;
+
+        const candidates = [
+            ...this.graph.nodes.values()
+        ].filter(node =>
+            node.id !== currentNodeId &&
+            !node.blocked &&
+            this.graph.isNodeAvailable(
+                node.id,
+                this.npc
+            )
+        );
 
         if (candidates.length === 0) {
 
@@ -142,15 +227,25 @@ export class NPCController {
 
         }
 
-        const node = candidates[
-            Math.floor(Math.random() * candidates.length)
-        ];
-        const accepted = this.navigationSystem.moveToClosestNode(
-            this.npc,
-            node.position
-        );
+        const node =
+            candidates[
+            Math.floor(
+                Math.random() *
+                candidates.length
+            )
+            ];
 
-        this.state = accepted ? "roaming" : "idle";
+        const accepted =
+            this.navigationSystem
+                .moveToClosestNode(
+                    this.npc,
+                    node.position
+                );
+
+        this.state =
+            accepted
+                ? "roaming"
+                : "idle";
 
         return accepted;
 

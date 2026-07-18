@@ -108,21 +108,6 @@ export class Locomotion {
 
     }
 
-    separateFrom(direction, distance, delta) {
-
-        if (distance <= 0 || direction.lengthSq() <= 0.0001) return 0;
-
-        const distanceThisFrame = Math.min(distance, this.speed * 0.5 * delta);
-
-        this.object3D.position.addScaledVector(
-            direction.normalize(),
-            distanceThisFrame
-        );
-        this.recordMovement(distanceThisFrame, delta);
-        return distanceThisFrame;
-
-    }
-
     // -----------------------------
     // Rotation
     // -----------------------------

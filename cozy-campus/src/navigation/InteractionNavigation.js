@@ -164,12 +164,34 @@ export class InteractionNavigation {
         if (interaction?.point === waypoint.interactionPoint) {
 
             context.pendingInteraction = null;
-            // Character already completed the point's smooth arrivalDirection
-            // alignment before this interaction callback was allowed to run.
-            interaction.onArrive?.();
+
+            const entered =
+                interaction.onArrive?.();
+
+            if (entered === false) {
+
+                this.connector.releasePoint(
+                    waypoint.interactionPoint,
+                    actor
+                );
+
+                context.interactionPoint = null;
+                context.activeInteraction = null;
+
+                actor.cancel();
+
+                this.owner.refresh();
+
+                return true;
+
+            }
+
             context.activeInteraction = {
-                target: waypoint.interactionPoint.entity,
-                point: waypoint.interactionPoint
+                target:
+                    waypoint.interactionPoint.entity,
+
+                point:
+                    waypoint.interactionPoint
             };
 
         }

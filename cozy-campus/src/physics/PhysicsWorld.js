@@ -1,4 +1,4 @@
-import * as CANNON from "cannon";
+import * as CANNON from "cannon-es";
 import * as THREE from "three";
 
 // Cannon owns only physical separation. Navigation remains authoritative for
@@ -8,13 +8,16 @@ export class PhysicsWorld {
     constructor(owner, {
         fixedTimeStep = 1 / 60,
         maxSubSteps = 3,
-        contactSkin = 0.025
+        contactSkin = 0.025,
+        manualContactSeparation = false
     } = {}) {
 
         this.owner = owner;
         this.fixedTimeStep = fixedTimeStep;
         this.maxSubSteps = maxSubSteps;
         this.contactSkin = contactSkin;
+        this.manualContactSeparation =
+            manualContactSeparation;
         this.world = new CANNON.World();
         this.world.gravity.set(0, 0, 0);
         this.world.broadphase = new CANNON.SAPBroadphase(this.world);
@@ -155,7 +158,11 @@ export class PhysicsWorld {
 
         }
 
-        this.separateContacts();
+        if (this.manualContactSeparation) {
+
+            this.separateContacts();
+
+        }
 
     }
 

@@ -37,8 +37,11 @@ export class Entity {
 
         // Optional local approach points used before an interaction executes.
         this.interactionPoints = [];
-        // Actors currently engaged with this entity. The meaning is defined by
-        // the subclass: sitting, standing on, leaning on, holding, operating, etc.
+
+        // Interactions offered by this entity.
+        this.interactionDefinitions = new Map();
+
+        // Actors currently engaged with this entity.
         this.interactingActors = new Set();
 
         this.effects = [];
@@ -179,6 +182,54 @@ export class Entity {
         this.interactionPoints.push(point);
 
         return point;
+
+    }
+
+    addInteractionDefinition(definition) {
+
+        if (!definition?.id) {
+
+            throw new Error(
+                `Entity "${this.name}" received an invalid interaction definition.`
+            );
+
+        }
+
+        if (this.interactionDefinitions.has(definition.id)) {
+
+            throw new Error(
+                `Entity "${this.name}" already has interaction ` +
+                `"${definition.id}".`
+            );
+
+        }
+
+        this.interactionDefinitions.set(
+            definition.id,
+            definition
+        );
+
+        return definition;
+
+    }
+
+    getInteractionDefinition(id) {
+
+        return this.interactionDefinitions.get(id) ?? null;
+
+    }
+
+    getInteractionDefinitions() {
+
+        return [
+            ...this.interactionDefinitions.values()
+        ];
+
+    }
+
+    hasInteractionDefinition(id) {
+
+        return this.interactionDefinitions.has(id);
 
     }
 

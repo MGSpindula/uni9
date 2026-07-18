@@ -18,6 +18,7 @@ import { Player } from "./characters/Player";
 import { PlayerController } from "./characters/PlayerController";
 import { NPC } from "./characters/NPC";
 import { NPCController } from "./characters/NPCController";
+import { UseAvailableInteractionBehavior } from "./characters/behaviors/UseAvailableInteractionBehavior";
 import { CharacterGrounding } from "./characters/CharacterGrounding";
 import { NavigationGraph } from "./navigation/NavigationGraph";
 import { NavigationGraphHelper } from "./navigation/NavigationGraphHelper";
@@ -69,7 +70,6 @@ export class Scene {
 
         this.selection = new SelectionManager(
             this.camera,
-            this.scene,
             this.registry,
             this.renderer.renderer.domElement
         );
@@ -124,24 +124,24 @@ export class Scene {
             this.outlineEffect
         );
 
+        this.handleResize = () => {
+
+            this.camera.aspect =
+                window.innerWidth /
+                window.innerHeight;
+
+            this.camera.updateProjectionMatrix();
+
+            this.postProcessing.resize(
+                window.innerWidth,
+                window.innerHeight
+            );
+
+        };
+
         window.addEventListener(
             "resize",
-            () => {
-
-                this.camera.aspect =
-                    window.innerWidth /
-                    window.innerHeight;
-
-                this.camera.updateProjectionMatrix();
-
-                this.postProcessing.resize(
-
-                    window.innerWidth,
-                    window.innerHeight
-
-                );
-
-            }
+            this.handleResize
         );
 
     }
@@ -220,8 +220,16 @@ export class Scene {
         this.add(new Cylinder());
 
         this.chair = new Chair();
+
         this.add(this.chair);
-        this.registerNavigationInteractions(this.chair);
+
+        this.registerNavigationInteractions(
+            this.chair
+        );
+
+        this.interactionSystem.registerTarget(
+            this.chair
+        );
 
         // Crowd test: every NPC uses the same CharacterNavigationSystem and
         // NPCController. Names/colors exist only to make collision and queue
@@ -253,25 +261,32 @@ export class Scene {
                 spawnId: configuration.spawnId
             });
 
-            const controller = new NPCController({
-                npc,
-                chair: this.chair,
-                graph: this.navigationGraph,
-                navigationSystem: this.characterNavigation,
-                interactionSystem: this.interactionSystem
-            });
+            const interactionBehavior =
+                new UseAvailableInteractionBehavior({
+                    interactionSystem:
+                        this.interactionSystem,
+
+                    tags: [
+                        "sit"
+                    ]
+                });
+
+            const controller =
+                new NPCController({
+                    npc,
+                    graph:
+                        this.navigationGraph,
+
+                    navigationSystem:
+                        this.characterNavigation,
+
+                    interactionBehavior
+                });
 
             this.controllers.push(controller);
             return npc;
 
         });
-
-        // Temporary compatibility aliases for console experiments made while
-        // the prototype had a single NPC.
-        this.npc = this.npcs[0];
-        this.npcController = this.controllers.find(controller =>
-            controller.npc === this.npc
-        );
 
     }
 
@@ -282,7 +297,10 @@ export class Scene {
             selectionRadius: 1.25
         });
         configureCozyCampusNavigation(this.navigationGraph);
-        this.dwellSpots = new DwellSpotRegistry(this.navigationGraph);
+        this.dwellSpots = new DwellSpotRegistry(
+            this.navigationGraph
+        );
+
         configureCozyCampusDwellSpots(
             this.dwellSpots,
             this.navigationGraph
@@ -440,6 +458,8 @@ export class Scene {
 
     update(delta) {
 
+        this.selection.update();
+
         for (const object of this.objects) {
 
             if (object.isActive()) {
@@ -466,15 +486,26 @@ export class Scene {
 
         let previous = performance.now();
 
+        this.running = true;
+
         const loop = (now) => {
 
-            const delta =
+            if (!this.running) return;
+
+            const rawDelta =
                 (now - previous) / 1000;
+
+            const delta = Math.min(
+                rawDelta,
+                1 / 15
+            );
 
             previous = now;
 
             const updateStarted = performance.now();
+
             this.update(delta);
+
             const updateFinished = performance.now();
 
             if (this.performanceDebugPanel) {
@@ -484,11 +515,8 @@ export class Scene {
             }
 
             this.renderer.render(
-
                 this.postProcessing,
-
                 delta
-
             );
 
             const renderFinished = performance.now();
@@ -501,11 +529,111 @@ export class Scene {
                 renderer: this.renderer.renderer
             });
 
-            requestAnimationFrame(loop);
+            this.animationFrameId =
+                requestAnimationFrame(loop);
 
         };
 
-        requestAnimationFrame(loop);
+        this.animationFrameId =
+            requestAnimationFrame(loop);
+
+    }
+
+    dispose() {
+
+        this.running = false;
+
+        if (this.animationFrameId !== undefined) {
+
+            cancelAnimationFrame(
+                this.animationFrameId
+            );
+
+        }
+
+        window.removeEventListener(
+            "resize",
+            this.handleResize
+        );
+
+        this.playerController?.dispose();
+        this.selection?.dispose();
+
+        this.characterDebugPanel?.dispose();
+        this.performanceDebugPanel?.dispose();
+
+        this.controls?.dispose();
+
+        for (const actor of [
+            this.player,
+            ...(this.npcs ?? [])
+        ]) {
+
+            if (!actor) continue;
+
+            this.interactionSystem.unregisterActor(actor);
+            this.characterNavigation.unregisterActor(actor);
+
+        }
+
+        this.characterNavigation.dispose();
+        this.navigationHelper.dispose();
+
+        for (const object of this.objects) {
+
+            this.interactionSystem
+                .unregisterTarget(object);
+
+            object.unregister?.(
+                this.registry
+            );
+
+            object.dispose?.();
+
+        }
+
+        this.interactionSystem.dispose();
+
+        this.postProcessing?.dispose();
+
+        this.scene.traverse(object => {
+
+            if (object.geometry) {
+
+                object.geometry.dispose?.();
+
+            }
+
+            const materials =
+                Array.isArray(object.material)
+                    ? object.material
+                    : object.material
+                        ? [object.material]
+                        : [];
+
+            for (const material of materials) {
+
+                for (const value of Object.values(material)) {
+
+                    if (value?.isTexture) {
+
+                        value.dispose();
+
+                    }
+
+                }
+
+                material.dispose?.();
+
+            }
+
+        });
+
+        this.registry?.clear();
+
+        this.objects.length = 0;
+        this.controllers.length = 0;
+        this.npcs = [];
 
     }
 

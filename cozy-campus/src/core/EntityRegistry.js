@@ -2,25 +2,14 @@ export class EntityRegistry {
 
     constructor() {
 
-        // Object3D -> Entity lookup used after a raycast.
+        // Object3D -> Entity.
         this.map = new WeakMap();
 
-        // Entity -> Object3D collection used to unregister an entity at once.
+        // Entity -> Object3D collection.
         this.objectsByEntity = new Map();
 
-    }
-
-    register(entity, object) {
-
-        this.map.set(object, entity);
-
-        if (!this.objectsByEntity.has(entity)) {
-
-            this.objectsByEntity.set(entity, new Set());
-
-        }
-
-        this.objectsByEntity.get(entity).add(object);
+        // Somente estas raízes serão consultadas pelo Raycaster.
+        this.raycastTargets = new Set();
 
     }
 
@@ -28,11 +17,35 @@ export class EntityRegistry {
     // Registration
     // -----------------------------
 
+    register(entity, object) {
+
+        if (!entity || !object) return;
+
+        this.map.set(object, entity);
+        this.raycastTargets.add(object);
+
+        if (!this.objectsByEntity.has(entity)) {
+
+            this.objectsByEntity.set(
+                entity,
+                new Set()
+            );
+
+        }
+
+        this.objectsByEntity
+            .get(entity)
+            .add(object);
+
+    }
+
     unregister(entity, object = null) {
 
-        const objects = object ? [object] : this.objectsByEntity.get(entity) ?? [];
+        const registeredObjects = object
+            ? [object]
+            : this.objectsByEntity.get(entity) ?? [];
 
-        for (const registeredObject of objects) {
+        for (const registeredObject of registeredObjects) {
 
             if (this.map.get(registeredObject) === entity) {
 
@@ -40,7 +53,13 @@ export class EntityRegistry {
 
             }
 
-            this.objectsByEntity.get(entity)?.delete(registeredObject);
+            this.raycastTargets.delete(
+                registeredObject
+            );
+
+            this.objectsByEntity
+                .get(entity)
+                ?.delete(registeredObject);
 
         }
 
@@ -69,6 +88,20 @@ export class EntityRegistry {
         }
 
         return null;
+
+    }
+
+    getRaycastTargets() {
+
+        return [...this.raycastTargets];
+
+    }
+
+    clear() {
+
+        this.map = new WeakMap();
+        this.objectsByEntity.clear();
+        this.raycastTargets.clear();
 
     }
 

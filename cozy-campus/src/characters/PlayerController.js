@@ -1,4 +1,5 @@
 import { Input } from "../core/Input";
+import { InteractionIntent } from "../core/interactions/InteractionIntent";
 
 export class PlayerController {
 
@@ -22,9 +23,7 @@ export class PlayerController {
 
         this.input.on("MouseMove", event => {
 
-            const isHovering = this.selection.handleMouseMove(event);
-
-            this.element.style.cursor = isHovering ? "pointer" : "default";
+            this.selection.handleMouseMove(event);
 
         });
 
@@ -41,26 +40,49 @@ export class PlayerController {
 
     handleClick(event) {
 
-        const hit = this.selection.handleClick(event);
+        const hit =
+            this.selection.handleClick(event);
 
-        if (!hit) return false;
+        if (!hit) {
 
-        // onPointerInteract() is immediate Player feedback and may return a
-        // generic interaction request. NPCs skip this method and submit the
-        // same request shape from their behavior/state logic.
-        const request = hit.entity.pointerInteract(hit.object, hit);
+            return;
 
-        if (request) {
+        }
 
-            this.interactionSystem.request({
-                actor: this.player,
-                target: hit.entity,
-                ...request
-            });
+        const pointerResult =
+            hit.entity.pointerInteract(
+                hit.object,
+                hit
+            );
+
+        if (
+            pointerResult?.type === "INTERACT"
+        ) {
+
+            const intent =
+                new InteractionIntent({
+                    actor: this.player,
+                    target: hit.entity,
+                    interactionId:
+                        pointerResult.interactionId,
+                    tags:
+                        pointerResult.tags ?? []
+                });
+
+            this.interactionSystem.request(
+                intent
+            );
 
         }
 
         return true;
+
+    }
+
+    dispose() {
+
+        this.input.dispose();
+        this.element.style.cursor = "default";
 
     }
 
