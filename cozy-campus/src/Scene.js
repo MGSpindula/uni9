@@ -214,19 +214,19 @@ export class Scene {
 
         this.add(this.chair);
 
-        this.ambientActionPoints =
+        this.ambientInteractionPoints =
             new CozyCampusInteractionPoints();
 
         this.add(
-            this.ambientActionPoints
+            this.ambientInteractionPoints
         );
 
         this.registerNavigationInteractions(
-            this.ambientActionPoints
+            this.ambientInteractionPoints
         );
 
         this.interactionSystem.registerTarget(
-            this.ambientActionPoints
+            this.ambientInteractionPoints
         );
 
         this.registerNavigationInteractions(
@@ -273,7 +273,7 @@ export class Scene {
                         this.interactionSystem,
 
                     tags: [
-                        "npc-action"
+                        "npc-interaction"
                     ]
                 });
 

@@ -7,6 +7,8 @@ export class NPC extends Character {
 
         super(name);
 
+        this.navigationPriority = 0;
+
         // NPC behavior is allowed to replace an unreachable task after the
         // recovery timeout. Until then it uses the exact same persistent queue
         // and retry mechanics as the Player.

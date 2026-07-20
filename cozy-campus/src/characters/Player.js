@@ -7,6 +7,8 @@ export class Player extends Character {
 
         super("Player");
 
+        this.navigationPriority = 100;
+
         const visual = new THREE.Mesh(
             new THREE.CylinderGeometry(0.45, 0.45, 1.7, 16),
             new THREE.MeshStandardMaterial({ color: 0x4d8edb })

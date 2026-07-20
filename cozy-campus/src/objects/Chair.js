@@ -168,18 +168,12 @@ export class Chair extends Entity {
                 id: "sit",
 
                 tags: [
-                    "npc-action",
+                    "npc-interaction",
                     "sit",
                     "rest"
                 ],
 
                 point: this.interactionPoint,
-
-                requirements: [
-                    ({ actor }) =>
-                        actor !== null &&
-                        actor !== undefined
-                ],
 
                 available: ({ target }) =>
                     target.canInteract() &&

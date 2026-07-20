@@ -312,18 +312,6 @@ export class NavigationGraph {
 
     }
 
-    isNodeAgentResting(id, agent) {
-
-        return this.requireNode(id).restingAgents.has(agent);
-
-    }
-
-    getNodeOccupants(id) {
-
-        return [...this.requireNode(id).occupants];
-
-    }
-
     isConnectionAvailable(fromId, toId, agent = null) {
 
         return this.findAvailableLaneIndex(
@@ -386,15 +374,6 @@ export class NavigationGraph {
         connection.reservations.add(agent);
 
         return laneIndex;
-
-    }
-
-    hasOtherNodeCommitments(id, agent) {
-
-        const node = this.requireNode(id);
-
-        return [...node.reservations, ...node.transitReservations]
-            .some(candidate => candidate !== agent);
 
     }
 
@@ -531,21 +510,6 @@ export class NavigationGraph {
 
     }
 
-    occupyConnection(fromId, toId, agent) {
-
-        const connection = this.requireConnection(fromId, toId);
-        const reservedLane = connection.lanes.find(lane =>
-            lane.reservations.has(agent)
-        );
-        const laneIndex = reservedLane?.index ??
-            this.findAvailableLaneIndex(connection, fromId, toId, agent);
-
-        if (laneIndex === null) return false;
-
-        return this.occupyConnectionLane(fromId, toId, agent, laneIndex);
-
-    }
-
     occupyConnectionLane(fromId, toId, agent, laneIndex) {
 
         const connection = this.requireConnection(fromId, toId);
@@ -579,15 +543,6 @@ export class NavigationGraph {
         node.restingAgents.delete(agent);
         node.transitReservations.delete(agent);
         this.releaseResource(node, agent);
-
-    }
-
-    releaseNodeReservation(id, agent) {
-
-        const node = this.requireNode(id);
-
-        node.reservations.delete(agent);
-        node.transitReservations.delete(agent);
 
     }
 

@@ -414,12 +414,6 @@ export class Entity {
 
     }
 
-    isInteractingWith(actor) {
-
-        return this.interactingActors.has(actor);
-
-    }
-
     hasInteractingActors() {
 
         return this.interactingActors.size > 0;

@@ -30,11 +30,4 @@ export class UseAvailableInteractionBehavior {
 
     }
 
-    isActive(actor) {
-
-        return this.interactionSystem
-            .isActorUsingTarget(actor);
-
-    }
-
 }

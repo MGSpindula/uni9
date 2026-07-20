@@ -124,6 +124,39 @@ export class InteractionNavigation {
 
         if (!waypoint.interactionPoint) return false;
 
+        if (waypoint.interactionPoint) {
+
+            const traversal =
+                actor.navigation
+                    .getTraversalState();
+
+            if (traversal.currentNodeId) {
+
+                this.graph.releaseNode(
+                    traversal.currentNodeId,
+                    actor
+                );
+
+                actor.navigation
+                    .setCurrentNode(null);
+
+            }
+
+            if (traversal.currentConnection) {
+
+                this.graph.releaseConnection(
+                    traversal.currentConnection.fromId,
+                    traversal.currentConnection.toId,
+                    actor
+                );
+
+                actor.navigation
+                    .leaveConnection();
+
+            }
+
+        }
+
         if (context.interactionPoint !== waypoint.interactionPoint) {
 
             this.owner.leaveInteractionPoint(context);

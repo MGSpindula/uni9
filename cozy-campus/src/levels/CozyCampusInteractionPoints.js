@@ -97,9 +97,9 @@ export class CozyCampusInteractionPoints
                     {
                         position:
                             new THREE.Vector3(
-                                8.3,
+                                9,
                                 0,
-                                7
+                                8
                             ),
 
                         connectTo:
@@ -160,21 +160,14 @@ export class CozyCampusInteractionPoints
                         `idle:${point.id}`,
 
                     tags: [
-                        "npc-action",
+                        "npc-interaction",
                         "idle",
                         "ambient",
                         point.metadata.pose ??
                         "stand"
                     ],
 
-                    point,
-
-                    available: ({
-                        actor
-                    }) =>
-                        point.isAvailable(actor),
-
-                    execute: () => true
+                    point
                 })
             );
 

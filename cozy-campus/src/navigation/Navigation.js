@@ -13,7 +13,7 @@ export class Navigation {
         this.currentConnection = null;
 
         // Changes whenever the route itself is replaced. A waypoint callback
-        // may install a follow-up route (for example, toward a dwell spot).
+        // may install a follow-up route, such as an approach-to-interaction route.
         // Character uses this number to avoid advancing that brand-new route
         // as though it were the route that has just finished.
         this.routeRevision = 0;
@@ -23,12 +23,6 @@ export class Navigation {
     // -----------------------------
     // Route
     // -----------------------------
-
-    setDestination(position) {
-
-        this.setPath([position]);
-
-    }
 
     setPath(positions, options = {}) {
 

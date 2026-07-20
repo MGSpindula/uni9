@@ -20,6 +20,7 @@ export class Character extends Entity {
         this.forwardHelper = null;
 
         this.navigation = new Navigation();
+        this.navigationPriority = 0;
         this.traversalType = "flat";
         this.locomotion = new Locomotion(this.object3D);
         this.animation = null;
@@ -300,7 +301,7 @@ export class Character extends Entity {
         if (movementDecision?.temporary) return;
 
         // Position and facing are both part of arriving at authored animation
-        // marks such as approach, seat and dwell spots. The callback runs only
+        // marks such as approach and terminal interaction points. The callback runs only
         // after the smooth locomotion rotation has also finished.
         if (waypoint.arrivalDirection &&
             !this.locomotion.alignToDirection(
@@ -346,7 +347,7 @@ export class Character extends Entity {
 
         if (result.finished) {
 
-            // A waypoint callback may promote arrival to STOPPING/DWELLING.
+            // A waypoint callback may promote arrival to STOPPING or begin an interaction.
             // Do not overwrite that more specific state with generic IDLE.
             if (this.isState(EntityState.WALKING)) {
 

@@ -146,7 +146,38 @@ export class CharacterCollisionFailsafe {
         if (!blocker) {
 
             this.clearWait(actor);
+
+            const maneuver =
+                this.passing.get(actor);
+
+            if (
+                maneuver?.lateral &&
+                maneuver.target
+            ) {
+
+                const distance =
+                    actor.object3D.position
+                        .distanceTo(
+                            maneuver.target
+                        );
+
+                if (distance > 0.08) {
+
+                    return {
+                        allowed: true,
+
+                        target:
+                            maneuver.target,
+
+                        temporary: true
+                    };
+
+                }
+
+            }
+
             this.passing.delete(actor);
+
             return true;
 
         }
@@ -205,6 +236,31 @@ export class CharacterCollisionFailsafe {
 
         if (!target) return null;
 
+        const previous =
+            this.passing.get(actor);
+
+        if (
+            previous?.other === other &&
+            previous.lateral &&
+            previous.target
+        ) {
+
+            const distance =
+                actor.object3D.position
+                    .distanceTo(
+                        previous.target
+                    );
+
+            if (distance > 0.08) {
+
+                return previous.target;
+
+            }
+
+            this.passing.delete(actor);
+
+        }
+
         const relative = other.object3D.position
             .clone()
             .sub(actor.object3D.position)
@@ -224,15 +280,14 @@ export class CharacterCollisionFailsafe {
         );
         const step = Math.max(
             (actor.collisionRadius ?? 0.42) +
-                (other.collisionRadius ?? 0.42) +
-                0.04,
+            (other.collisionRadius ?? 0.42) +
+            0.04,
             0.9
         );
         const forwardStep = shouldYield
             ? actor.locomotion.speed * 0.12
             : actor.locomotion.speed * 0.24;
         const origin = actor.object3D.position;
-        const previous = this.passing.get(actor);
         const fixedSide = previous?.other === other && previous.lateral
             ? previous.side
             : null;
@@ -250,7 +305,20 @@ export class CharacterCollisionFailsafe {
             actor,
             right
         );
-        const useLeft = fixedSide ?? leftClearance >= rightClearance;
+        const clearanceDifference =
+            Math.abs(
+                leftClearance -
+                rightClearance
+            );
+
+        const useLeft =
+            fixedSide ??
+            (
+                clearanceDifference > 0.1
+                    ? leftClearance >
+                    rightClearance
+                    : false
+            );
         const candidate = useLeft ? left : right;
         const candidateClearance = useLeft
             ? leftClearance
@@ -267,7 +335,7 @@ export class CharacterCollisionFailsafe {
 
         this.passing.set(actor, {
             other,
-            target: candidate,
+            target: candidate.clone(),
             lateral: true,
             side: useLeft
         });
@@ -460,7 +528,7 @@ export class CharacterCollisionFailsafe {
         const closestTime = speedSquared > 0.0001
             ? THREE.MathUtils.clamp(
                 -this.relativePosition.dot(this.relativeVelocity) /
-                    speedSquared,
+                speedSquared,
                 0,
                 this.predictionTime
             )
@@ -475,11 +543,34 @@ export class CharacterCollisionFailsafe {
 
     shouldYield(actor, other) {
 
-        const actorPriority = this.getCommitmentPriority(actor);
-        const otherPriority = this.getCommitmentPriority(other);
+        const actorPriority =
+            this.getCommitmentPriority(
+                actor
+            );
 
-        if (actorPriority !== otherPriority) return actorPriority < otherPriority;
-        if (this.waitingFor.get(other) === actor) return false;
+        const otherPriority =
+            this.getCommitmentPriority(
+                other
+            );
+
+        if (
+            actorPriority !==
+            otherPriority
+        ) {
+
+            return actorPriority <
+                otherPriority;
+
+        }
+
+        if (
+            this.waitingFor.get(other) ===
+            actor
+        ) {
+
+            return false;
+
+        }
 
         const actorMoving = this.velocity.lengthSq() > 0.0001;
         const otherMoving = this.otherVelocity.lengthSq() > 0.0001;
@@ -496,9 +587,21 @@ export class CharacterCollisionFailsafe {
 
         const context = this.owner.contexts.get(actor);
 
-        if (!context) return 0;
-        if (actor.name === "Player") return 4;
-        if (context.activeInteraction) return 3;
+        const actorPriority =
+            actor.navigationPriority ??
+            0;
+
+        if (!context) {
+
+            return actorPriority;
+
+        }
+
+        if (context.activeInteraction) {
+
+            return actorPriority + 3;
+
+        }
 
         const interaction = context.pendingInteraction?.point;
         const approach = interaction?.via;
@@ -509,9 +612,19 @@ export class CharacterCollisionFailsafe {
             approach?.occupants.has(actor)
         );
 
-        if (reserved) return 2;
-        if (context.interactionPoint) return 1;
-        return 0;
+        if (reserved) {
+
+            return actorPriority + 2;
+
+        }
+
+        if (context.interactionPoint) {
+
+            return actorPriority + 1;
+
+        }
+
+        return actorPriority;
 
     }
 

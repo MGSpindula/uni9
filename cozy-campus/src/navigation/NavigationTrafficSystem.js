@@ -173,7 +173,7 @@ export class NavigationTrafficSystem {
         const storedTangent = context.transitTangent;
         const departureDirection =
             storedTangent?.nodeId === fromId &&
-            storedTangent?.nextNodeId === toId
+                storedTangent?.nextNodeId === toId
                 ? storedTangent.direction
                 : null;
         const curveWaypoints = waypoint
@@ -375,10 +375,10 @@ export class NavigationTrafficSystem {
         const approachLaneIndex = anchor
             ? anchor.lanePositions.reduce((closestIndex, position, index) =>
                 position.distanceToSquared(actor.object3D.position) <
-                anchor.lanePositions[closestIndex].distanceToSquared(
-                    actor.object3D.position
-                ) ? index : closestIndex
-            , 0)
+                    anchor.lanePositions[closestIndex].distanceToSquared(
+                        actor.object3D.position
+                    ) ? index : closestIndex
+                , 0)
             : null;
         const laneIndex = approachLaneIndex === null
             ? this.graph.reserveConnectionLane(fromId, toId, actor)
@@ -701,9 +701,17 @@ export class NavigationTrafficSystem {
 
     }
 
-    getActorPriority(actor, fallback = 0) {
+    getActorPriority(
+        actor,
+        fallback = 0
+    ) {
 
-        return actor.name === "Player" ? 10 : fallback;
+        return Math.max(
+            actor.navigationPriority ??
+            0,
+
+            fallback
+        );
 
     }
 
@@ -735,6 +743,20 @@ export class NavigationTrafficSystem {
         }
 
         return false;
+
+    }
+
+    hasHigherPriority(
+        first,
+        second
+    ) {
+
+        return this.getActorPriority(
+            first
+        ) >
+            this.getActorPriority(
+                second
+            );
 
     }
 

@@ -20,7 +20,7 @@ export class NPCController {
 
         this.elapsed = 0;
 
-        this.actionDuration = 5;
+        this.interactionDuration = 5;
         this.retryDuration = 2;
 
         this.nextDecisionIn = 0;
@@ -57,7 +57,7 @@ export class NPCController {
 
             if (
                 this.elapsed <
-                this.actionDuration
+                this.interactionDuration
             ) {
 
                 return;
@@ -66,7 +66,7 @@ export class NPCController {
 
             this.elapsed = 0;
 
-            this.tryChooseAction({
+            this.tryChooseInteraction({
                 excludePoint:
                     activePoint
             });
@@ -86,11 +86,11 @@ export class NPCController {
 
         this.elapsed = 0;
 
-        this.tryChooseAction();
+        this.tryChooseInteraction();
 
     }
 
-    tryChooseAction({
+    tryChooseInteraction({
         excludePoint = null
     } = {}) {
 

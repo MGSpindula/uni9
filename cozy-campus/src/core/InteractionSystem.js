@@ -187,30 +187,6 @@ export class InteractionSystem {
 
     }
 
-    isActorUsingTarget(actor) {
-
-        for (
-            const target of
-            this.targets
-        ) {
-
-            if (
-                target
-                    .isInteractingWith?.(
-                        actor
-                    )
-            ) {
-
-                return true;
-
-            }
-
-        }
-
-        return false;
-
-    }
-
     dispose() {
 
         this.actorNavigators.clear();

@@ -32,7 +32,7 @@ export class Locomotion {
     beginFrame() {
 
         // Character calls this even while paused. Consequently WAITING and
-        // DWELLING naturally report zero movement instead of retaining the
+        // IDLE or interacting actors naturally report zero movement instead of retaining the
         // velocity from the last walking frame.
         this.motion.distanceMoved = 0;
         this.motion.speed = 0;

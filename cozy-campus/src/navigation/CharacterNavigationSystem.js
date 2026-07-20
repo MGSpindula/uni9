@@ -65,7 +65,11 @@ export class CharacterNavigationSystem {
             recoveryPosition: actor.object3D.position.clone(),
             orphanedElapsed: 0,
             queueWaitElapsed: 0,
-            queueWaitTimeout: 2,
+            queueWaitTimeout:
+                actor.navigationIntentPolicy ===
+                    "persistent"
+                    ? Infinity
+                    : 2,
             congestionEscaping: false,
             congestionAttempts: 0
         };
@@ -173,6 +177,8 @@ export class CharacterNavigationSystem {
     // Commands
     // -----------------------------
 
+
+    // Não usar moveToClosestNode() como comando de gameplay.
     moveToClosestNode(actor, position, {
         replaceIntent = true,
         skipTurnaround = false,
@@ -597,21 +603,50 @@ export class CharacterNavigationSystem {
 
     prepareOrigin(context, originId) {
 
-        const { actor, interactionPoint } = context;
+        const {
+            actor,
+            interactionPoint
+        } = context;
 
         if (!interactionPoint) {
 
-            if (!actor.navigation.getTraversalState().currentConnection) return;
+            if (
+                !actor.navigation
+                    .getTraversalState()
+                    .currentConnection
+            ) {
 
-            this.graph.releaseReservations(actor);
-            this.graph.reserveNode(originId, actor);
+                return;
+
+            }
+
+            this.graph.releaseReservations(
+                actor
+            );
+
+            this.graph.reserveNode(
+                originId,
+                actor
+            );
+
             return;
 
         }
 
-        this.graph.releaseReservations(actor);
-        this.graph.reserveNode(originId, actor);
-        actor.navigation.setCurrentNode(originId);
+        /*
+         * Um ator em InteractionPoint ainda não está no nó.
+         * A entrada no tráfego será autorizada por
+         * tryEnterFromInteraction(), que reserva a lane e
+         * o endpoint apropriados.
+         */
+        this.graph.releaseReservations(
+            actor
+        );
+
+        actor.navigation.setCurrentNode(
+            null
+        );
+
         this.refresh();
 
     }
@@ -869,7 +904,7 @@ export class CharacterNavigationSystem {
 
     }
 
-    orientActor(actor, direction) {
+    /* orientActor(actor, direction) {
 
         // Helper and actor consume this exact same world-space vector. Do not
         // reconstruct an Euler angle here: lookAt keeps the +Z convention used
@@ -880,78 +915,7 @@ export class CharacterNavigationSystem {
             actor.object3D.position.z + direction.z
         );
 
-    }
-
-    recoverAfterCollisionDisplacement(actor) {
-
-        const context = this.requireContext(actor);
-        const remaining = actor.navigation.getRemainingWaypoints();
-
-        if (remaining.length === 0) return false;
-
-        // Bézier samples have no semantic ownership. Keep the first waypoint
-        // that actually means node/interaction/transition and everything
-        // after it; only the obsolete local samples leading there are rebuilt.
-        const targetIndex = remaining.findIndex(waypoint =>
-            waypoint.id ||
-            waypoint.interactionPoint ||
-            waypoint.departureRequest ||
-            waypoint.connectionEntry ||
-            waypoint.leavingGraph ||
-            waypoint.leavingInteraction
-        );
-
-        if (targetIndex < 0) return false;
-
-        const target = remaining[targetIndex];
-        const start = actor.object3D.position.clone();
-        const staleSamples = remaining.slice(0, targetIndex);
-        const lastStalePosition = staleSamples.at(-1)?.position;
-        const arrivalDirection = lastStalePosition
-            ? target.position.clone().sub(lastStalePosition).setY(0)
-            : target.arrivalDirection?.clone() ?? null;
-        const departureDirection = new THREE.Vector3(0, 0, 1)
-            .applyQuaternion(actor.object3D.quaternion)
-            .setY(0)
-            .normalize();
-        const midpoint = start.clone().lerp(target.position, 0.5);
-        const curve = this.traffic.createLaneCurveWaypoints(
-            start,
-            midpoint,
-            target.position,
-            10,
-            {
-                departureDirection,
-                arrivalDirection: arrivalDirection?.lengthSq() > 0.0001
-                    ? arrivalDirection.normalize()
-                    : null
-            }
-        );
-
-        actor.navigation.replaceRemainingWaypoints([
-            ...curve,
-            target,
-            ...remaining.slice(targetIndex + 1)
-        ]);
-        const belongsToSpecialCurve =
-            context.traversingInteractionCurve;
-
-        context.traversingLaneCurve =
-            !belongsToSpecialCurve && curve.length > 0;
-        this.graph.setActiveLaneCurve(actor, [
-            start,
-            ...curve.map(waypoint => waypoint.position),
-            target.position
-        ]);
-        console.log(
-            `[CollisionRecovery] ${actor.name} rebuilds ${curve.length} ` +
-            `Bézier samples toward ` +
-            `"${target.id ?? target.interactionPoint?.id ?? "local target"}".`
-        );
-        this.refresh();
-        return true;
-
-    }
+    } */
 
     centerActorForDeparture(context) {
 

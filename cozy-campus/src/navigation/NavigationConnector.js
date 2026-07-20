@@ -514,43 +514,58 @@ export class NavigationConnector {
         const route = routes.reduce((best, current) =>
             current.cost < best.cost ? current : best
         );
-        const waypoints = this.graph.createWaypoints(route.path.nodeIds);
-        const portalPosition = this.getPortalPosition(
-            accessPoint,
-            connection
-        );
+        const waypoints =
+            this.graph.createWaypoints(
+                route.path.nodeIds
+            );
 
-        if (this.graph.getPlanarDistanceSquared(
-            this.graph.requireNode(route.endpointId).position,
-            portalPosition
-        ) > 0.0001) {
+        const portalPosition =
+            this.getPortalPosition(
+                accessPoint,
+                connection
+            );
 
-            waypoints.push({
-                id: null,
-                position: portalPosition,
-                leavingGraph: true,
-                departureRequest: {
-                    originId: route.endpointId,
-                    transitionTarget: accessPoint.getWorldPosition()
-                }
-            });
+        waypoints.push({
+            id: null,
 
-        }
+            position:
+                portalPosition,
+
+            leavingGraph: true,
+
+            departureRequest: {
+                originId:
+                    route.endpointId,
+
+                transitionTarget:
+                    accessPoint
+                        .getWorldPosition()
+            }
+        });
 
         if (accessPoint !== point) {
 
             waypoints.push({
                 id: null,
-                position: accessPoint.getWorldPosition(),
-                interactionPoint: accessPoint
+
+                position:
+                    accessPoint
+                        .getWorldPosition(),
+
+                interactionPoint:
+                    accessPoint
             });
 
         }
 
         waypoints.push({
             id: null,
-            position: point.getWorldPosition(),
-            interactionPoint: point
+
+            position:
+                point.getWorldPosition(),
+
+            interactionPoint:
+                point
         });
 
         return {
