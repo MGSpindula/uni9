@@ -1,5 +1,4 @@
 import * as CANNON from "cannon-es";
-import * as THREE from "three";
 
 // Cannon owns only physical separation. Navigation remains authoritative for
 // destinations, reservations and route progress.
@@ -188,76 +187,6 @@ export class PhysicsWorld {
             }
 
         }
-
-    }
-
-    findEscapePosition(actor, target = null, distance = 0.9) {
-
-        const origin = actor.object3D.position;
-        const radius = this.getActorRadius(actor);
-        const forward = target
-            ? target.clone().sub(origin)
-            : new THREE.Vector3(0, 0, 1).applyQuaternion(actor.object3D.quaternion);
-        forward.y = 0;
-
-        if (forward.lengthSq() < 0.0001) {
-
-            forward.set(0, 0, 1).applyQuaternion(actor.object3D.quaternion);
-            forward.y = 0;
-
-        }
-
-        forward.normalize();
-        const left = forward.clone();
-        left.set(-forward.z, 0, forward.x);
-        const right = left.clone().negate();
-        const step = Math.max(distance, radius * 2.2);
-        const leftCandidate = origin.clone().addScaledVector(left, step);
-        const rightCandidate = origin.clone().addScaledVector(right, step);
-        const leftClearance = this.getClearanceForPosition(actor, leftCandidate);
-        const rightClearance = this.getClearanceForPosition(actor, rightCandidate);
-
-        return leftClearance >= rightClearance
-            ? leftCandidate
-            : rightCandidate;
-
-    }
-
-    findRetreatPosition(actor, target, distance = 1.1) {
-
-        const origin = actor.object3D.position;
-        const away = origin.clone().sub(target).setY(0);
-
-        if (away.lengthSq() < 0.0001) {
-
-            away.set(0, 0, -1);
-
-        }
-
-        const radius = this.getActorRadius(actor);
-        const step = Math.max(distance, radius * 2.6);
-
-        return origin.clone().addScaledVector(away.normalize(), step);
-
-    }
-
-    getClearanceForPosition(actor, position) {
-
-        let minimum = Infinity;
-
-        for (const [other, body] of this.actorBodies) {
-
-            if (other === actor || !other.isActive()) continue;
-
-            const distance = Math.hypot(
-                position.x - body.position.x,
-                position.z - body.position.z
-            ) - this.getActorRadius(actor) - this.getActorRadius(other);
-            minimum = Math.min(minimum, distance);
-
-        }
-
-        return minimum;
 
     }
 

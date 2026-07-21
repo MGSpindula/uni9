@@ -107,7 +107,15 @@ export class InteractionSystem {
 
             excludePoint:
                 request.excludePoint ??
-                null
+                null,
+
+            excludePoints:
+                request.excludePoints ??
+                [],
+
+            excludePointIds:
+                request.excludePointIds ??
+                []
         });
 
     }

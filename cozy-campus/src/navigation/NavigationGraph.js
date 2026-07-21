@@ -7,6 +7,10 @@ export class NavigationGraph {
         this.invalidNodeIds = new Set();
         this.validationErrors = [];
         this.activeLaneCurves = new Map();
+        // Debug curves change much more frequently than graph topology. The
+        // helper uses this revision to rebuild only actor spline lines instead
+        // of recreating every node label and texture.
+        this.activeLaneCurveRevision = 0;
         this.revision = 0;
 
     }
@@ -77,6 +81,12 @@ export class NavigationGraph {
     getNode(id) {
 
         return this.nodes.get(id) ?? null;
+
+    }
+
+    getNodeEntries() {
+
+        return this.nodes.entries();
 
     }
 
@@ -182,6 +192,40 @@ export class NavigationGraph {
         this.revision++;
 
         return resource;
+
+    }
+
+    setConnectionPortalOffset(fromId, toId, nodeId, distance) {
+
+        const connection = this.requireConnection(fromId, toId);
+
+        if (nodeId !== connection.fromId && nodeId !== connection.toId) {
+
+            this.reportValidationError(
+                "INVALID_PORTAL_OFFSET",
+                `Node "${nodeId}" is not an endpoint of "${fromId}" -> "${toId}".`
+            );
+            return false;
+
+        }
+
+        if (!Number.isFinite(distance) || distance < 0) {
+
+            this.reportValidationError(
+                "INVALID_PORTAL_OFFSET",
+                `Portal offset for "${nodeId}" must be a non-negative number.`
+            );
+            return false;
+
+        }
+
+        // Per-connection offsets override a node's generic laneRadius. Use
+        // this when one exit from a junction needs a longer/shorter handoff
+        // without moving every other lane attached to that same node.
+        connection.metadata.portalOffsets ??= {};
+        connection.metadata.portalOffsets[nodeId] = distance;
+        this.revision++;
+        return true;
 
     }
 
@@ -377,6 +421,57 @@ export class NavigationGraph {
 
     }
 
+    reserveNodeEvacuationLane(fromId, toId, agent) {
+
+        const connection = this.requireConnection(fromId, toId);
+
+        if (connection.blocked) return null;
+
+        const sameDirection = connection.fromId === fromId;
+        const normalLaneIndex = sameDirection ? 0 : 1;
+        const oppositeLaneIndex = normalLaneIndex === 0 ? 1 : 0;
+
+        // This is an emergency exit from a congested node, not overtaking.
+        // A reservation is only a future intention, so the node occupant may
+        // displace it and use the physically empty opposite lane. An actor
+        // already travelling in a lane is never displaced.
+        const order = [oppositeLaneIndex, normalLaneIndex];
+
+        for (const laneIndex of order) {
+
+            const lane = connection.lanes[laneIndex];
+            const otherOccupants = [...lane.occupants]
+                .filter(candidate => candidate !== agent);
+
+            if (otherOccupants.length > 0) continue;
+
+            const displaced = [...lane.reservations]
+                .filter(candidate => candidate !== agent);
+
+            for (const candidate of displaced) {
+
+                lane.reservations.delete(candidate);
+                lane.directions.delete(candidate);
+                connection.reservations.delete(candidate);
+
+            }
+
+            lane.reservations.add(agent);
+            lane.directions.set(agent, { fromId, toId });
+            connection.reservations.add(agent);
+
+            return {
+                laneIndex,
+                displaced,
+                usedOppositeLane: laneIndex === oppositeLaneIndex
+            };
+
+        }
+
+        return null;
+
+    }
+
     getConnectionLaneIndex(fromId, toId, agent) {
 
         const connection = this.requireConnection(fromId, toId);
@@ -416,6 +511,41 @@ export class NavigationGraph {
 
         node.transitReservations.add(agent);
         return true;
+
+    }
+
+    isNodePhysicallyAvailable(id, agent = null) {
+
+        const node = this.requireNode(id);
+
+        if (node.blocked) return false;
+
+        // Collision prediction cares about bodies, not future intentions.
+        // Reservations are handled by NavigationTrafficSystem at the endpoint.
+        // Treat a resting occupant as physically aside, consistently with the
+        // ordinary circulation-node passability rule.
+        return ![...node.occupants].some(candidate =>
+            candidate !== agent && !node.restingAgents.has(candidate)
+        );
+
+    }
+
+    yieldTransitReservationsToArrival(id, agent) {
+
+        const node = this.requireNode(id);
+        const displaced = [...node.transitReservations]
+            .filter(candidate => candidate !== agent);
+
+        // transitReservations are forecasts, not ownership. An actor already
+        // standing at the lane endpoint wins over actors that may arrive in a
+        // future frame. Hard node reservations and real occupants are kept.
+        for (const candidate of displaced) {
+
+            node.transitReservations.delete(candidate);
+
+        }
+
+        return displaced;
 
     }
 
@@ -576,9 +706,22 @@ export class NavigationGraph {
         const travelEnd = this.requireNode(toId).position;
         const travelDirection = travelEnd.clone().sub(travelStart);
         const travelLength = travelDirection.length();
-        const configuredRadius =
-            this.requireNode(nodeId).metadata.laneRadius ?? 1.2;
-        const nodeRadius = Math.min(configuredRadius, travelLength * 0.25);
+        // Controls how far lane start/end portals sit from the node center.
+        // There are two levels of manual authoring:
+        //
+        // node metadata: { laneRadius: 1.75 }
+        //   applies to every connection at that node;
+        // connection metadata: { portalOffsets: { "junction": 2.2 } }
+        //   overrides just this connection endpoint.
+        //
+        // `portalOffsets` is the preferred option for an awkward angle or
+        // doorway. It keeps the rest of the junction unchanged.
+        const configuredRadius = connection.metadata.portalOffsets?.[nodeId] ??
+            this.requireNode(nodeId).metadata.laneRadius ??
+            1.75;
+        // Never allow the two manually placed portals to cross on a short
+        // connection; this preserves an actual lane between them.
+        const nodeRadius = Math.min(configuredRadius, travelLength * 0.45);
 
         if (travelLength > 0) travelDirection.divideScalar(travelLength);
 
@@ -599,12 +742,17 @@ export class NavigationGraph {
     setActiveLaneCurve(agent, points) {
 
         this.activeLaneCurves.set(agent, points.map(point => point.clone()));
+        this.activeLaneCurveRevision++;
 
     }
 
     clearActiveLaneCurve(agent) {
 
-        this.activeLaneCurves.delete(agent);
+        if (this.activeLaneCurves.delete(agent)) {
+
+            this.activeLaneCurveRevision++;
+
+        }
 
     }
 
@@ -685,7 +833,7 @@ export class NavigationGraph {
     // Weighted planning
     // -----------------------------
 
-    planClosestPath(startId, position, agent, { maxDetourFactor = 1.5 } = {}) {
+    planClosestPath(startId, position, agent, { maxDetourFactor = 3 } = {}) {
 
         // The click chooses a destination before pathfinding. Pathfinding must
         // never silently replace that destination with a nearby reachable node.
@@ -763,7 +911,7 @@ export class NavigationGraph {
 
         const closest = nodes.reduce((closestNode, node) =>
             node.position.distanceToSquared(position) <
-            closestNode.position.distanceToSquared(position)
+                closestNode.position.distanceToSquared(position)
                 ? node
                 : closestNode
         );
@@ -802,6 +950,35 @@ export class NavigationGraph {
             nodeIds: nodeIds.reverse(),
             cost: result.distances.get(destinationId)
         };
+
+    }
+
+    findPreferredPath(startId, destinationId, agent, {
+        maxDetourFactor = 3
+    } = {}) {
+
+        // Prefer a currently clear route, but do not pretend a temporarily
+        // occupied destination is structurally unreachable. If avoiding the
+        // crowd would require an excessive detour, preserve the direct route
+        // and let NavigationTrafficSystem wait at its first busy resource.
+        const direct = this.findShortestPath(startId, destinationId, {
+            agent,
+            avoidOccupied: false
+        });
+
+        if (!direct) return null;
+
+        const available = this.findShortestPath(startId, destinationId, {
+            agent,
+            avoidOccupied: true
+        });
+        const maximumDetour = direct.cost === 0
+            ? 0
+            : direct.cost * maxDetourFactor;
+
+        return available && available.cost <= maximumDetour
+            ? available
+            : direct;
 
     }
 

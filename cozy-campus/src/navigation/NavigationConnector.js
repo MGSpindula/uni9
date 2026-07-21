@@ -87,6 +87,9 @@ export class NavigationConnector {
 
             point.connection = {
                 nodeIds: accessConnection.nodeIds,
+                // The action point inherits both the reachable endpoints and
+                // the immutable physical edge used by its approach point.
+                segmentNodeIds: accessConnection.segmentNodeIds,
                 projectedPosition: point.via.getWorldPosition(),
                 distanceSquared: 0,
                 automatic: false,
@@ -126,7 +129,8 @@ export class NavigationConnector {
 
         }
 
-        const anchor = nearest.nodeIds.length === 2
+        const physicalNodeIds = nearest.segmentNodeIds ?? nearest.nodeIds;
+        const anchor = physicalNodeIds.length === 2
             ? this.createAccessAnchor(point, nearest)
             : null;
 
@@ -255,10 +259,14 @@ export class NavigationConnector {
 
         return {
             // Treat the projection as a temporary split in the edge. Blocking
-            // one endpoint closes only that side of the split.
+            // one endpoint closes only that side of the split. Keep the
+            // physical pair separately: the generated anchor and its lane
+            // portals still belong to the complete edge and must not vanish
+            // merely because only one direction is currently reachable.
             nodeIds: [from, to]
                 .filter(node => !node.blocked)
                 .map(node => node.id),
+            segmentNodeIds: [from.id, to.id],
             projectedPosition,
             distanceSquared: this.graph.getPlanarDistanceSquared(
                 position,
@@ -293,8 +301,8 @@ export class NavigationConnector {
     createAccessAnchor(point, projection) {
 
         const connection = this.graph.requireConnection(
-            projection.nodeIds[0],
-            projection.nodeIds[1]
+            projection.segmentNodeIds?.[0] ?? projection.nodeIds[0],
+            projection.segmentNodeIds?.[1] ?? projection.nodeIds[1]
         );
         const fromId = connection.fromId;
         const toId = connection.toId;
@@ -338,10 +346,20 @@ export class NavigationConnector {
 
     }
 
-    getPortalPosition(point, connection) {
+    getPortalPosition(point, connection, laneIndex = null) {
 
         if (connection.anchor) {
 
+            if (Number.isInteger(laneIndex) &&
+                connection.anchor.lanePositions[laneIndex]) {
+
+                return connection.anchor.lanePositions[laneIndex].clone();
+
+            }
+
+            // Proximity is only a fallback for a route with no known travel
+            // direction. Directional entry/exit must explicitly choose the
+            // right-hand lane before requesting its portal.
             return connection.anchor.getClosestLanePosition(
                 point.getWorldPosition()
             );
@@ -372,6 +390,83 @@ export class NavigationConnector {
         portal.z += normalZ * offset;
 
         return portal;
+
+    }
+
+    getRightHandLaneIndex(fromId, toId) {
+
+        const connection = this.graph.requireConnection(fromId, toId);
+
+        // Index 0 is right-hand traffic in the connection's canonical
+        // fromId -> toId orientation. Reversing travel reverses left/right in
+        // world space, so index 1 becomes that actor's right-hand lane.
+        return connection.fromId === fromId ? 0 : 1;
+
+    }
+
+    getApproachExitLaneIndex(point, connection, destinationNodeId) {
+
+        const lanePositions = connection.anchor?.lanePositions ?? [];
+
+        if (lanePositions.length < 2) {
+
+            const otherNodeId = (connection.segmentNodeIds ??
+                connection.nodeIds)?.find(id => id !== destinationNodeId);
+
+            return otherNodeId
+                ? this.getRightHandLaneIndex(otherNodeId, destinationNodeId)
+                : null;
+
+        }
+
+        const pointPosition = point.getWorldPosition();
+        const departureDirection = point.getWorldDirection().negate();
+        const rightDirection = new THREE.Vector3(
+            departureDirection.z,
+            0,
+            -departureDirection.x
+        );
+        const destinationDirection = this.graph
+            .requireNode(destinationNodeId)
+            .position.clone()
+            .sub(pointPosition);
+
+        destinationDirection.y = 0;
+
+        const closestLaneIndex = lanePositions.reduce(
+            (closestIndex, position, index) =>
+                position.distanceToSquared(pointPosition) <
+                    lanePositions[closestIndex]
+                        .distanceToSquared(pointPosition)
+                    ? index
+                    : closestIndex,
+            0
+        );
+        const farthestLaneIndex = lanePositions.reduce(
+            (farthestIndex, position, index) =>
+                position.distanceToSquared(pointPosition) >
+                    lanePositions[farthestIndex]
+                        .distanceToSquared(pointPosition)
+                    ? index
+                    : farthestIndex,
+            0
+        );
+
+        if (destinationDirection.lengthSq() <= 0.0001 ||
+            rightDirection.lengthSq() <= 0.0001) {
+
+            return closestLaneIndex;
+
+        }
+
+        // An approach is authored beside its graph segment. When leaving it,
+        // the node on the actor's right is reached through the near lane; the
+        // node on the actor's left is reached through the far lane. Using the
+        // connection's canonical from/to order here inverts this relationship
+        // whenever that order happens to oppose the authored approach.
+        return destinationDirection.dot(rightDirection) >= 0
+            ? closestLaneIndex
+            : farthestLaneIndex;
 
     }
 
@@ -486,12 +581,11 @@ export class NavigationConnector {
         const routes = connection.nodeIds
             .map(endpointId => {
 
-                const path = this.graph.findShortestPath(startId, endpointId, {
-                    agent,
-                    // Occupied resources remain structurally reachable. The
-                    // agent waits at traversal time until they become free.
-                    avoidOccupied: false
-                });
+                const path = this.graph.findPreferredPath(
+                    startId,
+                    endpointId,
+                    agent
+                );
 
                 if (!path) return null;
 
@@ -519,10 +613,26 @@ export class NavigationConnector {
                 route.path.nodeIds
             );
 
-        const portalPosition =
-            this.getPortalPosition(
-                accessPoint,
-                connection
+        const segmentNodeIds = connection.segmentNodeIds ??
+            connection.nodeIds;
+        const otherNodeId = segmentNodeIds.length === 2
+            ? segmentNodeIds.find(id => id !== route.endpointId) ?? null
+            : null;
+        const laneIndex = connection.anchor && otherNodeId
+            ? this.getRightHandLaneIndex(route.endpointId, otherNodeId)
+            : null;
+        const portalPosition = this.getPortalPosition(
+            accessPoint,
+            connection,
+            laneIndex
+        );
+        const laneStartPosition = laneIndex === null
+            ? null
+            : this.graph.getConnectionLaneNodePosition(
+                route.endpointId,
+                route.endpointId,
+                otherNodeId,
+                laneIndex
             );
 
         waypoints.push({
@@ -540,7 +650,12 @@ export class NavigationConnector {
                 transitionTarget:
                     accessPoint
                         .getWorldPosition()
-            }
+            },
+            // An interaction projected on an edge must be entered through the
+            // same lane geometry as ordinary traffic. The TrafficSystem uses
+            // this portal to make endpoint -> lane start -> anchor explicit.
+            laneStartPosition,
+            plannedLaneIndex: laneIndex
         });
 
         if (accessPoint !== point) {
@@ -586,10 +701,6 @@ export class NavigationConnector {
         if (!connection) return [];
 
         const waypoints = [];
-        const portalPosition = this.getPortalPosition(
-            accessPoint,
-            connection
-        );
         const departureDirection = accessPoint.getWorldDirection().negate();
 
         if (point !== accessPoint) {
@@ -598,6 +709,10 @@ export class NavigationConnector {
                 id: null,
                 position: accessPoint.getWorldPosition(),
                 interactionPoint: accessPoint,
+                // This is the physical action -> approach transition. It must
+                // not end the active interaction yet: the action remains busy
+                // until the actor crosses the graph-entry portal below.
+                interactionExitPoint: true,
                 departureDirection,
                 // seat -> approach belongs to the interaction animation. Keep
                 // the facing established at approach instead of turning the
@@ -607,13 +722,27 @@ export class NavigationConnector {
 
         }
 
-        const otherNodeId = connection.nodeIds?.find(
+        const otherNodeId = (connection.segmentNodeIds ??
+            connection.nodeIds)?.find(
             id => id !== destinationNodeId
         ) ?? null;
+        const laneIndex = connection.anchor && destinationNodeId && otherNodeId
+            ? this.getApproachExitLaneIndex(
+                accessPoint,
+                connection,
+                destinationNodeId
+            )
+            : null;
+        const portalPosition = this.getPortalPosition(
+            accessPoint,
+            connection,
+            laneIndex
+        );
 
         waypoints.push({
             id: null,
             position: portalPosition,
+            plannedLaneIndex: laneIndex,
             leavingInteraction: true,
             // When already standing at approach, this is the first exit
             // waypoint and therefore owns the same immediate 180° turn.
@@ -625,8 +754,17 @@ export class NavigationConnector {
                     fromId: otherNodeId,
                     toId: destinationNodeId,
                     anchorId: connection.anchor?.id ?? null,
+                    laneIndex,
                     originKey: `interaction:${accessPoint.id}`
                 }
+                : null,
+            // A direct connectTo: "node" has no edge/lane to enter. Reaching
+            // its portal therefore means the actor physically entered that
+            // graph node and must establish currentNodeId before continuing.
+            graphEntryNodeId: destinationNodeId &&
+                connection.nodeIds?.length === 1 &&
+                connection.nodeIds[0] === destinationNodeId
+                ? destinationNodeId
                 : null
         });
 

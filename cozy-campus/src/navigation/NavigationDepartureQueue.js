@@ -8,7 +8,11 @@ export class NavigationDepartureQueue {
 
     }
 
-    enqueue(originId, actor, { priority = 0 } = {}) {
+    enqueue(originId, actor, {
+        rank = 0,
+        priority = 0,
+        kind = "request"
+    } = {}) {
 
         const queue = this.queues.get(originId) ?? [];
         let request = this._getRequest(actor, originId);
@@ -19,13 +23,12 @@ export class NavigationDepartureQueue {
                 actor,
                 originId,
                 order: this.sequence++,
-                priority
+                rank,
+                priority,
+                kind
             };
             queue.push(request);
-            queue.sort((first, second) =>
-                second.priority - first.priority ||
-                first.order - second.order
-            );
+            this.sort(queue);
             this.queues.set(originId, queue);
 
             let actorEntries = this.actorIndex.get(actor);
@@ -42,13 +45,12 @@ export class NavigationDepartureQueue {
                 `${priority > 0 ? "transit priority" : "local action"}).`
             ); */
 
-        } else if (priority > request.priority) {
+        } else if (rank > request.rank || priority > request.priority) {
 
+            request.rank = Math.max(request.rank, rank);
             request.priority = priority;
-            queue.sort((first, second) =>
-                second.priority - first.priority ||
-                first.order - second.order
-            );
+            request.kind = kind;
+            this.sort(queue);
             console.log(
                 `[NavigationQueue] ↑ ${actor.name} promoted at ` +
                 `"${originId}" (position ${queue.indexOf(request) + 1}).`
@@ -57,6 +59,16 @@ export class NavigationDepartureQueue {
         }
 
         return request;
+
+    }
+
+    sort(queue) {
+
+        queue.sort((first, second) =>
+            second.rank - first.rank ||
+            second.priority - first.priority ||
+            first.order - second.order
+        );
 
     }
 
@@ -69,6 +81,28 @@ export class NavigationDepartureQueue {
     isFirst(originId, actor) {
 
         return this.queues.get(originId)?.[0]?.actor === actor;
+
+    }
+
+    getFirst(originId) {
+
+        return this.queues.get(originId)?.[0]?.actor ?? null;
+
+    }
+
+    promote(originId, actor, {
+        rank = 4,
+        kind = "deadlock-release"
+    } = {}) {
+
+        const request = this._getRequest(actor, originId);
+
+        if (!request) return false;
+
+        request.rank = Math.max(request.rank, rank);
+        request.kind = kind;
+        this.sort(this.queues.get(originId));
+        return this.isFirst(originId, actor);
 
     }
 
@@ -100,7 +134,9 @@ export class NavigationDepartureQueue {
                 originId,
                 position: index + 1,
                 length: queue.length,
-                priority: request.priority
+                rank: request.rank,
+                priority: request.priority,
+                kind: request.kind
             };
 
         }
@@ -178,6 +214,8 @@ export class NavigationDepartureQueue {
                 origin: originId,
                 position: index + 1,
                 actor: request.actor.name,
+                kind: request.kind,
+                rank: request.rank,
                 priority: request.priority,
                 order: request.order
             }));

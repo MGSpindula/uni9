@@ -49,10 +49,13 @@ export class CharacterDebugPanel {
 
             this.appendDetail(details, "Behavior", row.behavior);
             this.appendDetail(details, "Traversal", row.traversal);
+            this.appendDetail(details, "Position", row.position);
             this.appendDetail(details, "Location", row.location);
             this.appendDetail(details, "Lane", row.lane);
             this.appendDetail(details, "Next", row.next);
+            this.appendDetail(details, "Progress", row.progress);
             this.appendDetail(details, "Intent", row.intent);
+            this.appendDetail(details, "Interact.", row.interaction);
             this.appendDetail(details, "Queue", row.queue);
             this.appendDetail(details, "Wait", row.wait);
             this.appendDetail(details, "Flags", row.flags);

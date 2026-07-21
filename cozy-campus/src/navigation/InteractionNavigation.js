@@ -1,6 +1,7 @@
 import {
     EntityState
 } from "../core/EntityState";
+import { WaitReason } from "./WaitReason";
 
 export class InteractionNavigation {
 
@@ -33,15 +34,30 @@ export class InteractionNavigation {
             traversal.currentConnection.fromId,
             traversal.currentConnection.toId
         ];
+        const segmentNodeIds = access?.segmentNodeIds ?? access?.nodeIds;
         const usesCurrentConnection =
-            access?.nodeIds?.length === 2 &&
-            currentIds.every(id => access.nodeIds.includes(id));
+            segmentNodeIds?.length === 2 &&
+            currentIds.every(id => segmentNodeIds.includes(id));
 
         if (!usesCurrentConnection) return null;
 
+        // A direct approach from the current segment must remain on the lane
+        // the actor already owns. Choosing by proximity could make it cross to
+        // the opposite side immediately before the interaction anchor.
+        const laneIndex = this.graph.getConnectionLaneIndex(
+            traversal.currentConnection.fromId,
+            traversal.currentConnection.toId,
+            actor
+        );
+
         const waypoints = [{
             id: null,
-            position: this.connector.getPortalPosition(accessPoint, access),
+            position: this.connector.getPortalPosition(
+                accessPoint,
+                access,
+                laneIndex
+            ),
+            plannedLaneIndex: laneIndex,
             leavingGraph: true,
             departureRequest: { connection: true }
         }];
@@ -80,6 +96,10 @@ export class InteractionNavigation {
             if (traversal.currentNodeId) {
 
                 this.graph.releaseNode(traversal.currentNodeId, actor);
+                // The portal is already outside the graph node. Keeping the
+                // old id here made debug and recovery believe that the actor
+                // was simultaneously at the node and at the InteractionPoint.
+                actor.navigation.setCurrentNode(null);
 
             }
 
@@ -112,17 +132,59 @@ export class InteractionNavigation {
 
             context.traversingInteractionCurve = false;
 
+            if (waypoint.graphEntryNodeId) {
+
+                const nodeId = waypoint.graphEntryNodeId;
+
+                // Ambient points connect directly to one graph node. They do
+                // not have a lane callback that would normally set this
+                // ownership, so entering the portal must do it explicitly.
+                this.owner.traffic.claimPhysicalArrival(nodeId, actor);
+
+                if (!this.graph.isNodeAvailable(nodeId, actor) ||
+                    !this.graph.occupyNode(nodeId, actor)) {
+
+                    this.owner.traffic.setWaitReason(
+                        actor,
+                        nodeId,
+                        WaitReason.NODE_OCCUPIED
+                    );
+                    // Keep this waypoint current until the node is truly
+                    // available; CharacterNavigationSystem forwards this
+                    // explicit result to Character as a rejected arrival.
+                    return "waiting";
+
+                }
+
+                actor.navigation.setCurrentNode(nodeId);
+                this.owner.traffic.completeNodeArrival(nodeId, actor);
+                this.owner.traffic.clearWaitReason(actor);
+
+            }
+
             this.owner.traffic.completeInteractionDeparture(
                 actor,
                 waypoint.connectionEntry?.originKey
             );
-            this.owner.leaveInteractionPoint(context);
+            this.owner.completeInteractionExit(context);
             this.owner.refresh();
             return true;
 
         }
 
         if (!waypoint.interactionPoint) return false;
+
+        if (waypoint.interactionExitPoint) {
+
+            // Reaching approach during an exit is not a new interaction. The
+            // actor now occupies this physical staging point, but continues to
+            // own action/seat until leavingInteraction is really crossed.
+            this.connector.occupyPoint(waypoint.interactionPoint, actor);
+            context.interactionExitPoint = waypoint.interactionPoint;
+            this.owner.refresh();
+            return true;
+
+        }
 
         if (waypoint.interactionPoint) {
 
@@ -172,17 +234,25 @@ export class InteractionNavigation {
 
             context.preparingInteraction = true;
             actor.pause();
-            interaction.point.entity?.prepareInteraction(
-                actor,
-                waypoint.interactionPoint,
-                interaction.point,
-                () => {
+                interaction.point.entity?.prepareInteraction(
+                    actor,
+                    waypoint.interactionPoint,
+                    interaction.point,
+                    () => {
 
-                    context.preparingInteraction = false;
-                    actor.resume();
+                        context.preparingInteraction = false;
+                        // The authored entry animation may move object3D from
+                        // approach to action. Its root transform is now the
+                        // source of truth, so Locomotion must project that
+                        // position onto the action segment instead of resuming
+                        // with the old approach arc distance and walking back.
+                        actor.locomotion.resetCurve();
+                        context.recoveryElapsed = 0;
+                        context.recoveryPosition.copy(actor.object3D.position);
+                        actor.resume();
 
-                }
-            );
+                    }
+                );
 
         }
 
@@ -226,6 +296,15 @@ export class InteractionNavigation {
             actor.setState(
                 EntityState.IDLE
             );
+
+            if (context.deferredCommand) {
+
+                // A command issued during the entry animation begins only
+                // after the original action is fully established. Replacing
+                // the route here is safe because Character checks revisions.
+                this.owner.executeDeferredCommand(context);
+
+            }
 
         }
 

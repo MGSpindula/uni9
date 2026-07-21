@@ -12,6 +12,8 @@ export class Locomotion {
 
         this.direction = new THREE.Vector3();
         this.lookTarget = new THREE.Object3D();
+        this.activeCurve = null;
+        this.curveDistance = 0;
 
         // Reused every frame. Navigation and animation may read this snapshot,
         // but Locomotion remains the only system allowed to write it.
@@ -46,6 +48,8 @@ export class Locomotion {
         rotate = true,
         followSurface = false
     } = {}) {
+
+        this.resetCurve();
 
         this.direction.subVectors(target, this.object3D.position);
 
@@ -86,6 +90,158 @@ export class Locomotion {
         this.recordMovement(distanceThisFrame, delta);
 
         return distanceThisFrame === distance;
+
+    }
+
+    moveAlongCurve(curve, delta, {
+        rotate = true,
+        followSurface = false,
+        startDistance = 0,
+        stopDistance = null,
+        finishCurve = true
+    } = {}) {
+
+        if (this.activeCurve !== curve) {
+
+            this.activeCurve = curve;
+            // A route can be rebuilt while collision/traffic recovery keeps
+            // the actor midway through it. Project the real body onto the new
+            // curve instead of restarting at distance zero and walking back.
+            this.curveDistance = this.findClosestCurveDistance(curve, {
+                minimum: startDistance,
+                maximum: stopDistance ?? curve.getLength()
+            });
+
+        }
+
+        const length = curve.getLength();
+
+        if (length <= Number.EPSILON) return true;
+
+        const targetDistance = Math.min(
+            stopDistance ?? length,
+            length
+        );
+        const nextDistance = Math.min(
+            this.curveDistance + this.speed * delta,
+            targetDistance
+        );
+        const progress = nextDistance / length;
+        const target = curve.getPointAt(progress);
+        const tangent = curve.getTangentAt(progress);
+        const distanceMoved = nextDistance - this.curveDistance;
+
+        if (followSurface) {
+
+            this.object3D.position.x = target.x;
+            this.object3D.position.z = target.z;
+
+        } else {
+
+            this.object3D.position.copy(target);
+
+        }
+
+        if (rotate && tangent.lengthSq() > 0.0001) {
+
+            this.motion.turning = this.rotateTowards(
+                this.object3D.position.clone().add(tangent),
+                delta
+            );
+
+        }
+
+        this.curveDistance = nextDistance;
+        this.recordMovement(distanceMoved, delta);
+
+        if (nextDistance < targetDistance) return false;
+
+        // A route-wide spline has semantic anchors along one persistent
+        // curve. Reaching a node pauses at its distance but does not reset the
+        // curve; after traffic accepts the next segment locomotion continues
+        // from this exact arc-length position.
+        if (finishCurve || targetDistance >= length) this.resetCurve();
+        return true;
+
+    }
+
+    resetCurve() {
+
+        this.activeCurve = null;
+        this.curveDistance = 0;
+
+    }
+
+    findClosestCurveDistance(curve, {
+        minimum = 0,
+        maximum = null
+    } = {}) {
+
+        const length = curve.getLength();
+
+        // A spline with a single repeated point has no meaningful progress.
+        // Returning here also avoids dividing by zero while projecting the
+        // actor after traffic or collision recovery rebuilds its route.
+        if (length <= Number.EPSILON) return 0;
+
+        const minimumProgress = THREE.MathUtils.clamp(
+            minimum / length,
+            0,
+            1
+        );
+        const maximumProgress = THREE.MathUtils.clamp(
+            (maximum ?? length) / length,
+            minimumProgress,
+            1
+        );
+        const samples = Math.max(64, Math.ceil(length * 12));
+        let bestProgress = minimumProgress;
+        let bestDistance = Infinity;
+
+        for (let index = 0; index <= samples; index++) {
+
+            const progress = THREE.MathUtils.lerp(
+                minimumProgress,
+                maximumProgress,
+                index / samples
+            );
+            const point = curve.getPointAt(progress);
+            const distance = point.distanceToSquared(this.object3D.position);
+
+            if (distance >= bestDistance) continue;
+
+            bestDistance = distance;
+            bestProgress = progress;
+
+        }
+
+        // Refine the best sampled interval without allocating a physics body
+        // or performing an expensive generic closest-point search.
+        const searchStep = (maximumProgress - minimumProgress) / samples;
+        let lower = Math.max(
+            minimumProgress,
+            bestProgress - searchStep
+        );
+        let upper = Math.min(
+            maximumProgress,
+            bestProgress + searchStep
+        );
+
+        for (let iteration = 0; iteration < 7; iteration++) {
+
+            const first = lower + (upper - lower) / 3;
+            const second = upper - (upper - lower) / 3;
+            const firstDistance = curve.getPointAt(first)
+                .distanceToSquared(this.object3D.position);
+            const secondDistance = curve.getPointAt(second)
+                .distanceToSquared(this.object3D.position);
+
+            if (firstDistance <= secondDistance) upper = second;
+            else lower = first;
+
+        }
+
+        return (lower + upper) * 0.5 * length;
 
     }
 

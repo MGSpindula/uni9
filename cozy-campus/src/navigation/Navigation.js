@@ -98,6 +98,7 @@ export class Navigation {
             }))
         );
 
+
     }
 
     insertManyAfterCurrent(waypoints) {
@@ -111,11 +112,21 @@ export class Navigation {
             }))
         );
 
+
     }
 
     getNextWaypoint() {
 
         return this.path[this.currentIndex + 1] ?? null;
+
+    }
+
+    getFollowingWaypoint() {
+
+        // Useful while the current target is an interaction portal: the
+        // immediate next waypoint is the graph entry, while this one tells
+        // navigation where it will continue after reaching that entry.
+        return this.path[this.currentIndex + 2] ?? null;
 
     }
 

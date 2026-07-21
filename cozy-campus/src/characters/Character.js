@@ -209,7 +209,51 @@ export class Character extends Entity {
     // Navigation presentation hooks
     // -----------------------------
 
-    
+    onTrafficWaitStarted(wait) {
+
+        // Future animation hook. Examples by reason:
+        // QUEUE_HEAD / ENDPOINT_WAIT: stop and glance at the passing actor;
+        // LANE_FULL: hesitate and inspect the other lane;
+        // HARD_BLOCKED: react as if the route is unavailable.
+        // Animate `visual`; navigation continues owning object3D.
+        void wait;
+
+    }
+
+    onTrafficWaitTimeout(wait) {
+
+        // Called once per prolonged-wait interval. This is where a Character
+        // may later play "look around", "ask for passage" or one deliberate
+        // step-aside animation. Base Character never moves object3D, cancels
+        // the route or discards the actor's intent here.
+        void wait;
+
+    }
+
+    onTrafficWaitEnded(wait) {
+
+        // Future animation hook: finish the yielding pose before walk resumes.
+        void wait;
+
+    }
+
+    onNodeEvacuationStarted(event) {
+
+        // Emergency node clearance. Navigation may use the opposite (left)
+        // lane when both normal claims would otherwise trap this actor on the
+        // junction. A future animation can glance back or signal passage here.
+        void event;
+
+    }
+
+    onTrafficReservationYielded(event) {
+
+        // This actor had only reserved a lane; an actor physically occupying
+        // the node needed it to leave. Keep the route and retry naturally.
+        // Future presentation may add a short hesitation on `visual`.
+        void event;
+
+    }
 
     // -----------------------------
     // Lifecycle
@@ -230,41 +274,31 @@ export class Character extends Entity {
 
         let waypoint = this.navigation.getCurrentWaypoint();
 
-        // Collision avoidance is an out-of-route locomotion maneuver. It must
-        // keep updating while the original Navigation/Bézier is suspended.
-        const movementDecision = this.movementGuard?.(
+        // A movement guard may only brake locomotion. It cannot replace the
+        // authored Navigation curve with an improvised sidestep.
+        const movementAllowed = this.movementGuard?.(
             waypoint?.position ?? null,
             delta
         );
 
-        if (movementDecision === false ||
-            movementDecision?.allowed === false) {
+        if (movementAllowed === false) {
 
             this.setState(EntityState.WAITING);
             return;
 
         }
 
-        if (movementDecision?.target) {
-            waypoint = { ...waypoint, position: movementDecision.target };
-        }
-
         if (this.navigation.isPaused()) return;
 
-        // The collision guard may have rebuilt the remaining Bézier while
-        // resolving an avoidance. Never consume the stale waypoint reference
-        // captured before that callback.
-        const currentWaypoint = this.navigation.getCurrentWaypoint();
-        waypoint = movementDecision?.target
-            ? { ...currentWaypoint, position: movementDecision.target }
-            : currentWaypoint;
+        // Re-read after the guard in case another system paused navigation.
+        waypoint = this.navigation.getCurrentWaypoint();
 
         if (!waypoint || !this.prepareTraversalTo(waypoint)) return;
 
-        const reached = this.locomotion.moveTo(waypoint.position, delta, {
-            // A temporary sidestep is positional avoidance, not a new facing
-            // command. Keep the actor oriented along its authored route.
-            rotate: !waypoint.preserveFacing && !movementDecision?.temporary,
+        const movementOptions = {
+            // Facing always follows the authored route unless the waypoint
+            // explicitly preserves an interaction pose.
+            rotate: !waypoint.preserveFacing,
             // Every ordinary walk is surface-following: route owns XZ and
             // Grounding owns Y. Only explicit jump/fly waypoints are airborne.
             //
@@ -274,7 +308,23 @@ export class Character extends Entity {
             // stairs or hills: those remain attached to walkable geometry and
             // must let CharacterGrounding determine their physical height.
             followSurface: waypoint.airborne !== true
-        });
+        };
+        const reached = waypoint.routeCurve
+            ? this.locomotion.moveAlongCurve(
+                waypoint.routeCurve,
+                delta,
+                {
+                    ...movementOptions,
+                    startDistance: waypoint.curveStartDistance,
+                    stopDistance: waypoint.curveStopDistance,
+                    finishCurve: waypoint.routeCurveFinal !== false
+                }
+            )
+            : this.locomotion.moveTo(
+                waypoint.position,
+                delta,
+                movementOptions
+            );
 
         if (this.isState(EntityState.WAITING) &&
             this.locomotion.getMotionState().moving) {
@@ -294,11 +344,6 @@ export class Character extends Entity {
             return;
 
         }
-
-        // A social avoidance maneuver may reach its temporary offset target
-        // before the real navigation waypoint. Never consume the route
-        // waypoint until locomotion is moving toward its original position.
-        if (movementDecision?.temporary) return;
 
         // Position and facing are both part of arriving at authored animation
         // marks such as approach and terminal interaction points. The callback runs only

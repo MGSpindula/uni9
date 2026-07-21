@@ -2,16 +2,18 @@ import { AnimationPresets } from "../core/AnimationPresets";
 import { Tween } from "../core/Tween";
 import { NavigationDepartureQueue } from "./NavigationDepartureQueue";
 import { WaitReason, WaitReasonLabel } from "./WaitReason";
+import * as THREE from "three";
 
 export class NavigationTrafficSystem {
 
-    constructor(owner) {
+    constructor(owner, { waitTimeout = 4 } = {}) {
 
         this.owner = owner;
         this.graph = owner.graph;
         this.departures = new NavigationDepartureQueue();
         this.arrivals = new NavigationDepartureQueue();
         this.waitReasons = new Map();
+        this.waitTimeout = waitTimeout;
 
     }
 
@@ -40,7 +42,11 @@ export class NavigationTrafficSystem {
         this.departures.enqueue(
             arrivalId,
             actor,
-            { priority: this.getActorPriority(actor, 1) }
+            {
+                rank: 0,
+                priority: this.getActorPriority(actor),
+                kind: "lookahead"
+            }
         );
 
     }
@@ -70,7 +76,9 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(originId, actor, {
-            priority: this.getActorPriority(actor, 1)
+            rank: 3,
+            priority: this.getActorPriority(actor),
+            kind: "departure"
         });
 
         if (!this.departures.isFirst(originId, actor)) {
@@ -83,6 +91,90 @@ export class NavigationTrafficSystem {
 
         }
 
+        return true;
+
+    }
+
+    preflightInteractionExit(actor, entry) {
+
+        if (!entry) return true;
+
+        const {
+            fromId,
+            toId,
+            originKey,
+            anchorId = null,
+            laneIndex: requestedLaneIndex = null
+        } = entry;
+
+        if (!this.graph.hasNode(fromId) ||
+            !this.graph.hasNode(toId) ||
+            !this.graph.areConnected(fromId, toId)) return false;
+
+        const connection = this.graph.requireConnection(fromId, toId);
+
+        if (this.graph.isNodeBlocked(toId) || connection.blocked) {
+
+            this.setWaitReason(actor, originKey, WaitReason.HARD_BLOCKED);
+            return false;
+
+        }
+
+        this.departures.enqueue(originKey, actor, {
+            rank: 3,
+            priority: this.getActorPriority(actor),
+            kind: "interaction-exit"
+        });
+        this.arrivals.enqueue(toId, actor, {
+            rank: 2,
+            priority: this.getActorPriority(actor),
+            kind: "arrival"
+        });
+
+        if (!this.departures.isFirst(originKey, actor)) {
+
+            this.setWaitReason(actor, originKey, WaitReason.QUEUE_HEAD);
+            return false;
+
+        }
+
+        const anchor = anchorId
+            ? this.owner.connector.anchors.get(anchorId)
+            : null;
+        const approachLaneIndex = anchor
+            ? anchor.lanePositions.reduce((closestIndex, position, index) =>
+                position.distanceToSquared(actor.object3D.position) <
+                    anchor.lanePositions[closestIndex].distanceToSquared(
+                        actor.object3D.position
+                    ) ? index : closestIndex
+                , 0)
+            : null;
+        const directionalLaneIndex = Number.isInteger(requestedLaneIndex)
+            ? requestedLaneIndex
+            : approachLaneIndex;
+        const laneIndex = directionalLaneIndex === null
+            ? this.graph.reserveConnectionLane(fromId, toId, actor)
+            : this.graph.reserveSpecificConnectionLane(
+                fromId,
+                toId,
+                directionalLaneIndex,
+                actor
+            );
+
+        if (laneIndex === null) {
+
+            this.setWaitReason(actor, originKey, WaitReason.LANE_FULL, {
+                connection: { fromId, toId }
+            });
+            return false;
+
+        }
+
+        // Claim the endpoint early when possible. Failure is temporary and
+        // does not prevent standing up: the lane itself is already guaranteed.
+        this.graph.reserveNodeForTransit(toId, actor);
+        this.clearWaitReason(actor);
+        this.owner.refresh();
         return true;
 
     }
@@ -116,10 +208,14 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(fromId, actor, {
-            priority: this.getActorPriority(actor, 1)
+            rank: 3,
+            priority: this.getActorPriority(actor),
+            kind: "departure"
         });
         this.arrivals.enqueue(toId, actor, {
-            priority: this.getActorPriority(actor, 1)
+            rank: 2,
+            priority: this.getActorPriority(actor),
+            kind: "arrival"
         });
 
         if (!this.departures.isFirst(fromId, actor)) {
@@ -130,15 +226,56 @@ export class NavigationTrafficSystem {
         }
 
 
-        const laneIndex = this.graph.reserveConnectionLane(
-            fromId,
-            toId,
-            actor
-        );
+        let laneIndex = waypoint?.routeSpline &&
+            Number.isInteger(waypoint.plannedLaneIndex)
+            ? this.graph.reserveSpecificConnectionLane(
+                fromId,
+                toId,
+                waypoint.plannedLaneIndex,
+                actor
+            )
+            : this.graph.reserveConnectionLane(fromId, toId, actor);
+
+        if (laneIndex === null &&
+            !waypoint?.routeSpline &&
+            this.graph.requireNode(fromId).occupants.has(actor)) {
+
+            const evacuation = this.graph.reserveNodeEvacuationLane(
+                fromId,
+                toId,
+                actor
+            );
+
+            if (evacuation) {
+
+                laneIndex = evacuation.laneIndex;
+                actor.onNodeEvacuationStarted?.({
+                    fromId,
+                    toId,
+                    laneIndex,
+                    usedOppositeLane: evacuation.usedOppositeLane
+                });
+
+                for (const displacedActor of evacuation.displaced) {
+
+                    displacedActor.onTrafficReservationYielded?.({
+                        by: actor,
+                        fromId,
+                        toId,
+                        laneIndex
+                    });
+
+                }
+
+            }
+
+        }
 
         if (laneIndex === null) {
 
-            this.setWaitReason(actor, fromId, WaitReason.LANE_FULL);
+            this.setWaitReason(actor, fromId, WaitReason.LANE_FULL, {
+                connection: { fromId, toId }
+            });
             return false;
 
         }
@@ -167,8 +304,20 @@ export class NavigationTrafficSystem {
             this.graph.areConnected(toId, nextWaypoint.id)
             ? nextWaypoint.id
             : null;
-        const arrivalDirection = nextNodeId
-            ? this.createTransitTangent(fromId, toId, nextNodeId)
+        // The curve arriving at `toId` must already know where traversal
+        // continues afterwards. That next target may be a graph node, but it
+        // may also be the first portal of an interaction route. Keeping this
+        // tangent lets the following curve leave the lane endpoint with the
+        // same direction instead of creating a visible corner.
+        const nextTarget = nextNodeId
+            ? this.graph.requireNode(nextNodeId).position
+            : nextWaypoint?.laneStartPosition ?? nextWaypoint?.position ?? null;
+        const arrivalDirection = nextTarget
+            ? this.createPositionTangent(
+                this.graph.requireNode(fromId).position,
+                this.graph.requireNode(toId).position,
+                nextTarget
+            )
             : null;
         const storedTangent = context.transitTangent;
         const departureDirection =
@@ -176,14 +325,21 @@ export class NavigationTrafficSystem {
                 storedTangent?.nextNodeId === toId
                 ? storedTangent.direction
                 : null;
-        const curveWaypoints = waypoint
-            ? this.createLaneCurveWaypoints(
+        const laneCurve = waypoint?.routeSpline
+            ? waypoint.routeCurve
+            : waypoint
+                ? this.createLaneCurve(
                 actor.object3D.position,
                 laneStart,
                 laneEnd,
-                10,
-                { departureDirection, arrivalDirection }
-            )
+                {
+                    departureDirection,
+                    arrivalDirection
+                }
+                )
+                : null;
+        const curveWaypoints = laneCurve
+            ? this.createCurveSamples(laneCurve, 10, "laneCurve")
             : [];
 
         if (connection.metadata.traversal === "slope") {
@@ -211,9 +367,7 @@ export class NavigationTrafficSystem {
         if (curveWaypoints.length > 0) {
 
             this.graph.setActiveLaneCurve(actor, [
-                actor.object3D.position,
-                ...curveWaypoints.map(candidate => candidate.position),
-                laneEnd
+                ...(waypoint?.routeSplinePoints ?? laneCurve.getPoints(48))
             ]);
 
         }
@@ -236,9 +390,26 @@ export class NavigationTrafficSystem {
         this.clearWaitReason(actor);
         this.owner.refresh();
 
+        if (waypoint?.routeSpline) {
+
+            actor.navigation.beginConnection(fromId, toId);
+            context.traversingLaneCurve = true;
+            return true;
+
+        }
+
         if (curveWaypoints.length > 0) {
 
-            actor.navigation.insertManyBeforeCurrent(curveWaypoints);
+            // The endpoint is an explicit route anchor. Locomotion advances
+            // along the stored curve by arc length and cannot cut from one
+            // lane into the next without physically reaching this point.
+            actor.navigation.insertManyBeforeCurrent([{
+                id: null,
+                position: laneEnd.clone(),
+                routeCurve: laneCurve,
+                laneCurve: true,
+                laneEndpoint: true
+            }]);
             actor.navigation.beginConnection(fromId, toId);
             context.traversingLaneCurve = true;
             return false;
@@ -257,6 +428,10 @@ export class NavigationTrafficSystem {
     ) {
 
         const context = this.owner.requireContext(actor);
+        const departureDirection =
+            context.transitTangent?.nodeId === originId
+                ? context.transitTangent.direction
+                : null;
 
         if (this.graph.isNodeBlocked(originId)) {
 
@@ -267,7 +442,9 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(originId, actor, {
-            priority: this.getActorPriority(actor, 1)
+            rank: 3,
+            priority: this.getActorPriority(actor),
+            kind: "interaction-departure"
         });
 
         if (!this.departures.isFirst(originId, actor)) {
@@ -285,12 +462,79 @@ export class NavigationTrafficSystem {
 
         }
 
+        if (waypoint?.routeSpline) {
+
+            this.graph.setActiveLaneCurve(
+                actor,
+                waypoint.routeSplinePoints
+            );
+            context.traversingInteractionCurve = true;
+            this.owner.centerActorForDeparture(context);
+            this.clearWaitReason(actor);
+            return true;
+
+        }
+
         if (waypoint && !context.traversingInteractionCurve) {
+
+            if (waypoint.laneStartPosition) {
+
+                const laneStart = waypoint.laneStartPosition.clone();
+                const portal = waypoint.position.clone();
+                const directionThroughJoin = portal.clone()
+                    .sub(laneStart)
+                    .normalize();
+                const toLaneStart = this.createInteractionCurveWaypoints(
+                    actor.object3D.position,
+                    laneStart,
+                    portal,
+                    8,
+                    departureDirection
+                );
+                const fromLaneStart = this.createInteractionCurveWaypoints(
+                    laneStart,
+                    portal,
+                    transitionTarget,
+                    8,
+                    directionThroughJoin
+                );
+
+                // This is a geometric join, not a navigation stop. Both
+                // Béziers use the same direction here, so the actor crosses
+                // the lane start fluidly while still respecting the authored
+                // approach-side lane instead of cutting straight to its portal.
+                const approachCurve = [
+                    ...toLaneStart,
+                    {
+                        id: null,
+                        position: laneStart,
+                        laneCurveJoin: true
+                    },
+                    ...fromLaneStart
+                ];
+
+                if (approachCurve.length > 0) {
+
+                    this.graph.setActiveLaneCurve(actor, [
+                        actor.object3D.position,
+                        ...approachCurve.map(candidate => candidate.position),
+                        portal
+                    ]);
+                    actor.navigation.insertManyBeforeCurrent(approachCurve);
+                    context.traversingInteractionCurve = true;
+                    this.owner.refresh();
+                    return false;
+
+                }
+
+            }
 
             const curveWaypoints = this.createInteractionCurveWaypoints(
                 actor.object3D.position,
                 waypoint.position,
-                transitionTarget
+                transitionTarget,
+                8,
+                departureDirection
             );
 
             if (curveWaypoints.length > 0) {
@@ -338,7 +582,13 @@ export class NavigationTrafficSystem {
 
     tryEnterFromInteraction(
         actor,
-        { fromId, toId, originKey, anchorId = null },
+        {
+            fromId,
+            toId,
+            originKey,
+            anchorId = null,
+            laneIndex: entryLaneIndex = null
+        },
         waypoint = null
     ) {
 
@@ -355,10 +605,14 @@ export class NavigationTrafficSystem {
         }
 
         this.departures.enqueue(originKey, actor, {
-            priority: this.getActorPriority(actor)
+            rank: 3,
+            priority: this.getActorPriority(actor),
+            kind: "interaction-departure"
         });
         this.arrivals.enqueue(toId, actor, {
-            priority: this.getActorPriority(actor, 1)
+            rank: 2,
+            priority: this.getActorPriority(actor),
+            kind: "arrival"
         });
 
         if (!this.departures.isFirst(originKey, actor)) {
@@ -380,18 +634,26 @@ export class NavigationTrafficSystem {
                     ) ? index : closestIndex
                 , 0)
             : null;
-        const laneIndex = approachLaneIndex === null
+        const requestedLaneIndex = waypoint?.routeSpline &&
+            Number.isInteger(waypoint.plannedLaneIndex)
+            ? waypoint.plannedLaneIndex
+            : Number.isInteger(entryLaneIndex)
+                ? entryLaneIndex
+                : approachLaneIndex;
+        const laneIndex = requestedLaneIndex === null
             ? this.graph.reserveConnectionLane(fromId, toId, actor)
             : this.graph.reserveSpecificConnectionLane(
                 fromId,
                 toId,
-                approachLaneIndex,
+                requestedLaneIndex,
                 actor
             );
 
         if (laneIndex === null) {
 
-            this.setWaitReason(actor, originKey, WaitReason.LANE_FULL);
+            this.setWaitReason(actor, originKey, WaitReason.LANE_FULL, {
+                connection: { fromId, toId }
+            });
             return false;
 
         }
@@ -409,8 +671,26 @@ export class NavigationTrafficSystem {
             toId,
             laneIndex
         );
+        const followingWaypoint = actor.navigation.getFollowingWaypoint();
+        const followingNodeId = followingWaypoint?.id &&
+            this.graph.hasNode(followingWaypoint.id) &&
+            this.graph.areConnected(toId, followingWaypoint.id)
+            ? followingWaypoint.id
+            : null;
+        const followingTarget = followingNodeId
+            ? this.graph.requireNode(followingNodeId).position
+            : followingWaypoint?.laneStartPosition ??
+                followingWaypoint?.position ?? null;
+        const arrivalDirection = followingTarget
+            ? this.createPositionTangent(
+                this.graph.requireNode(fromId).position,
+                this.graph.requireNode(toId).position,
+                followingTarget
+            )
+            : null;
 
-        if (waypoint && portal && !context.traversingInteractionCurve) {
+        if (waypoint && portal && !waypoint.routeSpline &&
+            !context.traversingInteractionCurve) {
 
             waypoint.position.copy(portal);
             const interactionCurve = this.createInteractionCurveWaypoints(
@@ -440,7 +720,15 @@ export class NavigationTrafficSystem {
 
         this.owner.centerActorForDeparture(context);
 
-        if (waypoint && portal) {
+        if (waypoint?.routeSpline) {
+
+            this.graph.setActiveLaneCurve(
+                actor,
+                waypoint.routeSplinePoints
+            );
+            context.traversingInteractionCurve = true;
+
+        } else if (waypoint && portal) {
 
             waypoint.position.copy(portal);
             const nextWaypoint = actor.navigation.getNextWaypoint();
@@ -448,7 +736,9 @@ export class NavigationTrafficSystem {
             const laneCurve = this.createLaneCurveWaypoints(
                 portal,
                 departureControl,
-                laneEnd
+                laneEnd,
+                10,
+                { arrivalDirection }
             );
 
             if (nextWaypoint?.id === toId) {
@@ -461,6 +751,17 @@ export class NavigationTrafficSystem {
                     ...laneCurve.map(candidate => candidate.position),
                     laneEnd
                 ]);
+
+                // The connection begun at an interaction still arrives at a
+                // regular graph node. Preserve its outgoing tangent so the
+                // next connection starts as a continuation, not a new curve.
+                context.transitTangent = arrivalDirection
+                    ? {
+                        nodeId: toId,
+                        nextNodeId: followingNodeId,
+                        direction: arrivalDirection.clone()
+                    }
+                    : null;
 
             }
 
@@ -533,50 +834,104 @@ export class NavigationTrafficSystem {
         } = {}
     ) {
 
-        const distance = start.distanceTo(end);
+        const curve = this.createLaneCurve(
+            start,
+            laneStart,
+            end,
+            { departureDirection, arrivalDirection }
+        );
 
-        if (distance <= 0.1) return [];
+        return curve
+            ? this.createCurveSamples(curve, segments, "laneCurve")
+            : [];
 
-        const defaultDirection = end.clone().sub(laneStart).normalize();
-        const startTangent = departureDirection?.clone().normalize() ??
+    }
+
+    createLaneCurve(
+        start,
+        laneStart,
+        end,
+        {
+            departureDirection = null,
+            arrivalDirection = null
+        } = {}
+    ) {
+
+        const beforeAnchorDistance = start.distanceTo(laneStart);
+        const laneDistance = laneStart.distanceTo(end);
+
+        if (beforeAnchorDistance + laneDistance <= 0.1) return null;
+
+        const laneDirection = end.clone().sub(laneStart).normalize();
+        const fallbackDirection = end.clone().sub(start).normalize();
+        const startDirection = departureDirection?.clone().normalize() ??
             laneStart.clone().sub(start).normalize();
-        const endTangent = arrivalDirection?.clone().normalize() ??
-            defaultDirection;
-        const handleLength = Math.min(1.5, distance / 3);
-        const firstControl = start.clone().addScaledVector(
-            startTangent.lengthSq() > 0.0001
-                ? startTangent
-                : defaultDirection,
-            handleLength
-        );
-        const secondControl = end.clone().addScaledVector(
-            endTangent,
-            -handleLength
-        );
-        const waypoints = [];
+        const endDirection = arrivalDirection?.clone().normalize() ??
+            (laneDirection.lengthSq() > 0.0001
+                ? laneDirection
+                : fallbackDirection);
+        const joinDirection = laneDirection.lengthSq() > 0.0001
+            ? laneDirection
+            : fallbackDirection;
+        const curve = new THREE.CurvePath();
 
-        for (let index = 1; index < segments; index++) {
+        // Both cubic segments meet at laneStart. Equal handle lengths on
+        // opposite sides make their first derivatives equal (C1 continuity),
+        // so laneStart is mandatory without becoming a visible corner/stop.
+        const joinHandle = beforeAnchorDistance > 0.05
+            ? Math.min(1.25, beforeAnchorDistance / 3, laneDistance / 3)
+            : Math.min(1.25, laneDistance / 3);
 
-            const t = index / segments;
-            const inverse = 1 - t;
-            const position = start.clone().multiplyScalar(inverse ** 3)
-                .add(firstControl.clone().multiplyScalar(
-                    3 * inverse ** 2 * t
-                ))
-                .add(secondControl.clone().multiplyScalar(
-                    3 * inverse * t ** 2
-                ))
-                .add(end.clone().multiplyScalar(t ** 3));
+        if (beforeAnchorDistance > 0.05) {
 
-            waypoints.push({
-                id: null,
-                position,
-                laneCurve: true
-            });
+            const startHandle = Math.min(1.5, beforeAnchorDistance / 3);
+
+            curve.add(new THREE.CubicBezierCurve3(
+                start.clone(),
+                start.clone().addScaledVector(
+                    startDirection.lengthSq() > 0.0001
+                        ? startDirection
+                        : fallbackDirection,
+                    startHandle
+                ),
+                laneStart.clone().addScaledVector(
+                    joinDirection,
+                    -joinHandle
+                ),
+                laneStart.clone()
+            ));
 
         }
 
-        return this.owner.projectWaypointsToGround(waypoints);
+        if (laneDistance > 0.05) {
+
+            const endHandle = Math.min(1.5, laneDistance / 3);
+
+            curve.add(new THREE.CubicBezierCurve3(
+                laneStart.clone(),
+                laneStart.clone().addScaledVector(
+                    joinDirection,
+                    joinHandle
+                ),
+                end.clone().addScaledVector(endDirection, -endHandle),
+                end.clone()
+            ));
+
+        }
+
+        return curve.curves.length > 0 ? curve : null;
+
+    }
+
+    createCurveSamples(curve, segments, flag) {
+
+        const samples = curve.getPoints(segments).slice(1, -1).map(position => ({
+            id: null,
+            position,
+            [flag]: true
+        }));
+
+        return this.owner.projectWaypointsToGround(samples);
 
     }
 
@@ -584,7 +939,8 @@ export class NavigationTrafficSystem {
         start,
         portal,
         transitionTarget = null,
-        segments = 8
+        segments = 8,
+        departureDirection = null
     ) {
 
         const distance = start.distanceTo(portal);
@@ -595,9 +951,11 @@ export class NavigationTrafficSystem {
         const towardInteraction = transitionTarget
             ? transitionTarget.clone().sub(portal).normalize()
             : towardPortal;
+        const startDirection = departureDirection?.clone().normalize() ??
+            towardPortal;
         const handleLength = Math.min(1.2, distance * 0.4);
         const firstControl = start.clone().addScaledVector(
-            towardPortal,
+            startDirection,
             handleLength
         );
         const secondControl = portal.clone().addScaledVector(
@@ -658,13 +1016,35 @@ export class NavigationTrafficSystem {
 
     }
 
-    setWaitReason(actor, resourceId, reason) {
+    setWaitReason(actor, resourceId, reason, {
+        connection = null
+    } = {}) {
 
         const key = `${reason}@${resourceId}`;
 
         if (this.waitReasons.get(actor)?.key === key) return;
 
-        this.waitReasons.set(actor, { key, resourceId, reason });
+        const previous = this.waitReasons.get(actor);
+
+        if (previous) actor.onTrafficWaitEnded?.(previous);
+
+        const wait = {
+            key,
+            resourceId,
+            reason,
+            connection,
+            elapsed: 0,
+            timeoutCount: 0,
+            blocker: this.getWaitBlocker(
+                actor,
+                resourceId,
+                reason,
+                connection
+            )
+        };
+
+        this.waitReasons.set(actor, wait);
+        actor.onTrafficWaitStarted?.(wait);
         console.log(
             `[NavigationQueue] … ${actor.name} waits at ` +
             `"${resourceId}": ${WaitReasonLabel[reason] ?? reason}.`
@@ -674,17 +1054,215 @@ export class NavigationTrafficSystem {
 
     clearWaitReason(actor) {
 
-        if (!this.waitReasons.has(actor)) return;
+        const wait = this.waitReasons.get(actor);
+
+        if (!wait) return;
 
         console.log(`[NavigationQueue] → ${actor.name} may proceed.`);
         this.waitReasons.delete(actor);
+        actor.onTrafficWaitEnded?.(wait);
 
     }
 
-    isFirstAtNode(nodeId, actor) {
+    update(delta) {
 
-        if (!this.arrivals.hasAt(nodeId, actor)) return true;
-        return this.arrivals.isFirst(nodeId, actor);
+        for (const [actor, wait] of this.waitReasons) {
+
+            wait.elapsed += delta;
+
+            if (wait.elapsed < this.waitTimeout) continue;
+
+            wait.elapsed = 0;
+            wait.timeoutCount++;
+
+            if (wait.reason === WaitReason.LANE_FULL && wait.connection) {
+
+                this.releaseStaleLaneClaims(wait.connection);
+
+            }
+            wait.blocker = this.getWaitBlocker(
+                actor,
+                wait.resourceId,
+                wait.reason,
+                wait.connection
+            );
+
+            const traversal = actor.navigation.getTraversalState();
+            const ownsResource =
+                traversal.currentNodeId === wait.resourceId;
+
+            // Emergency invariant: an actor already occupying a node must be
+            // able to leave before look-ahead entries from approaching actors.
+            if (wait.reason === WaitReason.QUEUE_HEAD && ownsResource) {
+
+                const promoted = this.departures.promote(
+                    wait.resourceId,
+                    actor
+                );
+
+                if (promoted) {
+
+                    console.warn(
+                        `[NavigationQueue] ${actor.name} promoted to release ` +
+                        `occupied node "${wait.resourceId}".`
+                    );
+
+                }
+
+            }
+
+            if (this.owner.resolveTrafficWaitTimeout(actor, wait)) {
+
+                continue;
+
+            }
+
+            // Animation/gameplay hook. A future implementation may glance at
+            // the blocker, ask for passage or perform one authored step aside.
+            // Timeout never deletes intent or invents an off-graph waypoint.
+            actor.onTrafficWaitTimeout?.({ ...wait });
+
+        }
+
+    }
+
+    getWaitBlocker(actor, resourceId, reason, connectionHint = null) {
+
+        if (reason === WaitReason.QUEUE_HEAD) {
+
+            const first = this.departures.getFirst(resourceId) ??
+                this.arrivals.getFirst(resourceId);
+
+            return first !== actor ? first : null;
+
+        }
+
+        if (reason === WaitReason.ENDPOINT_WAIT &&
+            this.graph.hasNode(resourceId)) {
+
+            const node = this.graph.requireNode(resourceId);
+            return [
+                ...node.occupants,
+                ...node.reservations,
+                ...node.transitReservations
+            ].find(candidate => candidate !== actor) ?? null;
+
+        }
+
+        if (reason === WaitReason.LANE_FULL) {
+
+            const traversal = actor.navigation.getTraversalState();
+            const waypoint = actor.navigation.getCurrentWaypoint();
+            const entry = waypoint?.connectionEntry;
+            const fromId = connectionHint?.fromId ??
+                entry?.fromId ?? traversal.currentNodeId;
+            const toId = connectionHint?.toId ??
+                entry?.toId ?? waypoint?.id;
+
+            if (fromId && toId &&
+                this.graph.hasNode(fromId) &&
+                this.graph.hasNode(toId) &&
+                this.graph.areConnected(fromId, toId)) {
+
+                const connection = this.graph.requireConnection(fromId, toId);
+
+                for (const lane of connection.lanes) {
+
+                    const blocker = [
+                        ...lane.occupants,
+                        ...lane.reservations
+                    ].find(candidate => candidate !== actor);
+
+                    if (blocker) return blocker;
+
+                }
+
+            }
+
+        }
+
+        return null;
+
+    }
+
+    releaseStaleLaneClaims({ fromId, toId }) {
+
+        if (!this.graph.hasNode(fromId) ||
+            !this.graph.hasNode(toId) ||
+            !this.graph.areConnected(fromId, toId)) return 0;
+
+        const connection = this.graph.requireConnection(fromId, toId);
+        let released = 0;
+
+        for (const lane of connection.lanes) {
+
+            for (const actor of [...lane.reservations]) {
+
+                if (actor.navigation.hasPath()) continue;
+
+                this.graph.releaseConnection(fromId, toId, actor);
+                released++;
+
+            }
+
+            for (const actor of [...lane.occupants]) {
+
+                const traversal = actor.navigation.getTraversalState();
+                const active = traversal.currentConnection &&
+                    ((traversal.currentConnection.fromId === fromId &&
+                        traversal.currentConnection.toId === toId) ||
+                    (traversal.currentConnection.fromId === toId &&
+                        traversal.currentConnection.toId === fromId));
+
+                if (active) continue;
+
+                this.graph.releaseConnection(fromId, toId, actor);
+                released++;
+
+            }
+
+        }
+
+        if (released > 0) {
+
+            console.warn(
+                `[NavigationQueue] Released ${released} stale lane ` +
+                `claim(s) on "${fromId} ↔ ${toId}".`
+            );
+
+        }
+
+        return released;
+
+    }
+
+    claimPhysicalArrival(nodeId, actor) {
+
+        // Arrival rank 2 is only look-ahead: it helps plan who is coming.
+        // Once an actor is physically at the lane endpoint it must not wait
+        // behind a remote reservation. Scene updates actors sequentially, so
+        // the first physical claimant occupies the node and the real node
+        // availability check safely holds any simultaneous second arrival.
+        this.arrivals.enqueue(nodeId, actor, {
+            rank: 5,
+            priority: this.getActorPriority(actor),
+            kind: "physical-arrival"
+        });
+
+        const displaced = this.graph.yieldTransitReservationsToArrival(
+            nodeId,
+            actor
+        );
+
+        for (const displacedActor of displaced) {
+
+            displacedActor.onTrafficReservationYielded?.({
+                by: actor,
+                nodeId,
+                type: "physical-arrival"
+            });
+
+        }
 
     }
 
@@ -762,14 +1340,17 @@ export class NavigationTrafficSystem {
 
     getDebugState(actor) {
 
-        const entry = this.departures.getActorRequest(actor) ??
-            this.arrivals.getActorRequest(actor);
+        const departure = this.departures.getActorRequest(actor);
+        const arrival = this.arrivals.getActorRequest(actor);
         const wr = this.waitReasons.get(actor);
 
         return {
-            queue: entry,
+            departure,
+            arrival,
             waitReason: wr
-                ? `${wr.reason} @ ${wr.resourceId}`
+                ? `${wr.reason} @ ${wr.resourceId} ` +
+                    `(${wr.elapsed.toFixed(1)}s, timeout ${wr.timeoutCount})` +
+                    (wr.blocker ? ` ← ${wr.blocker.name}` : "")
                 : null
         };
 

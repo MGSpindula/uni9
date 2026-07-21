@@ -2,6 +2,9 @@ import * as THREE from "three";
 
 // Navigation authored for this level. Future environments can provide another
 // module with the same configure(graph) contract without changing Scene.
+// graph.addNode("junction", position, {
+//     laneRadius: 2.2
+// });
 export function configureCozyCampusNavigation(graph) {
 
     const nodes = [
@@ -10,7 +13,7 @@ export function configureCozyCampusNavigation(graph) {
         ["north-2", new THREE.Vector3(2, 0, -3)],
         ["junction", new THREE.Vector3(0, 0, 0)],
         ["west-exit", new THREE.Vector3(-7, 0, 6)],
-        ["west-1", new THREE.Vector3(3, 0, 7)],
+        ["west-1", new THREE.Vector3(3, 0, 7), {laneRadius: 3}],
         ["west-2", new THREE.Vector3(-3, 0, 8.5)],
         ["west-3", new THREE.Vector3(-8.5, 0, 1)],
         ["east-exit", new THREE.Vector3(7.3, 0, 7)],
@@ -50,6 +53,22 @@ export function configureCozyCampusNavigation(graph) {
     connect("west-3", "west-exit");
     connect("junction", "west-exit");
 
+    // Manual lane portal offsets. Uncomment and tune these when one specific
+    // endpoint needs more room for a smooth curve. The key is the node at
+    // that end of the connection; values are world units from its center.
+    //
+    // connect("junction", "west-1", {
+    //     metadata: {
+    //         portalOffsets: {
+    //             junction: 2.2,
+    //             "west-1": 1.4
+    //         }
+    //     }
+    // });
+    //
+    // Runtime/debug alternative:
+    // graph.setConnectionPortalOffset("junction", "west-1", "junction", 2.2);
+
     // Height prototype. Traversal metadata will later select slope/stairs
     // animation clips without changing the route or Locomotion contracts.
     connect("north-2", "slope-north-bottom", {
@@ -73,5 +92,7 @@ export function configureCozyCampusNavigation(graph) {
 
     // Level-authored hard block used by the current prototype.
     graph.setConnectionBlocked("spawn", "junction", true);
+
+    // graph.setNodeBlocked("west-1", true);
 
 }

@@ -15,7 +15,9 @@ export class InteractionQuery {
         interactionId = null,
         tags = [],
         available = true,
-        excludePoint = null
+        excludePoint = null,
+        excludePoints = [],
+        excludePointIds = []
     }) {
 
         if (!actor?.object3D) {
@@ -53,7 +55,9 @@ export class InteractionQuery {
 
                 if (
                     definition.point ===
-                    excludePoint
+                    excludePoint ||
+                    excludePoints.includes(definition.point) ||
+                    excludePointIds.includes(definition.point.id)
                 ) {
 
                     continue;

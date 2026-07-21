@@ -33,6 +33,7 @@ export class NavigationGraphHelper extends THREE.Group {
         this.interactionMarkers = new Map();
         this.highlightedInteractionPointId = null;
         this.isVisible = true;
+        this.activeLaneCurveRevision = -1;
 
         this.refresh();
 
@@ -121,6 +122,11 @@ export class NavigationGraphHelper extends THREE.Group {
             occupied: [],
             reserved: []
         };
+        const lanePortalPoints = {
+            start: [],
+            end: []
+        };
+        const lanePortalTransitions = [];
         const renderedConnections = new Set();
 
         for (const node of this.graph.nodes.values()) {
@@ -167,6 +173,35 @@ export class NavigationGraphHelper extends THREE.Group {
                     start.y += this.height;
                     end.y += this.height;
 
+                    // The full lane reaches a node through these portals,
+                    // rather than through its exact center. Keeping them
+                    // visible makes laneRadius and the curve handoff editable.
+                    const laneStart = this.graph
+                        .getConnectionLaneNodePosition(
+                            connection.fromId,
+                            connection.fromId,
+                            connection.toId,
+                            lane.index
+                        )
+                        .add(new THREE.Vector3(0, this.height + 0.025, 0));
+                    const laneEnd = this.graph
+                        .getConnectionLaneNodePosition(
+                            connection.toId,
+                            connection.fromId,
+                            connection.toId,
+                            lane.index
+                        )
+                        .add(new THREE.Vector3(0, this.height + 0.025, 0));
+
+                    lanePortalPoints.start.push(laneStart);
+                    lanePortalPoints.end.push(laneEnd);
+                    lanePortalTransitions.push(
+                        start.clone().add(new THREE.Vector3(0, 0.01, 0)),
+                        laneStart.clone(),
+                        laneEnd.clone(),
+                        end.clone().add(new THREE.Vector3(0, 0.01, 0))
+                    );
+
                     const status = connection.blocked ||
                         reverseConnection?.blocked
                         ? "blocked"
@@ -190,19 +225,206 @@ export class NavigationGraphHelper extends THREE.Group {
         this.addEdges(edgePoints.blocked, this.blockedColor, "Blocked");
         this.addEdges(edgePoints.occupied, this.occupiedColor, "Occupied");
         this.addEdges(edgePoints.reserved, this.reservedColor, "Reserved");
+        this.addEdges(
+            lanePortalTransitions,
+            0x8794aa,
+            "LanePortalTransitions"
+        );
+        this.addLanePortalMarkers(lanePortalPoints);
         this.addActiveLaneCurves();
+        this.activeLaneCurveRevision =
+            this.graph.activeLaneCurveRevision ?? 0;
         this.addInteractionPoints();
         this.addGeneratedAccessAnchors();
 
     }
 
+    refreshDynamic() {
+
+        if (!this.isVisible) return;
+
+        // Runtime traffic changes do not alter graph geometry. Update the few
+        // mutable presentations in place and preserve expensive canvas labels,
+        // textures, selection circles, lane portals and generated anchors.
+        this.refreshTrafficEdges();
+        this.refreshNodePresentation();
+        this.refreshInteractionPresentation();
+        this.refreshActiveLaneCurves();
+
+    }
+
+    refreshTrafficEdges() {
+
+        const names = new Set([
+            "NavigationEdges:Free",
+            "NavigationEdges:Blocked",
+            "NavigationEdges:Occupied",
+            "NavigationEdges:Reserved"
+        ]);
+
+        this.removeChildren(child => names.has(child.name));
+
+        const edgePoints = {
+            free: [],
+            blocked: [],
+            occupied: [],
+            reserved: []
+        };
+        const renderedConnections = new Set();
+
+        for (const node of this.graph.nodes.values()) {
+
+            for (const neighborId of node.connections.keys()) {
+
+                const connectionId = [node.id, neighborId].sort().join(":");
+                if (renderedConnections.has(connectionId)) continue;
+
+                const connection = node.connections.get(neighborId);
+                const startNode = this.graph.requireNode(connection.fromId);
+                const endNode = this.graph.requireNode(connection.toId);
+                const deltaX = endNode.position.x - startNode.position.x;
+                const deltaZ = endNode.position.z - startNode.position.z;
+                const length = Math.hypot(deltaX, deltaZ) || 1;
+                const sideX = deltaZ / length;
+                const sideZ = -deltaX / length;
+
+                for (const lane of connection.lanes) {
+
+                    const center = (connection.lanes.length - 1) * 0.5;
+                    const offset = (lane.index - center) * connection.laneWidth;
+                    const start = startNode.position.clone();
+                    const end = endNode.position.clone();
+
+                    start.x += sideX * offset;
+                    start.z += sideZ * offset;
+                    end.x += sideX * offset;
+                    end.z += sideZ * offset;
+                    start.y += this.height;
+                    end.y += this.height;
+
+                    const status = connection.blocked
+                        ? "blocked"
+                        : lane.occupants.size > 0
+                            ? "occupied"
+                            : lane.reservations.size > 0
+                                ? "reserved"
+                                : "free";
+
+                    edgePoints[status].push(start, end);
+
+                }
+
+                renderedConnections.add(connectionId);
+
+            }
+
+        }
+
+        this.addEdges(edgePoints.free, this.edgeColor, "Free");
+        this.addEdges(edgePoints.blocked, this.blockedColor, "Blocked");
+        this.addEdges(edgePoints.occupied, this.occupiedColor, "Occupied");
+        this.addEdges(edgePoints.reserved, this.reservedColor, "Reserved");
+
+    }
+
+    refreshNodePresentation() {
+
+        for (const [id, marker] of this.markers) {
+
+            const node = this.graph.requireNode(id);
+            marker.material.color.set(this.getNodeColor(
+                node,
+                id === this.highlightedNodeId
+            ));
+
+            const label = this.getObjectByName(`NavigationLabel:${id}`);
+            const key = this.getNodePresentationKey(node);
+
+            if (label && label.userData.presentationKey !== key) {
+
+                this.replaceChild(label, this.createLabel(node));
+
+            }
+
+        }
+
+    }
+
+    refreshInteractionPresentation() {
+
+        if (!this.connector) return;
+
+        for (const [id, marker] of this.interactionMarkers) {
+
+            const point = this.connector.points.get(id);
+            if (!point) continue;
+
+            marker.material.color.set(this.getInteractionColor(point));
+
+            const label = this.getObjectByName(`InteractionLabel:${id}`);
+            const key = this.getInteractionPresentationKey(point);
+
+            if (label && label.userData.presentationKey !== key) {
+
+                this.replaceChild(label, this.createInteractionLabel(point));
+
+            }
+
+        }
+
+    }
+
+    refreshActiveLaneCurves() {
+
+        const revision = this.graph.activeLaneCurveRevision ?? 0;
+        if (revision === this.activeLaneCurveRevision) return;
+
+        this.removeChildren(child =>
+            child.name.endsWith(":NavigationSpline") ||
+            child.name.endsWith(":NavigationSplineDirection")
+        );
+        this.addActiveLaneCurves();
+        this.activeLaneCurveRevision = revision;
+
+    }
+
+    addLanePortalMarkers({ start, end }) {
+
+        // Green marks the canonical lane start; pink marks its end. Canonical
+        // direction is connection.fromId -> connection.toId.
+        this.addPortalPoints(start, 0x66ff99, "LaneStartPoints");
+        this.addPortalPoints(end, 0xff6b9a, "LaneEndPoints");
+
+    }
+
+    addPortalPoints(points, color, name) {
+
+        if (points.length === 0) return;
+
+        const markers = new THREE.Points(
+            new THREE.BufferGeometry().setFromPoints(points),
+            new THREE.PointsMaterial({
+                color,
+                size: this.nodeSize * 1.35,
+                sizeAttenuation: false,
+                depthTest: false
+            })
+        );
+
+        markers.name = name;
+        markers.renderOrder = 1001;
+        markers.raycast = () => {};
+        this.add(markers);
+
+    }
+
     addActiveLaneCurves() {
 
-        const curveColor = 0x33ffff;
-
-        for (const points of this.graph.activeLaneCurves.values()) {
+        for (const [actor, points] of this.graph.activeLaneCurves) {
 
             if (points.length < 2) continue;
+
+            const curveColor = this.getActorCurveColor(actor);
 
             const curvePoints = points.map(point => {
 
@@ -212,8 +434,9 @@ export class NavigationGraphHelper extends THREE.Group {
 
             });
 
-            // Render the sampled Bezier path as one continuous line. The graph
-            // stores the samples because they are also consumed as waypoints.
+            // This is the actor's complete active spline, sampled densely for
+            // debugging. Its color matches the actor so simultaneous routes
+            // remain readable.
             const curve = new THREE.Line(
                 new THREE.BufferGeometry().setFromPoints(curvePoints),
                 new THREE.LineBasicMaterial({
@@ -221,30 +444,15 @@ export class NavigationGraphHelper extends THREE.Group {
                     depthTest: false
                 })
             );
-            curve.name = "NavigationBezierCurve";
+            curve.name = `${actor.name}:NavigationSpline`;
             curve.renderOrder = 1001;
             curve.raycast = () => {};
             this.add(curve);
 
-            // Keep the samples visible so authored lane transitions and
-            // collision-rebuilt curves can be inspected precisely.
-            const sampleMarkers = new THREE.Points(
-                new THREE.BufferGeometry().setFromPoints(curvePoints),
-                new THREE.PointsMaterial({
-                    color: 0xffffff,
-                    size: this.nodeSize * 0.7,
-                    sizeAttenuation: false,
-                    depthTest: false
-                })
-            );
-            sampleMarkers.name = "NavigationBezierSamples";
-            sampleMarkers.renderOrder = 1002;
-            sampleMarkers.raycast = () => {};
-            this.add(sampleMarkers);
-
             const start = curvePoints[0];
             const end = curvePoints[curvePoints.length - 1];
-            const direction = end.clone().sub(start);
+            const previous = curvePoints[curvePoints.length - 2] ?? start;
+            const direction = end.clone().sub(previous);
             direction.y = 0;
 
             if (direction.lengthSq() > 0.0001) {
@@ -257,7 +465,7 @@ export class NavigationGraphHelper extends THREE.Group {
                     0.12,
                     0.08
                 );
-                arrow.name = "NavigationBezierDirection";
+                arrow.name = `${actor.name}:NavigationSplineDirection`;
                 arrow.line.raycast = () => {};
                 arrow.cone.raycast = () => {};
                 this.add(arrow);
@@ -265,6 +473,23 @@ export class NavigationGraphHelper extends THREE.Group {
             }
 
         }
+
+    }
+
+    getActorCurveColor(actor) {
+
+        let color = null;
+
+        actor.visual?.traverse?.(object => {
+
+            if (color || !object.material?.color) return;
+            color = object.material.color;
+
+        });
+
+        return color
+            ? color.clone().lerp(new THREE.Color(0xffffff), 0.38).getHex()
+            : 0x66ffff;
 
     }
 
@@ -348,20 +573,10 @@ export class NavigationGraphHelper extends THREE.Group {
             this.connector.connect(point, { silent: true });
 
             const worldPosition = point.getWorldPosition();
-            const highlighted =
-                point.id === this.highlightedInteractionPointId;
             const marker = new THREE.Mesh(
                 new THREE.SphereGeometry(this.nodeSize * 1.4, 12, 8),
                 new THREE.MeshBasicMaterial({
-                    color: highlighted
-                        ? 0x33ff66
-                        : point.occupants.size > 0
-                        ? this.occupiedColor
-                        : point.reservations.size > 0
-                            ? this.reservedColor
-                        : point.connection
-                            ? 0xff55dd
-                            : 0x777777,
+                    color: this.getInteractionColor(point),
                     depthTest: false
                 })
             );
@@ -481,6 +696,8 @@ export class NavigationGraphHelper extends THREE.Group {
         label.scale.set(3.1, 0.55, 1);
         label.renderOrder = 1003;
         label.raycast = () => {};
+        label.userData.presentationKey =
+            this.getInteractionPresentationKey(point);
 
         return label;
 
@@ -517,6 +734,39 @@ export class NavigationGraphHelper extends THREE.Group {
         }
 
         return this.nodeColor;
+
+    }
+
+    getInteractionColor(point) {
+
+        if (point.id === this.highlightedInteractionPointId) return 0x33ff66;
+        if (point.occupants.size > 0) return this.occupiedColor;
+        if (point.reservations.size > 0) return this.reservedColor;
+        return point.connection ? 0xff55dd : 0x777777;
+
+    }
+
+    getNodePresentationKey(node) {
+
+        return [
+            node.blocked,
+            node.occupants.size,
+            node.reservations.size,
+            node.transitReservations.size,
+            this.graph.isNodePassable(node.id),
+            node.id === this.highlightedNodeId
+        ].join(":");
+
+    }
+
+    getInteractionPresentationKey(point) {
+
+        return [
+            point.occupants.size,
+            point.reservations.size,
+            Boolean(point.connection),
+            point.id === this.highlightedInteractionPointId
+        ].join(":");
 
     }
 
@@ -625,6 +875,7 @@ export class NavigationGraphHelper extends THREE.Group {
         label.scale.set(2, 0.5, 1);
         label.renderOrder = 1001;
         label.raycast = () => {};
+        label.userData.presentationKey = this.getNodePresentationKey(node);
 
         return label;
 
@@ -645,13 +896,16 @@ export class NavigationGraphHelper extends THREE.Group {
 
         }
 
+        this.refreshNodePresentation();
+
     }
 
     highlightInteractionPoint(id) {
 
         this.highlightedNodeId = null;
         this.highlightedInteractionPointId = id;
-        this.refresh();
+        this.refreshNodePresentation();
+        this.refreshInteractionPresentation();
 
     }
 
@@ -659,15 +913,53 @@ export class NavigationGraphHelper extends THREE.Group {
     // Lifecycle
     // -----------------------------
 
-    disposeChildren() {
+    replaceChild(current, replacement) {
 
-        for (const child of this.children) {
+        this.remove(current);
+        this.disposeObject(current);
+        this.add(replacement);
 
-            child.geometry?.dispose();
-            child.material?.map?.dispose();
-            child.material?.dispose();
+    }
+
+    removeChildren(predicate) {
+
+        for (const child of [...this.children]) {
+
+            if (!predicate(child)) continue;
+
+            this.remove(child);
+            this.disposeObject(child);
 
         }
+
+    }
+
+    disposeObject(object) {
+
+        object.traverse(candidate => {
+
+            candidate.geometry?.dispose();
+
+            const materials = Array.isArray(candidate.material)
+                ? candidate.material
+                : candidate.material
+                    ? [candidate.material]
+                    : [];
+
+            for (const material of materials) {
+
+                material.map?.dispose();
+                material.dispose();
+
+            }
+
+        });
+
+    }
+
+    disposeChildren() {
+
+        for (const child of this.children) this.disposeObject(child);
 
         this.clear();
 

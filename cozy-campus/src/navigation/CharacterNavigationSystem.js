@@ -6,6 +6,7 @@ import { InteractionNavigation } from "./InteractionNavigation";
 import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
 import { PhysicsWorld } from "../physics/PhysicsWorld";
 import { WaitReason } from "./WaitReason";
+import { RouteSpline } from "./RouteSpline";
 import * as THREE from "three";
 
 export class CharacterNavigationSystem {
@@ -44,9 +45,19 @@ export class CharacterNavigationSystem {
             destinationId: null,
             pendingInteraction: null,
             interactionPoint: null,
+            // During action -> approach -> graph, the actor physically uses
+            // the approach while the original action must remain occupied.
+            // Both are released only after crossing leavingInteraction.
+            interactionExitPoint: null,
             activeInteraction: null,
             preparingInteraction: false,
             preparingInteractionExit: false,
+            // True after exit traffic has been secured. From this moment the
+            // action -> approach -> graph transition is transactional: route
+            // recovery may change the later target, but cannot abandon the
+            // physical return to the graph halfway through.
+            interactionExitCommitted: false,
+            interactionExitElapsed: 0,
             retryElapsed: 0,
             blockedElapsed: null,
             blockedTimeout: 3,
@@ -63,15 +74,8 @@ export class CharacterNavigationSystem {
             recoveryElapsed: 0,
             recoveryTimeout: actor.name === "Player" ? 8 : 3,
             recoveryPosition: actor.object3D.position.clone(),
-            orphanedElapsed: 0,
-            queueWaitElapsed: 0,
-            queueWaitTimeout:
-                actor.navigationIntentPolicy ===
-                    "persistent"
-                    ? Infinity
-                    : 2,
-            congestionEscaping: false,
-            congestionAttempts: 0
+            collisionWaitElapsed: 0,
+            orphanedElapsed: 0
         };
 
         this.contexts.set(actor, context);
@@ -121,8 +125,12 @@ export class CharacterNavigationSystem {
             this.refresh();
 
         });
-        actor.setMovementGuard((target, _delta) =>
-            this.collisionFailsafe.canMove(actor, target)
+        actor.setMovementGuard((target, delta) =>
+            this.collisionFailsafe.canMove(
+                actor,
+                target,
+                delta
+            )
         );
         this.physics.registerActor(actor);
 
@@ -183,7 +191,8 @@ export class CharacterNavigationSystem {
         replaceIntent = true,
         skipTurnaround = false,
         skipInteractionExit = false,
-        maxDetourFactor = 1.5
+        maxDetourFactor = 3,
+        preparedCandidate = null
     } = {}) {
 
         const context = this.requireContext(actor);
@@ -200,6 +209,18 @@ export class CharacterNavigationSystem {
 
         }
 
+        if (context.preparingInteraction) {
+
+            // Do not interrupt an authored entry animation. The newest
+            // command starts after the current action has actually arrived.
+            context.deferredCommand = {
+                type: "node",
+                position: position.clone()
+            };
+            return true;
+
+        }
+
         if (context.turningAround) {
 
             context.deferredCommand = {
@@ -210,7 +231,10 @@ export class CharacterNavigationSystem {
 
         }
 
-        const candidate = this.findBestPlan(
+        // Interaction exit already validated this exact plan before its
+        // animation began. Reusing it avoids a second, transient planning
+        // decision cancelling the lane that made the exit safe to start.
+        const candidate = preparedCandidate ?? this.findBestPlan(
             context,
             position,
             maxDetourFactor
@@ -224,16 +248,23 @@ export class CharacterNavigationSystem {
 
         }
 
-        const originIndex = candidate.plan.nodeIds.indexOf(
-            candidate.originId
+        const exitTraversal = this.resolveInteractionExitTraversal(
+            context,
+            candidate.originId,
+            candidate.plan.nodeIds
         );
-        const nextNodeId = candidate.plan.nodeIds[originIndex + 1] ?? null;
+        const routeOriginId = exitTraversal.exitNodeId;
+        const routeNodeIds = exitTraversal.nodeIds;
+        const nextNodeId = routeNodeIds[1] ?? null;
 
         if (!skipInteractionExit && context.activeInteraction) {
 
             this.beginInteractionExit(context, {
                 type: "node",
-                position: position.clone()
+                position: position.clone(),
+                originId: routeOriginId,
+                preparedCandidate: candidate,
+                intentPrepared: true
             });
             return true;
 
@@ -249,7 +280,7 @@ export class CharacterNavigationSystem {
 
             if (!this.traffic.preflightDeparture(
                 actor,
-                candidate.originId,
+                routeOriginId,
                 nextNodeId
             )) {
 
@@ -275,14 +306,24 @@ export class CharacterNavigationSystem {
         context.retryElapsed = 0;
         context.blockedElapsed = null;
         context.recoveryPending = false;
-        this.prepareOrigin(context, candidate.originId);
+        this.prepareOrigin(context, routeOriginId, {
+            preserveTrafficReservations: preparedCandidate !== null
+        });
 
+        const exitWaypoints = this.connector.createExitWaypoints(
+            context.interactionPoint,
+            routeOriginId
+        );
+        const entryConnection = exitWaypoints.find(
+            waypoint => waypoint.connectionEntry
+        )?.connectionEntry ?? null;
         const waypoints = [
-            ...this.connector.createExitWaypoints(
-                context.interactionPoint,
-                candidate.originId
-            ),
-            ...this.createTraversalWaypoints(context, candidate.plan.nodeIds)
+            ...exitWaypoints,
+            ...this.createTraversalWaypoints(
+                context,
+                routeNodeIds,
+                { entryConnection }
+            )
         ];
         const traversal = actor.navigation.getTraversalState();
         const alreadyThere =
@@ -301,7 +342,10 @@ export class CharacterNavigationSystem {
 
         }
 
-        actor.followWaypoints(waypoints, {
+        actor.followWaypoints(this.createCompleteRouteSpline(
+            context,
+            waypoints
+        ), {
             waitAtEnd: candidate.plan.status === "waiting"
         });
 
@@ -312,10 +356,31 @@ export class CharacterNavigationSystem {
     moveToInteractionPoint(actor, point, onArrive = null, {
         replaceIntent = true,
         skipTurnaround = false,
-        skipInteractionExit = false
+        skipInteractionExit = false,
+        preparedRouteCandidate = null
     } = {}) {
 
         const context = this.requireContext(actor);
+
+        // Requesting the InteractionPoint that is already active is a
+        // completed command, not a route with identical origin/destination.
+        // This also protects autonomous behavior from re-enqueuing its current
+        // ambient action while the controller is between decisions.
+        if (context.activeInteraction?.point === point) return true;
+
+        // Traffic/collision recovery can remove topology ownership while the
+        // physical body has already reached its authored mark. Finish that
+        // arrival locally instead of inventing a graph origin and producing a
+        // spline that walks back to its beginning before returning here.
+        if (this.isActorAtInteractionPoint(actor, point)) {
+
+            return this.completeInteractionAtCurrentPosition(
+                context,
+                point,
+                onArrive
+            );
+
+        }
 
         // Pointer commands must survive failed preflight checks. The queue may
         // suspend this interaction, but only a newer Player command replaces it.
@@ -325,6 +390,17 @@ export class CharacterNavigationSystem {
             context.pendingInteraction = { point, onArrive };
             context.destinationId = null;
             context.retryElapsed = 0;
+
+        }
+
+        if (context.preparingInteraction) {
+
+            context.deferredCommand = {
+                type: "interaction",
+                point,
+                onArrive
+            };
+            return true;
 
         }
 
@@ -359,10 +435,35 @@ export class CharacterNavigationSystem {
             context.activeInteraction &&
             context.activeInteraction.point !== point) {
 
+            const routeCandidate = this.findInteractionRouteCandidate(
+                context,
+                point
+            );
+
+            if (!routeCandidate ||
+                !this.connector.reserveRoutePoints(
+                    routeCandidate.route,
+                    actor
+                )) {
+
+                this.deferPersistentIntent(context);
+                return false;
+
+            }
+
+            const exitTraversal = this.resolveInteractionExitTraversal(
+                context,
+                routeCandidate.origin.id,
+                this.getGraphWaypointIds(routeCandidate.route.waypoints)
+            );
+
             this.beginInteractionExit(context, {
                 type: "interaction",
                 point,
-                onArrive
+                onArrive,
+                originId: exitTraversal.exitNodeId,
+                preparedRouteCandidate: routeCandidate,
+                intentPrepared: true
             });
             return true;
 
@@ -401,6 +502,47 @@ export class CharacterNavigationSystem {
 
         if (replaceIntent) this.traffic.cancel(actor);
 
+        if (preparedRouteCandidate) {
+
+            const candidate = preparedRouteCandidate;
+            const exitTraversal = this.resolveInteractionExitTraversal(
+                context,
+                candidate.origin.id,
+                this.getGraphWaypointIds(candidate.route.waypoints)
+            );
+            const routeWaypoints = exitTraversal.skippedOrigin
+                ? candidate.route.waypoints.slice(1)
+                : candidate.route.waypoints;
+
+            this.prepareOrigin(context, exitTraversal.exitNodeId, {
+                preserveTrafficReservations: true
+            });
+            this.interactions.beginRoute(context, point, onArrive);
+            this.helper?.highlightInteractionPoint(point.id);
+            const remainingRouteWaypoints = this.omitCurrentNodeWaypoint(
+                context,
+                routeWaypoints
+            );
+            const exitWaypoints = this.connector.createExitWaypoints(
+                context.interactionPoint,
+                exitTraversal.exitNodeId
+            );
+            const completeWaypoints = [
+                ...exitWaypoints,
+                ...this.applyRouteSplineToGraphPrefix(
+                    context,
+                    remainingRouteWaypoints,
+                    exitWaypoints
+                )
+            ];
+            actor.followWaypoints(this.createCompleteRouteSpline(
+                context,
+                completeWaypoints
+            ));
+            return true;
+
+        }
+
         const directRoute = this.interactions.createDirectConnectionRoute(actor, point);
 
         if (directRoute) {
@@ -413,27 +555,22 @@ export class CharacterNavigationSystem {
 
             this.interactions.beginRoute(context, point, onArrive);
             this.helper?.highlightInteractionPoint(point.id);
-            actor.followWaypoints(directRoute.waypoints);
+            actor.followWaypoints(this.createCompleteRouteSpline(
+                context,
+                directRoute.waypoints
+            ));
             return true;
 
         }
 
-        const routes = this.getOrigins(context)
-            .sort((first, second) => first.accessCost - second.accessCost)
-            .map(origin => ({
-                origin,
-                route: this.connector.createRoute(point, origin.id, actor)
-            }))
-            .filter(candidate => candidate.route);
+        const candidate = this.findInteractionRouteCandidate(context, point);
 
-        if (routes.length === 0) {
+        if (!candidate) {
 
             this.deferPersistentIntent(context);
             return false;
 
         }
-
-        const candidate = routes[0];
 
         if (!this.connector.reserveRoutePoints(candidate.route, actor)) {
 
@@ -441,24 +578,113 @@ export class CharacterNavigationSystem {
             return false;
         }
 
-        this.prepareOrigin(context, candidate.origin.id);
+        const exitTraversal = this.resolveInteractionExitTraversal(
+            context,
+            candidate.origin.id,
+            this.getGraphWaypointIds(candidate.route.waypoints)
+        );
+        const optimizedRouteWaypoints = exitTraversal.skippedOrigin
+            ? candidate.route.waypoints.slice(1)
+            : candidate.route.waypoints;
+
+        this.prepareOrigin(context, exitTraversal.exitNodeId);
         this.interactions.beginRoute(context, point, onArrive);
         this.helper?.highlightInteractionPoint(point.id);
-        actor.followWaypoints([
-            ...this.connector.createExitWaypoints(
-                context.interactionPoint,
-                candidate.origin.id
-            ),
-            ...this.omitCurrentNodeWaypoint(context, candidate.route.waypoints)
-        ]);
+        const routeWaypoints = this.omitCurrentNodeWaypoint(
+            context,
+            optimizedRouteWaypoints
+        );
+        const exitWaypoints = this.connector.createExitWaypoints(
+            context.interactionPoint,
+            exitTraversal.exitNodeId
+        );
+        const completeWaypoints = [
+            ...exitWaypoints,
+            ...this.applyRouteSplineToGraphPrefix(
+                context,
+                routeWaypoints,
+                exitWaypoints
+            )
+        ];
+        actor.followWaypoints(this.createCompleteRouteSpline(
+            context,
+            completeWaypoints
+        ));
 
         return true;
+
+    }
+
+    findInteractionRouteCandidate(context, point) {
+
+        return this.getOrigins(context)
+            .sort((first, second) => first.accessCost - second.accessCost)
+            .map(origin => ({
+                origin,
+                route: this.connector.createRoute(
+                    point,
+                    origin.id,
+                    context.actor
+                )
+            }))
+            .find(candidate => candidate.route) ?? null;
 
     }
 
     // -----------------------------
     // Planning
     // -----------------------------
+
+    getGraphWaypointIds(waypoints) {
+
+        const nodeIds = [];
+
+        for (const waypoint of waypoints) {
+
+            if (!waypoint.id) break;
+            nodeIds.push(waypoint.id);
+
+        }
+
+        return nodeIds;
+
+    }
+
+    resolveInteractionExitTraversal(context, originId, nodeIds) {
+
+        const unchanged = {
+            exitNodeId: originId,
+            nodeIds,
+            skippedOrigin: false
+        };
+
+        if (!context.interactionPoint ||
+            nodeIds.length < 2 ||
+            nodeIds[0] !== originId) return unchanged;
+
+        const accessPoint = context.interactionPoint.via ??
+            context.interactionPoint;
+        const access = this.connector.connect(accessPoint, { silent: true });
+        const segmentNodeIds = access?.segmentNodeIds ?? access?.nodeIds;
+        const nextNodeId = nodeIds[1];
+        const crossesAccessSegment = segmentNodeIds?.length === 2 &&
+            segmentNodeIds.includes(originId) &&
+            segmentNodeIds.includes(nextNodeId);
+
+        if (!crossesAccessSegment) return unchanged;
+
+        // The generated approach portal already lies inside this connection.
+        // Going to originId first and immediately traversing the same segment
+        // back to nextNodeId would mean portal -> lane start -> portal -> lane
+        // end. Treat the approach portal as the physical start of this first
+        // connection and proceed directly to its intended endpoint instead.
+        return {
+            exitNodeId: nextNodeId,
+            nodeIds: nodeIds.slice(1),
+            skippedOrigin: true
+        };
+
+    }
 
     findInteractionPreflight(context, point) {
 
@@ -499,10 +725,10 @@ export class CharacterNavigationSystem {
 
             for (const endpointId of access.nodeIds) {
 
-                const path = this.graph.findShortestPath(
+                const path = this.graph.findPreferredPath(
                     originId,
                     endpointId,
-                    { agent: context.actor, avoidOccupied: false }
+                    context.actor
                 );
 
                 if (path) candidates.push({ originId, path });
@@ -524,7 +750,7 @@ export class CharacterNavigationSystem {
 
     }
 
-    findBestPlan(context, position, maxDetourFactor = 1.5) {
+    findBestPlan(context, position, maxDetourFactor = 3) {
 
         const candidates = this.getOrigins(context)
             .map(origin => ({
@@ -601,7 +827,9 @@ export class CharacterNavigationSystem {
 
     }
 
-    prepareOrigin(context, originId) {
+    prepareOrigin(context, originId, {
+        preserveTrafficReservations = false
+    } = {}) {
 
         const {
             actor,
@@ -639,9 +867,13 @@ export class CharacterNavigationSystem {
          * tryEnterFromInteraction(), que reserva a lane e
          * o endpoint apropriados.
          */
-        this.graph.releaseReservations(
-            actor
-        );
+        if (!preserveTrafficReservations) {
+
+            this.graph.releaseReservations(
+                actor
+            );
+
+        }
 
         actor.navigation.setCurrentNode(
             null
@@ -651,16 +883,520 @@ export class CharacterNavigationSystem {
 
     }
 
-    createTraversalWaypoints(context, nodeIds) {
+    createTraversalWaypoints(context, nodeIds, {
+        entryConnection = null
+    } = {}) {
 
         const traversal = context.actor.navigation.getTraversalState();
         const startsAtCurrentNode =
             !context.interactionPoint &&
             traversal.currentNodeId === nodeIds[0];
-
-        return this.graph.createWaypoints(
-            startsAtCurrentNode ? nodeIds.slice(1) : nodeIds
+        const startsAfterDirectInteractionExit =
+            context.interactionPoint !== null && !entryConnection;
+        const startsOnCurrentConnection =
+            (entryConnection ?? traversal.currentConnection) !== null &&
+            (
+                (entryConnection ?? traversal.currentConnection).fromId ===
+                    nodeIds[0] ||
+                (entryConnection ?? traversal.currentConnection).toId ===
+                    nodeIds[0]
+            );
+        const originAlreadyRepresented =
+            startsAtCurrentNode || startsAfterDirectInteractionExit;
+        const ordinaryWaypoints = this.graph.createWaypoints(
+            originAlreadyRepresented ? nodeIds.slice(1) : nodeIds
         );
+
+        if (startsOnCurrentConnection) {
+
+            return this.createRouteSplineWaypoints(
+                context,
+                nodeIds,
+                ordinaryWaypoints,
+                {
+                    entryConnection:
+                        entryConnection ?? traversal.currentConnection
+                }
+            );
+
+        }
+
+        if (!originAlreadyRepresented || nodeIds.length < 2) {
+
+            return ordinaryWaypoints;
+
+        }
+
+        return this.createRouteSplineWaypoints(
+            context,
+            nodeIds,
+            ordinaryWaypoints
+        );
+
+    }
+
+    createRouteSplineWaypoints(context, nodeIds, waypoints, {
+        entryConnection = null
+    } = {}) {
+
+        const { actor } = context;
+        const anchors = [actor.object3D.position.clone()];
+        const markers = [];
+
+        const pushAnchor = position => {
+
+            const previous = anchors.at(-1);
+
+            if (previous.distanceToSquared(position) <= 0.000001) {
+
+                return anchors.length - 1;
+
+            }
+
+            anchors.push(position.clone());
+            return anchors.length - 1;
+
+        };
+
+        if (entryConnection) {
+
+            const originId = nodeIds[0];
+
+            if (entryConnection.fromId !== originId &&
+                entryConnection.toId !== originId) {
+
+                return waypoints;
+
+            }
+
+            const connection = this.graph.requireConnection(
+                entryConnection.fromId,
+                entryConnection.toId
+            );
+            const sameDirection =
+                connection.fromId === entryConnection.fromId;
+            const preferredLaneIndex = sameDirection ? 0 : 1;
+            // Interaction exits already selected the lane from the authored
+            // side of the approach. Never recalculate it from the connection's
+            // canonical order: doing so puts the portal on one lane and the
+            // following spline endpoint on the other, producing a loop.
+            const laneIndex = Number.isInteger(entryConnection.laneIndex)
+                ? entryConnection.laneIndex
+                : this.graph.getConnectionLaneIndex(
+                    entryConnection.fromId,
+                    entryConnection.toId,
+                    actor
+                ) ?? preferredLaneIndex;
+            const endpoint = this.graph.getConnectionLaneNodePosition(
+                originId,
+                entryConnection.fromId,
+                entryConnection.toId,
+                laneIndex
+            );
+
+            markers.push({
+                nodeId: originId,
+                anchorIndex: pushAnchor(endpoint),
+                laneIndex,
+                position: endpoint.clone()
+            });
+
+        }
+
+        for (let index = 0; index < nodeIds.length - 1; index++) {
+
+            const fromId = nodeIds[index];
+            const toId = nodeIds[index + 1];
+            const connection = this.graph.requireConnection(fromId, toId);
+            const sameDirection = connection.fromId === fromId;
+            // Lane A is the right lane in the connection's canonical
+            // direction; reverse travel uses lane B as its right lane.
+            const preferredLaneIndex = sameDirection ? 0 : 1;
+            // Build the complete spline through a currently usable lane when
+            // possible. Traffic still performs the authoritative reservation
+            // immediately before entry and may make the actor wait/replan.
+            const laneIndex = this.graph.findAvailableLaneIndex(
+                connection,
+                fromId,
+                toId,
+                actor
+            ) ?? preferredLaneIndex;
+            const laneStart = this.graph.getConnectionLaneNodePosition(
+                fromId,
+                fromId,
+                toId,
+                laneIndex
+            );
+            const laneEnd = this.graph.getConnectionLaneNodePosition(
+                toId,
+                fromId,
+                toId,
+                laneIndex
+            );
+
+            // Both portals are mandatory interpolation anchors. RouteSpline
+            // crosses them exactly; they are not control handles that the
+            // curve is allowed to cut around.
+            pushAnchor(laneStart);
+            const endpointAnchorIndex = pushAnchor(laneEnd);
+
+            markers.push({
+                nodeId: toId,
+                anchorIndex: endpointAnchorIndex,
+                laneIndex,
+                position: laneEnd.clone()
+            });
+
+        }
+
+        if (anchors.length < 2 || markers.length !== waypoints.length) {
+
+            return waypoints;
+
+        }
+
+        const curve = new RouteSpline(anchors);
+        curve.updateArcLengths();
+        const debugPoints = curve.getDebugPoints(
+            THREE.MathUtils.clamp(anchors.length * 20, 96, 256)
+        );
+
+        return waypoints.map((waypoint, index) => {
+
+            const marker = markers[index];
+            const stopDistance = curve.getDistanceAtAnchor(
+                marker.anchorIndex
+            );
+            const previousMarker = markers[index - 1];
+
+            return {
+                ...waypoint,
+                position: marker.position,
+                routeCurve: curve,
+                routeSpline: true,
+                routeAnchorIndex: marker.anchorIndex,
+                curveStartDistance: previousMarker
+                    ? curve.getDistanceAtAnchor(previousMarker.anchorIndex)
+                    : 0,
+                curveStopDistance: stopDistance,
+                routeCurveFinal: index === waypoints.length - 1,
+                plannedLaneIndex: marker.laneIndex,
+                routeFirstLaneStart: anchors[1]?.clone() ?? null,
+                routeSplinePoints: debugPoints
+            };
+
+        });
+
+    }
+
+    applyRouteSplineToGraphPrefix(context, waypoints, exitWaypoints = []) {
+
+        const currentNodeId = context.actor.navigation
+            .getTraversalState().currentNodeId;
+
+        const graphWaypoints = [];
+
+        for (const waypoint of waypoints) {
+
+            if (!waypoint.id) break;
+            graphWaypoints.push(waypoint);
+
+        }
+
+        if (graphWaypoints.length === 0) return waypoints;
+
+        const remainingWaypoints = waypoints.slice(graphWaypoints.length);
+
+        // createRoute() includes the graph origin as a normal node waypoint.
+        // While leaving an InteractionPoint, createExitWaypoints() already
+        // owns that arrival through its lane portal. Keeping the origin here
+        // would insert the node center between the portal and the next lane.
+        if (context.interactionPoint) {
+
+            const nodeIds = graphWaypoints.map(waypoint => waypoint.id);
+            const entryConnection = exitWaypoints.find(
+                waypoint => waypoint.connectionEntry
+            )?.connectionEntry ?? null;
+
+            if (entryConnection) {
+
+                return [
+                    ...this.createRouteSplineWaypoints(
+                        context,
+                        nodeIds,
+                        graphWaypoints,
+                        { entryConnection }
+                    ),
+                    ...remainingWaypoints
+                ];
+
+            }
+
+            if (nodeIds.length < 2) return remainingWaypoints;
+
+            return [
+                ...this.createRouteSplineWaypoints(
+                    context,
+                    nodeIds,
+                    graphWaypoints.slice(1)
+                ),
+                ...remainingWaypoints
+            ];
+
+        }
+
+        if (!currentNodeId) return waypoints;
+
+        const nodeIds = [
+            currentNodeId,
+            ...graphWaypoints.map(waypoint => waypoint.id)
+        ];
+        const splineWaypoints = this.createRouteSplineWaypoints(
+            context,
+            nodeIds,
+            graphWaypoints
+        );
+
+        return [
+            ...splineWaypoints,
+            ...remainingWaypoints
+        ];
+
+    }
+
+    createCompleteRouteSpline(context, waypoints) {
+
+        if (waypoints.length === 0) return waypoints;
+
+        const anchors = [context.actor.object3D.position.clone()];
+        const markerIndices = [];
+        let importedCurve = null;
+        let importedAnchorIndices = [];
+
+        const pushAnchor = position => {
+
+            if (anchors.at(-1).distanceToSquared(position) <= 0.000001) {
+
+                return anchors.length - 1;
+
+            }
+
+            anchors.push(position.clone());
+            return anchors.length - 1;
+
+        };
+
+        for (let index = 0; index < waypoints.length; index++) {
+
+            const waypoint = waypoints[index];
+
+            // A direct node InteractionPoint has no authored access edge, so
+            // its default portal is the node center. Route context supplies a
+            // better portal: the incoming lane endpoint when entering it.
+            if (waypoint.leavingGraph &&
+                waypoint.departureRequest?.originId &&
+                !waypoint.laneStartPosition) {
+
+                const previous = waypoints[index - 1];
+                const portal = previous?.routeSpline &&
+                    previous.id === waypoint.departureRequest.originId
+                    ? previous.position
+                    : context.actor.navigation
+                        .getTraversalState().currentNodeId ===
+                            waypoint.departureRequest.originId
+                        ? context.actor.object3D.position
+                        : null;
+
+                if (portal) waypoint.position.copy(portal);
+
+            }
+
+            // On the reverse trip, enter that same direct node already at the
+            // first lane start of the outgoing graph route. This removes the
+            // center detour between an ambient point and circulation.
+            if (waypoint.leavingInteraction && waypoint.graphEntryNodeId) {
+
+                const nextRouteWaypoint = waypoints.slice(index + 1).find(
+                    candidate => candidate.routeSpline
+                );
+                const portal = nextRouteWaypoint?.routeFirstLaneStart;
+
+                if (portal) waypoint.position.copy(portal);
+
+            }
+
+        }
+
+        for (let waypointIndex = 0;
+            waypointIndex < waypoints.length;
+            waypointIndex++) {
+
+            const waypoint = waypoints[waypointIndex];
+
+            if (waypoint.connectionEntry) {
+
+                const entry = waypoint.connectionEntry;
+                const connection = this.graph.requireConnection(
+                    entry.fromId,
+                    entry.toId
+                );
+                const preferredLaneIndex =
+                    connection.fromId === entry.fromId ? 0 : 1;
+                const reservedLaneIndex =
+                    this.graph.getConnectionLaneIndex(
+                        entry.fromId,
+                        entry.toId,
+                        context.actor
+                    );
+                const laneIndex = Number.isInteger(waypoint.plannedLaneIndex)
+                    ? waypoint.plannedLaneIndex
+                    : reservedLaneIndex ??
+                        this.graph.findAvailableLaneIndex(
+                            connection,
+                            entry.fromId,
+                            entry.toId,
+                            context.actor
+                        ) ?? preferredLaneIndex;
+                const anchor = entry.anchorId
+                    ? this.connector.anchors.get(entry.anchorId)
+                    : null;
+
+                waypoint.plannedLaneIndex = laneIndex;
+
+                // Geometry and reservation must describe the same lane.
+                // Otherwise a retry could keep waiting for lane A while the
+                // visible spline had already been drawn through free lane B.
+                if (anchor?.lanePositions[laneIndex]) {
+
+                    waypoint.position.copy(anchor.lanePositions[laneIndex]);
+
+                }
+
+            }
+
+            if (waypoint.routeSpline && waypoint.routeCurve?.points) {
+
+                if (importedCurve !== waypoint.routeCurve) {
+
+                    importedCurve = waypoint.routeCurve;
+                    importedAnchorIndices = [anchors.length - 1];
+
+                    for (const point of importedCurve.points.slice(1)) {
+
+                        importedAnchorIndices.push(pushAnchor(point));
+
+                    }
+
+                }
+
+                markerIndices.push(
+                    importedAnchorIndices[waypoint.routeAnchorIndex]
+                );
+                continue;
+
+            }
+
+            if (waypoint.leavingInteraction) {
+
+                const previousWaypoint = waypoints[waypointIndex - 1];
+                const departureDirection = waypoint.departureDirection ??
+                    previousWaypoint?.departureDirection ?? null;
+                const entry = waypoint.connectionEntry;
+                const laneIndex = waypoint.plannedLaneIndex;
+                const laneEnd = entry && Number.isInteger(laneIndex)
+                    ? this.graph.getConnectionLaneNodePosition(
+                        entry.toId,
+                        entry.fromId,
+                        entry.toId,
+                        laneIndex
+                    )
+                    : null;
+
+                // The route-wide natural spline does not know the facing of
+                // an actor leaving an InteractionPoint. With only
+                // approach -> portal -> lane end, a sharp right turn can
+                // overshoot the distant portal and loop back around it.
+                // Import a few samples from the authored interaction Bezier
+                // as mandatory spline anchors. The complete route remains a
+                // single spline, but its first turn now leaves in the actor's
+                // actual forward direction and joins the selected lane in
+                // its travel direction.
+                if (departureDirection && laneEnd) {
+
+                    const exitCurve = this.traffic
+                        .createInteractionCurveWaypoints(
+                            anchors.at(-1),
+                            waypoint.position,
+                            laneEnd,
+                            8,
+                            departureDirection
+                        );
+
+                    for (const sample of exitCurve) {
+
+                        pushAnchor(sample.position);
+
+                    }
+
+                }
+
+            }
+
+            if (waypoint.laneStartPosition) {
+
+                pushAnchor(waypoint.laneStartPosition);
+
+            }
+
+            markerIndices.push(pushAnchor(waypoint.position));
+
+        }
+
+        if (anchors.length < 2) return waypoints;
+
+        const curve = new RouteSpline(anchors);
+        curve.updateArcLengths();
+        const debugPoints = curve.getDebugPoints(
+            THREE.MathUtils.clamp(anchors.length * 20, 96, 256)
+        );
+
+        return waypoints.map((waypoint, index) => {
+
+            let plannedLaneIndex = waypoint.plannedLaneIndex;
+
+            if (waypoint.connectionEntry &&
+                !Number.isInteger(plannedLaneIndex)) {
+
+                const entry = waypoint.connectionEntry;
+                const connection = this.graph.requireConnection(
+                    entry.fromId,
+                    entry.toId
+                );
+
+                plannedLaneIndex = connection.fromId === entry.fromId ? 0 : 1;
+
+            }
+
+            const stopDistance = curve.getDistanceAtAnchor(
+                markerIndices[index]
+            );
+            const startDistance = index > 0
+                ? curve.getDistanceAtAnchor(markerIndices[index - 1])
+                : 0;
+
+            return {
+                ...waypoint,
+                routeCurve: curve,
+                routeSpline: true,
+                routeAnchorIndex: markerIndices[index],
+                curveStartDistance: startDistance,
+                curveStopDistance: stopDistance,
+                routeCurveFinal: index === waypoints.length - 1,
+                plannedLaneIndex,
+                routeSplinePoints: debugPoints
+            };
+
+        });
 
     }
 
@@ -695,14 +1431,7 @@ export class CharacterNavigationSystem {
         if (!completedConnection || !waypoint?.id) return true;
 
         const { actor } = context;
-        if (!this.traffic.isFirstAtNode(waypoint.id, actor)) {
-            this.traffic.setWaitReason(
-                actor,
-                waypoint.id,
-                WaitReason.QUEUE_HEAD
-            );
-            return false;
-        }
+        this.traffic.claimPhysicalArrival(waypoint.id, actor);
 
         if (!this.graph.isNodeAvailable(waypoint.id, actor)) {
             this.traffic.setWaitReason(
@@ -746,19 +1475,13 @@ export class CharacterNavigationSystem {
 
         const { actor } = context;
 
-        if (this.interactions.handleWaypoint(context, waypoint)) return;
+        const interactionResult = this.interactions.handleWaypoint(
+            context,
+            waypoint
+        );
 
-        if (waypoint.congestionEscape) {
-
-            context.congestionEscaping = false;
-            console.log(
-                `[NavigationCongestion] ${actor.name} created local space ` +
-                `and replans its preserved intent.`
-            );
-            this.retryPreservedIntent(context, { maxDetourFactor: Infinity });
-            return;
-
-        }
+        if (interactionResult === "waiting") return false;
+        if (interactionResult) return;
 
         if (!waypoint.id) return;
 
@@ -871,7 +1594,6 @@ export class CharacterNavigationSystem {
         }
 
         // console.log(`[Navigation] ${actor.name} passed: ${waypoint.id}`);
-        context.congestionAttempts = 0;
         this.refresh();
 
     }
@@ -958,6 +1680,27 @@ export class CharacterNavigationSystem {
 
     }
 
+    releaseInteractionExitPoint(context) {
+
+        if (!context.interactionExitPoint) return;
+
+        this.connector.releasePoint(
+            context.interactionExitPoint,
+            context.actor
+        );
+
+        context.interactionExitPoint = null;
+
+    }
+
+    completeInteractionExit(context) {
+
+        this.leaveInteractionPoint(context);
+        this.releaseInteractionExitPoint(context);
+        context.interactionExitCommitted = false;
+
+    }
+
     finishActiveInteraction(context) {
 
         const interaction = context.activeInteraction;
@@ -974,14 +1717,62 @@ export class CharacterNavigationSystem {
 
     beginInteractionExit(context, command) {
 
-        if (context.preparingInteractionExit) return;
+        if (context.preparingInteractionExit) {
+
+            // A newer Player command replaces the destination, but never cuts
+            // short the stand-up/release animation already in progress.
+            context.deferredCommand = command;
+            return;
+
+        }
+
+        if (context.interactionExitCommitted) {
+
+            // The actor has already stood up or left its action pose. A new
+            // target replaces only what happens after the exit; replaying the
+            // exit animation would teleport it back toward the old action.
+            context.deferredCommand = command;
+
+            if (!context.actor.navigation.hasPath()) {
+
+                this.executeDeferredCommand(context, {
+                    skipInteractionExit: true
+                });
+
+            }
+            return;
+
+        }
 
         const interaction = context.activeInteraction;
         const approachPoint = interaction.point.via ?? interaction.point;
+        const exitWaypoints = this.connector.createExitWaypoints(
+            interaction.point,
+            command.originId
+        );
+        const connectionEntry = exitWaypoints.find(
+            waypoint => waypoint.connectionEntry
+        )?.connectionEntry ?? null;
 
-        context.preparingInteractionExit = true;
         context.deferredCommand = command;
         context.actor.pause();
+
+        // Reserve the real exit before playing the visual transition. Without
+        // this preflight, the actor visibly stood up and only then discovered
+        // that its lane was busy, appearing frozen beside the interaction.
+        if (!this.traffic.preflightInteractionExit(
+            context.actor,
+            connectionEntry
+        )) {
+
+            context.retryElapsed = 0;
+            return;
+
+        }
+
+        context.interactionExitCommitted = true;
+        context.preparingInteractionExit = true;
+        context.interactionExitElapsed = 0;
 
         interaction.target?.prepareInteractionExit(
             context.actor,
@@ -992,6 +1783,7 @@ export class CharacterNavigationSystem {
                 if (!context.preparingInteractionExit) return;
 
                 context.preparingInteractionExit = false;
+                context.interactionExitElapsed = 0;
                 this.executeDeferredCommand(context, {
                     skipInteractionExit: true
                 });
@@ -1064,7 +1856,9 @@ export class CharacterNavigationSystem {
                 {
                     replaceIntent: !command.intentPrepared,
                     skipTurnaround: true,
-                    skipInteractionExit
+                    skipInteractionExit,
+                    preparedRouteCandidate:
+                        command.preparedRouteCandidate ?? null
                 }
             );
 
@@ -1076,7 +1870,8 @@ export class CharacterNavigationSystem {
                 {
                     replaceIntent: !command.intentPrepared,
                     skipTurnaround: true,
-                    skipInteractionExit
+                    skipInteractionExit,
+                    preparedCandidate: command.preparedCandidate ?? null
                 }
             );
 
@@ -1099,9 +1894,19 @@ export class CharacterNavigationSystem {
 
     update(delta) {
 
+        this.traffic.update(delta);
+
         for (const context of this.contexts.values()) {
 
             const { actor } = context;
+
+            // Debug-only timer: this separates a pause owned by a visual exit
+            // animation from a pause caused by traffic after it has finished.
+            if (context.preparingInteractionExit) {
+
+                context.interactionExitElapsed += delta;
+
+            }
 
             if (this.monitorNavigationProgress(context, delta)) continue;
             if (this.recoverOrphanedActor(context, delta)) continue;
@@ -1227,8 +2032,65 @@ export class CharacterNavigationSystem {
     monitorNavigationProgress(context, delta) {
 
         const { actor } = context;
+        const traversal = actor.navigation.getTraversalState();
+        const hasGraphOwnership = Boolean(
+            traversal.currentNodeId || traversal.currentConnection
+        );
         const hasIntent = Boolean(
             context.pendingInteraction || context.pendingPosition
+        );
+
+        // A predictive collision stop is expected lack of progress. It must
+        // not trigger generic recovery immediately. Autonomous actors still
+        // need an escape from intermittent stop/go oscillation, though: the
+        // timer decays slowly instead of resetting on every single free frame.
+        if (this.collisionFailsafe.isWaiting(actor)) {
+
+            context.collisionWaitElapsed += delta;
+
+            if (actor.navigationIntentPolicy !== "persistent" &&
+                !context.preparingInteraction &&
+                !context.preparingInteractionExit &&
+                !context.interactionExitCommitted &&
+                context.collisionWaitElapsed >= 4) {
+
+                context.collisionWaitElapsed = 0;
+                this.collisionFailsafe.cancel(actor);
+
+                if (hasGraphOwnership) {
+
+                    console.warn(
+                        `[NavigationRecovery] ${actor.name} abandons a route ` +
+                        `after prolonged collision avoidance.`
+                    );
+                    this.abandonReplaceableRoute(context);
+
+                } else {
+
+                    // Portal -> approach/action is intentionally off-graph.
+                    // Clearing that local route leaves no topological origin
+                    // from which an autonomous controller can plan again.
+                    console.warn(
+                        `[NavigationRecovery] ${actor.name} rebuilds an ` +
+                        `off-graph interaction route after prolonged ` +
+                        `collision avoidance.`
+                    );
+                    this.restartIntentFromNearestAccess(context);
+
+                }
+                return true;
+
+            }
+
+            context.recoveryElapsed = 0;
+            context.recoveryPosition.copy(actor.object3D.position);
+            return false;
+
+        }
+
+        context.collisionWaitElapsed = Math.max(
+            0,
+            context.collisionWaitElapsed - delta * 0.25
         );
 
         // No movement is expected while DepartureQueue owns the actor. Running
@@ -1237,6 +2099,22 @@ export class CharacterNavigationSystem {
         if (this.traffic.isQueued(actor)) {
 
             if (!actor.navigation.hasPath()) {
+
+                const interactionExitOwnsQueue =
+                    context.activeInteraction &&
+                    (context.preparingInteractionExit ||
+                        context.deferredCommand);
+
+                if (interactionExitOwnsQueue) {
+
+                    // Interaction exit intentionally reserves traffic before
+                    // the stand-up/release animation creates a navigation
+                    // path. This is a committed exit, not a stale queue row.
+                    context.recoveryElapsed = 0;
+                    context.recoveryPosition.copy(actor.object3D.position);
+                    return false;
+
+                }
 
                 // A queue orders departure of an existing route. Without a
                 // waypoint there is nothing left to authorize, so retaining
@@ -1256,20 +2134,9 @@ export class CharacterNavigationSystem {
             // actual stopped queue, never this useful look-ahead period.
             if (!actor.isState(EntityState.WAITING)) {
 
-                context.queueWaitElapsed = 0;
                 context.recoveryElapsed = 0;
                 context.recoveryPosition.copy(actor.object3D.position);
                 return false;
-
-            }
-
-            context.queueWaitElapsed += delta;
-
-            if (context.queueWaitElapsed >= context.queueWaitTimeout) {
-
-                context.queueWaitElapsed = 0;
-                this.resolveQueueCongestion(context);
-                return true;
 
             }
 
@@ -1279,11 +2146,10 @@ export class CharacterNavigationSystem {
 
         }
 
-        context.queueWaitElapsed = 0;
-
         const mayRecover = hasIntent &&
             !context.preparingInteraction &&
-            !context.preparingInteractionExit
+            !context.preparingInteractionExit &&
+            !context.interactionExitCommitted;
 
         if (!mayRecover) {
 
@@ -1316,89 +2182,7 @@ export class CharacterNavigationSystem {
 
     }
 
-    resolveQueueCongestion(context) {
-
-        const { actor } = context;
-
-        console.warn(
-            `[NavigationCongestion] ${actor.name} exceeded queue timeout; ` +
-            `discarding the local route while preserving its target.`
-        );
-        context.congestionAttempts++;
-        this.traffic.cancel(actor);
-        this.graph.releaseReservations(actor);
-        this.connector.releaseReservations(actor);
-        this.graph.clearActiveLaneCurve(actor);
-        actor.navigation.clearRoute();
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.transitTangent = null;
-
-        if (context.pendingPosition) {
-
-            const alternative = this.findBestPlan(
-                context,
-                context.pendingPosition,
-                Infinity
-            );
-
-            if (alternative?.plan.status === "ready") {
-
-                console.log(
-                    `[NavigationCongestion] ${actor.name} found an available ` +
-                    `detour.`
-                );
-                this.moveToClosestNode(actor, context.pendingPosition, {
-                    replaceIntent: false,
-                    skipTurnaround: true,
-                    maxDetourFactor: Infinity
-                });
-                return true;
-
-            }
-
-        }
-
-        return this.beginCongestionEscape(context);
-
-    }
-
-    beginCongestionEscape(context) {
-
-        const { actor } = context;
-        const target = context.pendingInteraction?.point.getWorldPosition() ??
-            context.pendingPosition ??
-            actor.navigation.getCurrentWaypoint()?.position ??
-            null;
-
-        if (!target) {
-
-            actor.setState(EntityState.IDLE);
-            return false;
-
-        }
-
-        const retreat = context.congestionAttempts > 1;
-        const escapePosition = retreat
-            ? this.physics.findRetreatPosition(actor, target)
-            : this.physics.findEscapePosition(actor, target);
-
-        context.congestionEscaping = true;
-        actor.followWaypoints([{
-            id: null,
-            position: escapePosition,
-            congestionEscape: true
-        }]);
-        console.log(
-            `[NavigationCongestion] ${actor.name} ` +
-            `${retreat ? "turns back" : "leaves the lane locally"} ` +
-            `before trying another route.`
-        );
-        return true;
-
-    }
-
-    retryPreservedIntent(context, { maxDetourFactor = 1.5 } = {}) {
+    retryPreservedIntent(context, { maxDetourFactor = 3 } = {}) {
 
         if (context.pendingInteraction) {
 
@@ -1431,6 +2215,151 @@ export class CharacterNavigationSystem {
 
     }
 
+    resolveTrafficWaitTimeout(actor, wait) {
+
+        const replaceableWait =
+            actor.navigationIntentPolicy !== "persistent" &&
+            (
+                wait.reason === WaitReason.LANE_FULL ||
+                wait.reason === WaitReason.ENDPOINT_WAIT ||
+                wait.reason === WaitReason.QUEUE_HEAD
+            );
+        const persistentReplan =
+            actor.navigationIntentPolicy === "persistent" &&
+            wait.reason === WaitReason.LANE_FULL;
+
+        if ((!replaceableWait && !persistentReplan) ||
+            wait.timeoutCount < 2) {
+
+            return false;
+
+        }
+
+        const context = this.requireContext(actor);
+
+        if (context.interactionExitCommitted) {
+
+            // The actor may already be between action, approach and graph.
+            // Clearing its route here would strand it off-graph. Traffic keeps
+            // the queue and the ordinary retry loop preserves the later goal.
+            context.collisionWaitElapsed = 0;
+            context.recoveryElapsed = 0;
+            return true;
+
+        }
+
+        console.warn(
+            `[NavigationRecovery] ${actor.name} abandons a stale traffic wait ` +
+            `at "${wait.resourceId}" and releases its route.`
+        );
+
+        this.traffic.cancel(actor);
+        this.connector.releaseReservations(actor);
+        this.graph.releaseReservations(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        actor.navigation.clearRoute();
+        actor.locomotion.resetCurve();
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.retryElapsed = 0;
+
+        if (actor.navigationIntentPolicy === "persistent") {
+
+            actor.setState(EntityState.WAITING);
+            this.retryPreservedIntent(context, { maxDetourFactor: 6 });
+
+        } else {
+
+            // Autonomous actors may abandon one ambient action. Their
+            // controller receives IDLE and chooses a new task next update.
+            this.abandonReplaceableRoute(context);
+
+        }
+
+        this.refresh();
+        return true;
+
+    }
+
+    abandonReplaceableRoute(context) {
+
+        const { actor } = context;
+
+        if (context.interactionExitCommitted) {
+
+            // Losing this path would strand the actor between an interaction
+            // and the graph. Preserve the committed exit; once clearance is
+            // restored, the existing route or retry loop can continue it.
+            context.collisionWaitElapsed = 0;
+            context.recoveryElapsed = 0;
+
+            if (actor.navigation.hasPath()) actor.resume();
+            else actor.pause();
+
+            return false;
+
+        }
+
+        if (context.activeInteraction) {
+
+            // The attempted next task may be replaceable, but the interaction
+            // physically occupied right now is not. Cancel only the pending
+            // departure and let the controller make another decision later.
+            this.traffic.cancel(actor);
+            this.connector.releaseReservations(actor);
+            this.graph.releaseReservations(actor);
+            this.graph.clearActiveLaneCurve(actor);
+            this.collisionFailsafe.cancel(actor);
+            actor.navigation.clearRoute();
+            actor.locomotion.resetCurve();
+
+            context.pendingPosition = null;
+            context.pendingInteraction = null;
+            context.destinationId = null;
+            context.deferredCommand = null;
+            context.turningAround = false;
+            context.traversingLaneCurve = false;
+            context.traversingInteractionCurve = false;
+            context.retryElapsed = 0;
+            context.recoveryElapsed = 0;
+            context.collisionWaitElapsed = 0;
+            context.recoveryPosition.copy(actor.object3D.position);
+            actor.setState(EntityState.IDLE);
+            this.refresh();
+            return true;
+
+        }
+
+        const rejectedPoint = context.pendingInteraction?.point ?? null;
+
+        actor.navigationAvoidInteractionPoint = rejectedPoint;
+        actor.navigationAvoidInteractionPointId = rejectedPoint?.id ?? null;
+
+        this.traffic.cancel(actor);
+        this.connector.releaseReservations(actor);
+        this.graph.releaseReservations(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        this.collisionFailsafe.cancel(actor);
+        actor.navigation.clearRoute();
+        actor.locomotion.resetCurve();
+
+        context.pendingPosition = null;
+        context.pendingInteraction = null;
+        context.destinationId = null;
+        context.deferredCommand = null;
+        context.turningAround = false;
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.retryElapsed = 0;
+        context.recoveryElapsed = 0;
+        context.collisionWaitElapsed = 0;
+        context.recoveryPosition.copy(actor.object3D.position);
+        actor.setState(EntityState.IDLE);
+
+        return true;
+
+    }
+
     recoverOrphanedActor(context, delta) {
 
         const { actor } = context;
@@ -1440,7 +2369,6 @@ export class CharacterNavigationSystem {
             context.pendingInteraction ||
             context.deferredCommand ||
             context.activeInteraction ||
-            context.congestionEscaping ||
             this.traffic.isQueued(actor) ||
             context.turningAround ||
             context.preparingInteraction ||
@@ -1497,6 +2425,23 @@ export class CharacterNavigationSystem {
             ? { ...context.pendingInteraction }
             : null;
         const positionIntent = context.pendingPosition?.clone() ?? null;
+
+        if (interactionIntent && this.isActorAtInteractionPoint(
+            actor,
+            interactionIntent.point
+        )) {
+
+            console.log(
+                `[NavigationRecovery] ${actor.name} was already at ` +
+                `"${interactionIntent.point.id}"; completing arrival locally.`
+            );
+            return this.completeInteractionAtCurrentPosition(
+                context,
+                interactionIntent.point,
+                interactionIntent.onArrive
+            );
+
+        }
 
         console.log(
             `[NavigationRecovery] ${actor.name} timed out; rebuilding ` +
@@ -1757,7 +2702,9 @@ export class CharacterNavigationSystem {
         context.destinationId = endpoint.id;
         this.graph.reserveNode(endpoint.id, actor);
         this.helper?.highlightNode(endpoint.id);
-        actor.followWaypoints(this.graph.createWaypoints([endpoint.id]));
+        actor.followWaypoints(
+            this.createTraversalWaypoints(context, [endpoint.id])
+        );
 
         return true;
 
@@ -1776,6 +2723,51 @@ export class CharacterNavigationSystem {
         }
 
         return context;
+
+    }
+
+    isActorAtInteractionPoint(actor, point, tolerance = 0.12) {
+
+        if (!actor?.object3D || !point) return false;
+
+        const target = point.getWorldPosition();
+        const deltaX = actor.object3D.position.x - target.x;
+        const deltaY = actor.object3D.position.y - target.y;
+        const deltaZ = actor.object3D.position.z - target.z;
+
+        return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ <=
+            tolerance * tolerance;
+
+    }
+
+    completeInteractionAtCurrentPosition(context, point, onArrive) {
+
+        const { actor } = context;
+
+        this.traffic.cancel(actor);
+        this.graph.releaseReservations(actor);
+        this.connector.releaseReservations(actor);
+        this.graph.clearActiveLaneCurve(actor);
+        actor.navigation.clearRoute();
+        actor.locomotion.resetCurve();
+
+        context.pendingPosition = null;
+        context.destinationId = null;
+        context.pendingInteraction = { point, onArrive };
+        context.deferredCommand = null;
+        context.traversingLaneCurve = false;
+        context.traversingInteractionCurve = false;
+        context.recoveryElapsed = 0;
+        context.recoveryPosition.copy(actor.object3D.position);
+
+        this.interactions.handleWaypoint(context, {
+            id: null,
+            position: point.getWorldPosition(),
+            interactionPoint: point
+        });
+
+        this.refresh();
+        return true;
 
     }
 
@@ -1813,7 +2805,11 @@ export class CharacterNavigationSystem {
 
     refresh() {
 
-        this.helper?.refresh();
+        // Traffic and route changes are dynamic. Rebuilding the whole helper
+        // here recreated every canvas label/texture and caused a large frame
+        // spike whenever a spline appeared. Topology changes still call the
+        // helper's full refresh explicitly from Scene.
+        this.helper?.refreshDynamic();
         this.onChanged?.();
 
     }
@@ -1845,7 +2841,12 @@ export class CharacterNavigationSystem {
             context.turningAround && "turning",
             context.preparingInteraction && "interaction-entry",
             context.preparingInteractionExit && "interaction-exit",
-            context.congestionEscaping && "congestion-escape",
+            context.interactionExitCommitted && "exit-committed",
+            context.interactionExitPoint &&
+                `exit-point:${context.interactionExitPoint.id}`,
+            this.collisionFailsafe.isWaiting(actor) &&
+                `collision-wait:${context.collisionWaitElapsed.toFixed(1)}s`,
+            waypoint?.routeSpline && "route-spline",
             context.traversingLaneCurve && "lane-curve",
             context.traversingInteractionCurve && "interaction-curve"
         ].filter(Boolean);
@@ -1855,6 +2856,10 @@ export class CharacterNavigationSystem {
             state: actor.state,
             traversal:
                 context.currentTraversal,
+            position:
+                `${actor.object3D.position.x.toFixed(2)}, ` +
+                `${actor.object3D.position.y.toFixed(2)}, ` +
+                `${actor.object3D.position.z.toFixed(2)}`,
             location: traversal.currentNodeId ?? (connection
                 ? `${connection.fromId} → ${connection.toId}`
                 : "off-graph"),
@@ -1863,15 +2868,33 @@ export class CharacterNavigationSystem {
                 nextStructuralWaypoint?.interactionPoint?.id ??
                 nextStructuralWaypoint?.departureRequest?.originId ??
                 (waypoint ? "curve → local target" : "—"),
+            progress: waypoint?.routeCurve
+                ? `${actor.locomotion.curveDistance.toFixed(2)} / ` +
+                    `${waypoint.curveStopDistance?.toFixed(2) ?? "?"}`
+                : "—",
             intent: interaction?.id ??
                 (context.pendingPosition
                     ? context.destinationId ??
                     `position (${context.pendingPosition.x.toFixed(1)}, ` +
                     `${context.pendingPosition.z.toFixed(1)})`
                     : "—"),
-            queue: traffic.queue
-                ? `${traffic.queue.originId} ${traffic.queue.position}/${traffic.queue.length}`
-                : "—",
+            interaction: context.preparingInteractionExit
+                ? `exit animation (${context.interactionExitElapsed.toFixed(2)}s)`
+                : context.activeInteraction && context.deferredCommand
+                    ? "exit waits for traffic (animation not started)"
+                    : context.activeInteraction
+                        ? `active: ${context.activeInteraction.point.id}`
+                        : "—",
+            queue: [
+                traffic.departure &&
+                    `D:${traffic.departure.originId} ` +
+                    `${traffic.departure.position}/${traffic.departure.length} ` +
+                    `[${traffic.departure.kind}, r${traffic.departure.rank}]`,
+                traffic.arrival &&
+                    `A:${traffic.arrival.originId} ` +
+                    `${traffic.arrival.position}/${traffic.arrival.length} ` +
+                    `[${traffic.arrival.kind}, r${traffic.arrival.rank}]`
+            ].filter(Boolean).join(" | ") || "—",
             wait: traffic.waitReason ?? (actor.navigation.isPaused()
                 ? "navigation paused"
                 : "—"),
