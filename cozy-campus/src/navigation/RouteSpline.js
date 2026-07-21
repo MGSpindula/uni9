@@ -2,15 +2,31 @@ import * as THREE from "three";
 
 export class RouteSpline extends THREE.Curve {
 
-    constructor(points) {
+    constructor(points, { closed = false } = {}) {
 
         super();
 
         this.points = points.map(point => point.clone());
-        this.knots = this.createChordLengthKnots(this.points);
-        this.x = this.solveAxis("x");
-        this.y = this.solveAxis("y");
-        this.z = this.solveAxis("z");
+        this.closed = closed;
+        this.periodicCurve = closed
+            ? new THREE.CatmullRomCurve3(
+                this.points,
+                true,
+                "centripetal"
+            )
+            : null;
+        this.knots = closed
+            // CatmullRomCurve3 assigns one equal parameter interval to each
+            // point of a closed curve. The extra knot at 1 represents coming
+            // back to point zero after the final authored anchor.
+            ? Array.from(
+                { length: this.points.length + 1 },
+                (_, index) => index / this.points.length
+            )
+            : this.createChordLengthKnots(this.points);
+        this.x = closed ? null : this.solveAxis("x");
+        this.y = closed ? null : this.solveAxis("y");
+        this.z = closed ? null : this.solveAxis("z");
 
         // Arc-length lookup is used every frame by Locomotion. A denser table
         // keeps speed stable even around short node transition portals.
@@ -29,6 +45,13 @@ export class RouteSpline extends THREE.Curve {
     getPoint(t, target = new THREE.Vector3()) {
 
         const parameter = THREE.MathUtils.clamp(t, 0, 1);
+
+        if (this.closed) {
+
+            return this.periodicCurve.getPoint(parameter, target);
+
+        }
+
         const interval = this.findInterval(parameter);
         const local = parameter - this.knots[interval];
 
@@ -43,6 +66,13 @@ export class RouteSpline extends THREE.Curve {
     getTangent(t, target = new THREE.Vector3()) {
 
         const parameter = THREE.MathUtils.clamp(t, 0, 1);
+
+        if (this.closed) {
+
+            return this.periodicCurve.getTangent(parameter, target);
+
+        }
+
         const interval = this.findInterval(parameter);
         const local = parameter - this.knots[interval];
 

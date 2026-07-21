@@ -833,7 +833,10 @@ export class NavigationGraph {
     // Weighted planning
     // -----------------------------
 
-    planClosestPath(startId, position, agent, { maxDetourFactor = 3 } = {}) {
+    planClosestPath(startId, position, agent, {
+        maxDetourFactor = 3,
+        avoidFirstStepTo = null
+    } = {}) {
 
         // The click chooses a destination before pathfinding. Pathfinding must
         // never silently replace that destination with a nearby reachable node.
@@ -847,7 +850,8 @@ export class NavigationGraph {
 
         const directPlan = this.findShortestPath(startId, destination.id, {
             agent,
-            avoidOccupied: false
+            avoidOccupied: false,
+            avoidFirstStepTo
         });
 
         // No structural path exists. Occupancy is ignored by directPlan, so a
@@ -856,7 +860,8 @@ export class NavigationGraph {
 
         const availablePlan = this.findShortestPath(startId, destination.id, {
             agent,
-            avoidOccupied: true
+            avoidOccupied: true,
+            avoidFirstStepTo
         });
 
         const maximumDetour = directPlan.cost === 0
@@ -926,12 +931,14 @@ export class NavigationGraph {
 
     findShortestPath(startId, destinationId, {
         agent = null,
-        avoidOccupied = true
+        avoidOccupied = true,
+        avoidFirstStepTo = null
     } = {}) {
 
         const result = this.findAllShortestPaths(startId, {
             agent,
-            avoidOccupied
+            avoidOccupied,
+            avoidFirstStepTo
         });
 
         if (!result.distances.has(destinationId)) return null;
@@ -954,7 +961,8 @@ export class NavigationGraph {
     }
 
     findPreferredPath(startId, destinationId, agent, {
-        maxDetourFactor = 3
+        maxDetourFactor = 3,
+        avoidFirstStepTo = null
     } = {}) {
 
         // Prefer a currently clear route, but do not pretend a temporarily
@@ -963,14 +971,16 @@ export class NavigationGraph {
         // and let NavigationTrafficSystem wait at its first busy resource.
         const direct = this.findShortestPath(startId, destinationId, {
             agent,
-            avoidOccupied: false
+            avoidOccupied: false,
+            avoidFirstStepTo
         });
 
         if (!direct) return null;
 
         const available = this.findShortestPath(startId, destinationId, {
             agent,
-            avoidOccupied: true
+            avoidOccupied: true,
+            avoidFirstStepTo
         });
         const maximumDetour = direct.cost === 0
             ? 0
@@ -1011,7 +1021,8 @@ export class NavigationGraph {
 
     findAllShortestPaths(startId, {
         agent = null,
-        avoidOccupied = true
+        avoidOccupied = true,
+        avoidFirstStepTo = null
     } = {}) {
 
         this.requireNode(startId);
@@ -1033,6 +1044,12 @@ export class NavigationGraph {
             for (const [neighborId, connection] of current.connections) {
 
                 const neighbor = this.requireNode(neighborId);
+
+                // Used for one post-loop decision only. Returning through the
+                // edge just traversed would make the actor cross immediately
+                // to the opposite right-hand lane at this same node.
+                if (currentId === startId &&
+                    neighborId === avoidFirstStepTo) continue;
 
                 if (connection.blocked || neighbor.blocked) continue;
                 if (!this.canAgentTraverseConnection(connection, agent)) {

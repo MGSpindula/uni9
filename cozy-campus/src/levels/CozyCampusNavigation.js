@@ -1,5 +1,43 @@
 import * as THREE from "three";
 
+// Closed loops are level-authored walks, just like Blender circulation paths.
+// Do not repeat the first node at the end: CharacterNavigationSystem closes
+// the final edge and rotates the list to whichever member the NPC starts at.
+export const cozyCampusClosedLoops = Object.freeze([
+    {
+        id: "upper-promenade",
+        nodeIds: Object.freeze([
+            "east-exit",
+            "west-1",
+            "junction",
+            "north-2",
+            "slope-north-bottom",
+            "upper-north",
+            "upper-north-2",
+            "upper-east",
+            "slope-east-bottom"
+        ])
+    },
+    {
+        id: "west-stroll",
+        nodeIds: Object.freeze([
+            "west-2",
+            "west-1",
+            "west-3",
+            "west-exit"
+        ])
+    },
+    {
+        id: "north-stroll",
+        nodeIds: Object.freeze([
+            "north-1",
+            "junction",
+            "west-1",
+            "west-exit"
+        ])
+    }
+]);
+
 // Navigation authored for this level. Future environments can provide another
 // module with the same configure(graph) contract without changing Scene.
 // graph.addNode("junction", position, {

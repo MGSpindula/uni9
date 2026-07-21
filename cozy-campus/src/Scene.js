@@ -27,7 +27,8 @@ import { CharacterNavigationSystem } from "./navigation/CharacterNavigationSyste
 import { CharacterDebugPanel } from "./debug/CharacterDebugPanel";
 import { PerformanceDebugPanel } from "./debug/PerformanceDebugPanel";
 import {
-    configureCozyCampusNavigation
+    configureCozyCampusNavigation,
+    cozyCampusClosedLoops
 } from "./levels/CozyCampusNavigation";
 import {
     CozyCampusInteractionPoints
@@ -244,15 +245,21 @@ export class Scene {
             {
                 name: "Orange NPC",
                 color: 0xff8a2a,
-                spawnId: "east-exit"
+                spawnId: "east-exit",
+                // Force the first available decision to demonstrate one
+                // closed walk. NPCController chooses another activity after
+                // completing it, so this cannot repeat forever.
+                closedLoopChance: 0.75
             }, {
                 name: "Green NPC",
                 color: 0x58b86b,
-                spawnId: "west-2"
+                spawnId: "west-2",
+                closedLoopChance: 0.60
             }, {
                 name: "Purple NPC",
                 color: 0x9b6bd3,
-                spawnId: "north-1"
+                spawnId: "north-1",
+                closedLoopChance: 0.45
             }
         ];
 
@@ -282,7 +289,11 @@ export class Scene {
                     npc,
                     navigationSystem:
                         this.characterNavigation,
-                    interactionBehavior
+                    interactionBehavior,
+                    closedLoops:
+                        cozyCampusClosedLoops,
+                    closedLoopChance:
+                        configuration.closedLoopChance
                 });
 
             this.controllers.push(controller);

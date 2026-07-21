@@ -566,7 +566,9 @@ export class NavigationConnector {
 
     }
 
-    createRoute(point, startId, agent) {
+    createRoute(point, startId, agent, {
+        avoidFirstStepTo = null
+    } = {}) {
 
         const accessPoint = point.via ?? point;
 
@@ -578,20 +580,37 @@ export class NavigationConnector {
 
         if (!connection) return null;
 
-        const routes = connection.nodeIds
+        const segmentNodeIds = connection.segmentNodeIds ??
+            connection.nodeIds;
+
+        const createCandidates = avoidedNodeId => connection.nodeIds
             .map(endpointId => {
 
                 const path = this.graph.findPreferredPath(
                     startId,
                     endpointId,
-                    agent
+                    agent,
+                    { avoidFirstStepTo: avoidedNodeId }
                 );
 
                 if (!path) return null;
 
+                const reversesDirectlyIntoAccess = Boolean(
+                    avoidedNodeId &&
+                    endpointId === startId &&
+                    path.nodeIds.length === 1 &&
+                    segmentNodeIds.length === 2 &&
+                    segmentNodeIds.includes(avoidedNodeId)
+                );
+
+                if (reversesDirectlyIntoAccess) return null;
+
                 return {
                     endpointId,
                     path,
+                    requiresUTurn:
+                        path.nodeIds[1] === avoidFirstStepTo,
+                    requiresAccessUTurn: false,
                     cost: path.cost + Math.sqrt(
                         this.graph.getPlanarDistanceSquared(
                             this.graph.requireNode(endpointId).position,
@@ -603,6 +622,33 @@ export class NavigationConnector {
             })
             .filter(Boolean);
 
+        let routes = createCandidates(avoidFirstStepTo);
+
+        if (routes.length === 0 && avoidFirstStepTo) {
+
+            // A cul-de-sac has no forward alternative. Keep the interaction
+            // reachable, but tell route construction that returning through
+            // the previous edge requires a deliberate curved U-turn.
+            routes = createCandidates(null).map(candidate => {
+
+                const requiresAccessUTurn =
+                    candidate.endpointId === startId &&
+                    candidate.path.nodeIds.length === 1 &&
+                    segmentNodeIds.length === 2 &&
+                    segmentNodeIds.includes(avoidFirstStepTo);
+
+                return {
+                    ...candidate,
+                    requiresUTurn:
+                        candidate.path.nodeIds[1] === avoidFirstStepTo ||
+                        requiresAccessUTurn,
+                    requiresAccessUTurn
+                };
+
+            });
+
+        }
+
         if (routes.length === 0) return null;
 
         const route = routes.reduce((best, current) =>
@@ -613,8 +659,6 @@ export class NavigationConnector {
                 route.path.nodeIds
             );
 
-        const segmentNodeIds = connection.segmentNodeIds ??
-            connection.nodeIds;
         const otherNodeId = segmentNodeIds.length === 2
             ? segmentNodeIds.find(id => id !== route.endpointId) ?? null
             : null;
@@ -655,7 +699,8 @@ export class NavigationConnector {
             // same lane geometry as ordinary traffic. The TrafficSystem uses
             // this portal to make endpoint -> lane start -> anchor explicit.
             laneStartPosition,
-            plannedLaneIndex: laneIndex
+            plannedLaneIndex: laneIndex,
+            requiresPostLoopUTurn: route.requiresAccessUTurn
         });
 
         if (accessPoint !== point) {
@@ -686,6 +731,7 @@ export class NavigationConnector {
         return {
             endpointId: route.endpointId,
             cost: route.cost,
+            requiresUTurn: route.requiresUTurn,
             waypoints
         };
 

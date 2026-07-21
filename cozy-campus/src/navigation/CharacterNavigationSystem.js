@@ -9,6 +9,10 @@ import { WaitReason } from "./WaitReason";
 import { RouteSpline } from "./RouteSpline";
 import * as THREE from "three";
 
+// Short triangular circuits look like an NPC pacing nervously around one
+// corner. Increase this value if a level needs even broader ambient walks.
+const MIN_CLOSED_LOOP_NODES = 4;
+
 export class CharacterNavigationSystem {
 
     constructor({
@@ -66,7 +70,15 @@ export class CharacterNavigationSystem {
             traversingInteractionCurve: false,
             transitTangent: null,
             arrivalFromNodeId: null,
+            // Kept for exactly one command after a closed walk. It prevents
+            // the next route from immediately reversing through the edge on
+            // which the periodic spline has just arrived.
+            departureContinuity: null,
             currentTraversal: "flat",
+            // Closed-loop travel is still ordinary graph traffic. This object
+            // only remembers the authored circuit and how many complete laps
+            // remain; lanes and nodes continue to be owned by TrafficSystem.
+            closedLoop: null,
             deferredCommand: null,
             turningAround: false,
             turnaroundElapsed: 0,
@@ -118,6 +130,7 @@ export class CharacterNavigationSystem {
         );
         actor.setNavigationCancelledHandler(() => {
 
+            this.cancelClosedLoop(context, "navigation-cancelled");
             this.graph.releaseReservations(actor);
             this.connector.releaseReservations(actor);
             this.traffic.cancel(actor);
@@ -185,6 +198,298 @@ export class CharacterNavigationSystem {
     // Commands
     // -----------------------------
 
+    startClosedLoop(actor, nodeIds, {
+        laps = 1,
+        id = "closed-loop",
+        onLap = null,
+        onComplete = null,
+        onCancelled = null
+    } = {}) {
+
+        const context = this.requireContext(actor);
+        const traversal = actor.navigation.getTraversalState();
+        const cycle = [...nodeIds];
+
+        // Accept both [A, B, C] and the author-friendly [A, B, C, A]. The
+        // closing edge is implicit and must not duplicate the first anchor.
+        if (cycle.length > 1 && cycle[0] === cycle.at(-1)) cycle.pop();
+
+        const uniqueNodeIds = new Set(cycle);
+        const lapCount = THREE.MathUtils.clamp(
+            Math.floor(laps),
+            1,
+            2
+        );
+
+        // Three-node triangles are technically valid cycles, but they look
+        // like nervous circling rather than an ordinary walk through the
+        // environment. Closed-loop activities require at least four distinct
+        // circulation nodes; use a regular route for anything shorter.
+        if (cycle.length < MIN_CLOSED_LOOP_NODES ||
+            uniqueNodeIds.size !== cycle.length) return false;
+
+        for (let index = 0; index < cycle.length; index++) {
+
+            const fromId = cycle[index];
+            const toId = cycle[(index + 1) % cycle.length];
+
+            if (!this.graph.hasNode(fromId) ||
+                this.graph.isNodeBlocked(fromId) ||
+                !this.graph.areConnected(fromId, toId) ||
+                this.graph.isConnectionBlocked(fromId, toId)) return false;
+
+        }
+
+        const entry = this.findClosedLoopEntry(context, cycle);
+
+        if (!entry) return false;
+
+        const startIndex = cycle.indexOf(entry.nodeId);
+        let orderedCycle = [
+            ...cycle.slice(startIndex),
+            ...cycle.slice(0, startIndex)
+        ];
+
+        if (entry.arrivalFromId &&
+            orderedCycle[1] === entry.arrivalFromId) {
+
+            // Do not begin a stroll by immediately reversing over the segment
+            // used to reach its entry. Traverse the same closed circuit in the
+            // opposite order, so priming continues through the junction while
+            // still selecting the right-hand lane for every new direction.
+            orderedCycle = [
+                orderedCycle[0],
+                ...orderedCycle.slice(1).reverse()
+            ];
+
+        }
+
+        const startsImmediately = !context.activeInteraction &&
+            !traversal.currentConnection &&
+            traversal.currentNodeId === entry.nodeId;
+
+        context.closedLoop = {
+            id,
+            nodeIds: orderedCycle,
+            entryNodeId: entry.nodeId,
+            phase: startsImmediately ? "looping" : "entering",
+            lapsTotal: lapCount,
+            lapsRemaining: lapCount,
+            lapsCompleted: 0,
+            onLap,
+            onComplete,
+            onCancelled
+        };
+        context.departureContinuity = null;
+
+        console.log(
+            `[ClosedLoop] ${actor.name} chooses "${id}" for ` +
+            `${lapCount} lap${lapCount === 1 ? "" : "s"}.`
+        );
+
+        if (startsImmediately) {
+
+            this.traffic.cancel(actor);
+            this.connector.releaseReservations(actor);
+            this.graph.releaseReservations(actor);
+            this.graph.clearActiveLaneCurve(actor);
+            actor.locomotion.resetCurve();
+            context.pendingPosition = null;
+            context.pendingInteraction = null;
+            context.destinationId = null;
+            context.deferredCommand = null;
+            return this.startClosedLoopPriming(context);
+
+        }
+
+        console.log(
+            `[ClosedLoop] ${actor.name} heads to safe entry ` +
+            `"${entry.nodeId}" before starting the circuit.`
+        );
+        const accepted = this.moveToClosestNode(
+            actor,
+            this.graph.requireNode(entry.nodeId).position,
+            {
+                replaceIntent: false,
+                preparedCandidate: entry.candidate
+            }
+        );
+
+        if (accepted) return true;
+
+        this.cancelClosedLoop(context, "entry-unreachable");
+        return false;
+
+    }
+
+    startClosedLoopPriming(context) {
+
+        const loop = context.closedLoop;
+
+        if (!loop ||
+            loop.nodeIds.length < MIN_CLOSED_LOOP_NODES) return false;
+
+        const fromId = loop.nodeIds[0];
+        const toId = loop.nodeIds[1];
+        const actor = context.actor;
+        const connection = this.graph.requireConnection(fromId, toId);
+        const laneIndex = connection.fromId === fromId ? 0 : 1;
+        const laneStart = this.graph.getConnectionLaneNodePosition(
+            fromId,
+            fromId,
+            toId,
+            laneIndex
+        );
+        const laneEnd = this.graph.getConnectionLaneNodePosition(
+            toId,
+            fromId,
+            toId,
+            laneIndex
+        );
+        const curve = new RouteSpline([
+            actor.object3D.position,
+            laneStart,
+            laneEnd
+        ]);
+
+        curve.updateArcLengths();
+        loop.phase = "priming";
+        loop.primingTargetId = toId;
+
+        // The priming edge establishes a point that belongs to the circuit's
+        // own right-hand lane. Without it, a closed spline could inherit the
+        // opposite lane used by the unrelated route that reached its entry.
+        actor.followWaypoints([{
+            id: toId,
+            position: laneEnd,
+            plannedLaneIndex: laneIndex,
+            routeCurve: curve,
+            routeSpline: true,
+            routeAnchorIndex: 2,
+            curveStartDistance: 0,
+            curveStopDistance: curve.getDistanceAtAnchor(2),
+            routeCurveFinal: true,
+            routeSplinePoints: curve.getDebugPoints(64),
+            closedLoopPrimingEnd: true
+        }]);
+        this.refresh();
+        return true;
+
+    }
+
+    findClosedLoopEntry(context, nodeIds) {
+
+        const traversal = context.actor.navigation.getTraversalState();
+        const allowedNodeIds = nodeIds.filter(nodeId =>
+            !this.isNodeAttachedToActionPoint(nodeId)
+        );
+
+        if (allowedNodeIds.length === 0) return null;
+
+        if (!context.activeInteraction &&
+            !traversal.currentConnection &&
+            allowedNodeIds.includes(traversal.currentNodeId)) {
+
+            return {
+                nodeId: traversal.currentNodeId,
+                candidate: null,
+                cost: 0,
+                arrivalFromId: context.arrivalFromNodeId
+            };
+
+        }
+
+        return allowedNodeIds
+            .map(nodeId => {
+
+                const candidate = this.findBestPlan(
+                    context,
+                    this.graph.requireNode(nodeId).position,
+                    6
+                );
+
+                if (!candidate ||
+                    candidate.plan.destinationId !== nodeId) return null;
+
+                return {
+                    nodeId,
+                    candidate,
+                    cost: candidate.accessCost + candidate.plan.cost,
+                    arrivalFromId: candidate.plan.nodeIds.at(-2) ?? null
+                };
+
+            })
+            .filter(Boolean)
+            .sort((first, second) => first.cost - second.cost)[0] ?? null;
+
+    }
+
+    isNodeAttachedToActionPoint(nodeId) {
+
+        for (const point of this.connector.points.values()) {
+
+            if (point.metadata.role !== "action") continue;
+
+            const accessPoint = point.via ?? point;
+            const access = this.connector.connect(accessPoint, {
+                silent: true
+            });
+
+            // Projected approaches belong to an edge and are valid parts of a
+            // circuit. Only a direct node ActionPoint is a bad loop entrance:
+            // beginning there visually mixes an idle/action pose with travel.
+            if (access?.nodeIds?.length === 1 &&
+                access.nodeIds[0] === nodeId) return true;
+
+        }
+
+        return false;
+
+    }
+
+    startClosedLoopLap(context) {
+
+        const loop = context.closedLoop;
+
+        if (!loop) return false;
+
+        loop.phase = "looping";
+
+        const waypoints = this.createClosedLoopSplineWaypoints(
+            context,
+            loop.nodeIds
+        );
+
+        if (waypoints.length === 0) {
+
+            this.cancelClosedLoop(context, "invalidated");
+            return false;
+
+        }
+
+        context.actor.followWaypoints(waypoints);
+        this.refresh();
+        return true;
+
+    }
+
+    cancelClosedLoop(context, reason = "cancelled") {
+
+        const loop = context?.closedLoop;
+
+        if (!loop) return false;
+
+        context.closedLoop = null;
+        loop.onCancelled?.({
+            actor: context.actor,
+            id: loop.id,
+            lapsCompleted: loop.lapsCompleted,
+            reason
+        });
+        return true;
+
+    }
+
 
     // Não usar moveToClosestNode() como comando de gameplay.
     moveToClosestNode(actor, position, {
@@ -196,6 +501,12 @@ export class CharacterNavigationSystem {
     } = {}) {
 
         const context = this.requireContext(actor);
+
+        if (replaceIntent && context.closedLoop) {
+
+            this.cancelClosedLoop(context, "replaced-by-command");
+
+        }
 
         // Store the command before planning. Traffic, a temporary occupation
         // or even the absence of a route may reject this attempt, but they do
@@ -337,6 +648,7 @@ export class CharacterNavigationSystem {
 
             context.pendingPosition = null;
             context.destinationId = null;
+            context.departureContinuity = null;
             actor.cancel();
             return true;
 
@@ -348,6 +660,7 @@ export class CharacterNavigationSystem {
         ), {
             waitAtEnd: candidate.plan.status === "waiting"
         });
+        context.departureContinuity = null;
 
         return true;
 
@@ -361,6 +674,12 @@ export class CharacterNavigationSystem {
     } = {}) {
 
         const context = this.requireContext(actor);
+
+        if (replaceIntent && context.closedLoop) {
+
+            this.cancelClosedLoop(context, "replaced-by-interaction");
+
+        }
 
         // Requesting the InteractionPoint that is already active is a
         // completed command, not a route with identical origin/destination.
@@ -539,6 +858,7 @@ export class CharacterNavigationSystem {
                 context,
                 completeWaypoints
             ));
+            context.departureContinuity = null;
             return true;
 
         }
@@ -559,6 +879,7 @@ export class CharacterNavigationSystem {
                 context,
                 directRoute.waypoints
             ));
+            context.departureContinuity = null;
             return true;
 
         }
@@ -610,6 +931,7 @@ export class CharacterNavigationSystem {
             context,
             completeWaypoints
         ));
+        context.departureContinuity = null;
 
         return true;
 
@@ -624,7 +946,11 @@ export class CharacterNavigationSystem {
                 route: this.connector.createRoute(
                     point,
                     origin.id,
-                    context.actor
+                    context.actor,
+                    {
+                        avoidFirstStepTo:
+                            this.getAvoidFirstStepTo(context, origin.id)
+                    }
                 )
             }))
             .find(candidate => candidate.route) ?? null;
@@ -634,6 +960,16 @@ export class CharacterNavigationSystem {
     // -----------------------------
     // Planning
     // -----------------------------
+
+    getAvoidFirstStepTo(context, originId) {
+
+        const continuity = context.departureContinuity;
+
+        return continuity?.nodeId === originId
+            ? continuity.previousNodeId
+            : null;
+
+    }
 
     getGraphWaypointIds(waypoints) {
 
@@ -723,29 +1059,33 @@ export class CharacterNavigationSystem {
 
             if (this.graph.isNodeBlocked(originId)) continue;
 
-            for (const endpointId of access.nodeIds) {
+            const route = this.connector.createRoute(
+                point,
+                originId,
+                context.actor,
+                {
+                    avoidFirstStepTo:
+                        this.getAvoidFirstStepTo(context, originId)
+                }
+            );
 
-                const path = this.graph.findPreferredPath(
-                    originId,
-                    endpointId,
-                    context.actor
-                );
-
-                if (path) candidates.push({ originId, path });
-
-            }
+            if (route) candidates.push({ originId, route });
 
         }
 
         if (candidates.length === 0) return null;
 
         const selected = candidates.reduce((best, candidate) =>
-            candidate.path.cost < best.path.cost ? candidate : best
+            candidate.route.cost < best.route.cost ? candidate : best
+        );
+        const graphNodeIds = this.getGraphWaypointIds(
+            selected.route.waypoints
         );
 
         return {
             originId: selected.originId,
-            nextNodeId: selected.path.nodeIds[1] ?? null
+            nextNodeId: graphNodeIds[1] ?? null,
+            requiresUTurn: selected.route.requiresUTurn
         };
 
     }
@@ -753,16 +1093,39 @@ export class CharacterNavigationSystem {
     findBestPlan(context, position, maxDetourFactor = 3) {
 
         const candidates = this.getOrigins(context)
-            .map(origin => ({
-                originId: origin.id,
-                accessCost: origin.accessCost,
-                plan: this.graph.planClosestPath(
+            .map(origin => {
+
+                const avoidFirstStepTo = this.getAvoidFirstStepTo(
+                    context,
+                    origin.id
+                );
+                let plan = this.graph.planClosestPath(
                     origin.id,
                     position,
                     context.actor,
-                    { maxDetourFactor }
-                )
-            }))
+                    { maxDetourFactor, avoidFirstStepTo }
+                );
+
+                if (plan.status === "unreachable" && avoidFirstStepTo) {
+
+                    plan = this.graph.planClosestPath(
+                        origin.id,
+                        position,
+                        context.actor,
+                        { maxDetourFactor }
+                    );
+
+                }
+
+                return {
+                    originId: origin.id,
+                    accessCost: origin.accessCost,
+                    plan,
+                    requiresUTurn:
+                        plan.nodeIds[1] === avoidFirstStepTo
+                };
+
+            })
             .filter(candidate => candidate.plan.status !== "unreachable");
 
         if (candidates.length === 0) return null;
@@ -935,6 +1298,107 @@ export class CharacterNavigationSystem {
 
     }
 
+    createClosedLoopSplineWaypoints(context, nodeIds) {
+
+        const { actor } = context;
+        const anchors = [actor.object3D.position.clone()];
+        const markers = [];
+        const waypoints = [];
+
+        const pushAnchor = position => {
+
+            if (anchors.at(-1).distanceToSquared(position) <= 0.000001) {
+
+                return anchors.length - 1;
+
+            }
+
+            anchors.push(position.clone());
+            return anchors.length - 1;
+
+        };
+
+        for (let index = 0; index < nodeIds.length; index++) {
+
+            const fromId = nodeIds[index];
+            const toId = nodeIds[(index + 1) % nodeIds.length];
+            const connection = this.graph.requireConnection(fromId, toId);
+            // Closed walks are authored circulation, not collision recovery.
+            // Fix every segment to its right-hand lane even when that lane is
+            // currently busy; TrafficSystem will queue the NPC instead of
+            // silently drawing the loop on the wrong side of the path.
+            const preferredLaneIndex = connection.fromId === fromId ? 0 : 1;
+            const laneIndex = preferredLaneIndex;
+            const laneStart = this.graph.getConnectionLaneNodePosition(
+                fromId,
+                fromId,
+                toId,
+                laneIndex
+            );
+            const laneEnd = this.graph.getConnectionLaneNodePosition(
+                toId,
+                fromId,
+                toId,
+                laneIndex
+            );
+            const isClosingConnection = index === nodeIds.length - 1;
+
+            pushAnchor(laneStart);
+            let laneEndAnchorIndex;
+
+            if (isClosingConnection) {
+
+                // Priming ended at this exact right-hand endpoint. Reuse it
+                // as point zero and let the periodic segment close back to
+                // itself; storing laneEnd again would make Catmull-Rom join a
+                // duplicate endpoint to a different lane start.
+                anchors[0].copy(laneEnd);
+                laneEndAnchorIndex = anchors.length;
+
+            } else {
+
+                laneEndAnchorIndex = pushAnchor(laneEnd);
+
+            }
+
+            waypoints.push({
+                id: toId,
+                position: laneEnd,
+                plannedLaneIndex: laneIndex
+            });
+            markers.push(laneEndAnchorIndex);
+
+        }
+
+        if (anchors.length < 4 || waypoints.length === 0) return [];
+
+        const curve = new RouteSpline(anchors, { closed: true });
+        curve.updateArcLengths();
+        const debugPoints = curve.getDebugPoints(
+            THREE.MathUtils.clamp(anchors.length * 20, 128, 320)
+        );
+        const lastWaypointIndex = waypoints.length - 1;
+
+        // Index anchors.length is RouteSpline's special closure knot (t=1),
+        // which is exactly point zero on the same lane endpoint.
+        waypoints[lastWaypointIndex].position.copy(anchors[0]);
+        waypoints[lastWaypointIndex].closedLoopLapEnd = true;
+
+        return waypoints.map((waypoint, index) => ({
+            ...waypoint,
+            routeCurve: curve,
+            routeSpline: true,
+            routeAnchorIndex: markers[index],
+            curveStartDistance: index > 0
+                ? curve.getDistanceAtAnchor(markers[index - 1])
+                : 0,
+            curveStopDistance: curve.getDistanceAtAnchor(markers[index]),
+            routeCurveFinal: index === lastWaypointIndex,
+            routeSplinePoints: debugPoints
+        }));
+
+    }
+
     createRouteSplineWaypoints(context, nodeIds, waypoints, {
         entryConnection = null
     } = {}) {
@@ -1034,6 +1498,19 @@ export class CharacterNavigationSystem {
                 laneIndex
             );
 
+            if (index === 0 && !entryConnection &&
+                context.departureContinuity?.nodeId === fromId &&
+                context.departureContinuity.previousNodeId === toId) {
+
+                this.appendPostLoopUTurnAnchors(
+                    pushAnchor,
+                    anchors[0],
+                    laneStart,
+                    context.departureContinuity.direction
+                );
+
+            }
+
             // Both portals are mandatory interpolation anchors. RouteSpline
             // crosses them exactly; they are not control handles that the
             // curve is allowed to cut around.
@@ -1086,6 +1563,48 @@ export class CharacterNavigationSystem {
             };
 
         });
+
+    }
+
+    appendPostLoopUTurnAnchors(pushAnchor, start, end, incomingDirection) {
+
+        const direction = incomingDirection.clone().setY(0);
+
+        if (direction.lengthSq() <= 0.0001 ||
+            start.distanceToSquared(end) <= 0.0001) return;
+
+        direction.normalize();
+        const laneSeparation = Math.sqrt(start.distanceToSquared(end));
+        const radius = THREE.MathUtils.clamp(
+            laneSeparation * 1.25,
+            0.75,
+            1.5
+        );
+        const firstControl = start.clone().addScaledVector(direction, radius);
+        const secondControl = end.clone().addScaledVector(direction, radius);
+        const sampleCount = 6;
+
+        // This cubic leaves the old lane in its current direction and arrives
+        // at the reverse lane already facing back. It is only used when the
+        // graph truly offers no forward route; ordinary post-loop decisions
+        // never cross to the opposite portal at the finishing node.
+        for (let index = 1; index < sampleCount; index++) {
+
+            const t = index / sampleCount;
+            const inverse = 1 - t;
+            const position = start.clone()
+                .multiplyScalar(inverse ** 3)
+                .add(firstControl.clone().multiplyScalar(
+                    3 * inverse ** 2 * t
+                ))
+                .add(secondControl.clone().multiplyScalar(
+                    3 * inverse * t ** 2
+                ))
+                .add(end.clone().multiplyScalar(t ** 3));
+
+            pushAnchor(position);
+
+        }
 
     }
 
@@ -1344,6 +1863,18 @@ export class CharacterNavigationSystem {
 
             if (waypoint.laneStartPosition) {
 
+                if (waypoint.requiresPostLoopUTurn &&
+                    context.departureContinuity) {
+
+                    this.appendPostLoopUTurnAnchors(
+                        pushAnchor,
+                        anchors.at(-1),
+                        waypoint.laneStartPosition,
+                        context.departureContinuity.direction
+                    );
+
+                }
+
                 pushAnchor(waypoint.laneStartPosition);
 
             }
@@ -1557,6 +2088,49 @@ export class CharacterNavigationSystem {
 
         this.traffic.completeNodeArrival(waypoint.id, actor);
 
+        if (context.closedLoop?.phase === "entering" &&
+            waypoint.id === context.closedLoop.entryNodeId) {
+
+            // Entry is only a staging destination. Do not release it, warn
+            // about a terminal navigation node or let NPCController make a
+            // decision between arrival and the first loop connection.
+            context.pendingPosition = null;
+            context.destinationId = null;
+            context.retryElapsed = 0;
+            this.startClosedLoopPriming(context);
+            this.refresh();
+            return;
+
+        }
+
+        if (waypoint.closedLoopPrimingEnd &&
+            context.closedLoop?.phase === "priming") {
+
+            const loop = context.closedLoop;
+
+            // Begin the periodic curve at the endpoint just reached. Rotating
+            // the authored cycle preserves its direction while making the
+            // priming edge the final edge of every complete lap.
+            loop.nodeIds = [
+                ...loop.nodeIds.slice(1),
+                loop.nodeIds[0]
+            ];
+            loop.entryNodeId = waypoint.id;
+            loop.primingTargetId = null;
+            this.startClosedLoopLap(context);
+            this.refresh();
+            return;
+
+        }
+
+        if (waypoint.closedLoopLapEnd && context.closedLoop) {
+
+            this.completeClosedLoopLap(context, waypoint);
+            this.refresh();
+            return;
+
+        }
+
         if (reachedDestination) {
 
             context.pendingPosition =
@@ -1595,6 +2169,79 @@ export class CharacterNavigationSystem {
 
         // console.log(`[Navigation] ${actor.name} passed: ${waypoint.id}`);
         this.refresh();
+
+    }
+
+    completeClosedLoopLap(context, waypoint) {
+
+        const { actor } = context;
+        const loop = context.closedLoop;
+        const nodeId = waypoint.id;
+
+        if (!loop) return false;
+
+        loop.lapsCompleted++;
+        loop.lapsRemaining--;
+        loop.onLap?.({
+            actor,
+            id: loop.id,
+            completed: loop.lapsCompleted,
+            total: loop.lapsTotal
+        });
+
+        if (loop.lapsRemaining > 0) {
+
+            console.log(
+                `[ClosedLoop] ${actor.name} completed ` +
+                `${loop.lapsCompleted}/${loop.lapsTotal} on "${loop.id}".`
+            );
+            return this.startClosedLoopLap(context);
+
+        }
+
+        context.closedLoop = null;
+        this.graph.clearActiveLaneCurve(actor);
+
+        const previousNodeId = context.arrivalFromNodeId;
+        let direction = waypoint.routeCurve
+            ?.getTangent(1, new THREE.Vector3())
+            .setY(0) ?? new THREE.Vector3();
+
+        if (direction.lengthSq() <= 0.0001 && previousNodeId) {
+
+            direction = this.graph.requireNode(nodeId).position.clone()
+                .sub(this.graph.requireNode(previousNodeId).position)
+                .setY(0);
+
+        }
+
+        context.departureContinuity = previousNodeId &&
+            direction.lengthSq() > 0.0001
+            ? {
+                nodeId,
+                previousNodeId,
+                direction: direction.normalize()
+            }
+            : null;
+
+        // The circuit ends at the same logical and physical origin. Release
+        // its transit occupancy just like another completed autonomous task;
+        // the controller may now choose a fresh interaction or route.
+        this.graph.releaseNode(nodeId, actor);
+        actor.navigation.setCurrentNode(nodeId);
+        actor.setState(EntityState.IDLE);
+
+        console.log(
+            `[ClosedLoop] ${actor.name} leaves "${loop.id}" after ` +
+            `${loop.lapsCompleted} lap${loop.lapsCompleted === 1 ? "" : "s"}.`
+        );
+        loop.onComplete?.({
+            actor,
+            id: loop.id,
+            lapsCompleted: loop.lapsCompleted
+        });
+
+        return true;
 
     }
 
@@ -2300,6 +2947,8 @@ export class CharacterNavigationSystem {
 
         }
 
+        this.cancelClosedLoop(context, "navigation-recovery");
+
         if (context.activeInteraction) {
 
             // The attempted next task may be replaceable, but the interaction
@@ -2369,6 +3018,7 @@ export class CharacterNavigationSystem {
             context.pendingInteraction ||
             context.deferredCommand ||
             context.activeInteraction ||
+            context.closedLoop ||
             this.traffic.isQueued(actor) ||
             context.turningAround ||
             context.preparingInteraction ||
@@ -2844,6 +3494,11 @@ export class CharacterNavigationSystem {
             context.interactionExitCommitted && "exit-committed",
             context.interactionExitPoint &&
                 `exit-point:${context.interactionExitPoint.id}`,
+            context.closedLoop?.phase === "entering"
+                ? `closed-loop-entry:${context.closedLoop.entryNodeId}`
+                : context.closedLoop &&
+                    `closed-loop:${context.closedLoop.lapsCompleted}/` +
+                    `${context.closedLoop.lapsTotal}`,
             this.collisionFailsafe.isWaiting(actor) &&
                 `collision-wait:${context.collisionWaitElapsed.toFixed(1)}s`,
             waypoint?.routeSpline && "route-spline",
@@ -2873,6 +3528,14 @@ export class CharacterNavigationSystem {
                     `${waypoint.curveStopDistance?.toFixed(2) ?? "?"}`
                 : "—",
             intent: interaction?.id ??
+                (context.closedLoop
+                    ? `${context.closedLoop.id} ` +
+                        (context.closedLoop.phase === "entering"
+                            ? `→ ${context.closedLoop.entryNodeId} `
+                            : "") +
+                        `(${context.closedLoop.lapsCompleted}/` +
+                        `${context.closedLoop.lapsTotal})`
+                    : null) ??
                 (context.pendingPosition
                     ? context.destinationId ??
                     `position (${context.pendingPosition.x.toFixed(1)}, ` +
