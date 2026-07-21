@@ -2,7 +2,7 @@ import { Raycast } from "./Raycast";
 
 export class SelectionManager {
 
-    constructor(camera, registry, element) {
+    constructor(camera, registry, element, { onChanged = null } = {}) {
 
         this.raycast =
             new Raycast(
@@ -12,6 +12,7 @@ export class SelectionManager {
 
         this.registry = registry;
         this.element = element;
+        this.onChanged = onChanged;
 
         this.effects = [];
 
@@ -179,6 +180,8 @@ export class SelectionManager {
 
         }
 
+        this.onChanged?.();
+
     }
 
     clearHover() {
@@ -202,6 +205,7 @@ export class SelectionManager {
 
         this.entity = null;
         this.object = null;
+        this.onChanged?.();
 
     }
 
@@ -234,6 +238,7 @@ export class SelectionManager {
 
         this.selectedEntity = entity;
         this.selectedObject = object;
+        this.onChanged?.();
 
     }
 
@@ -241,6 +246,7 @@ export class SelectionManager {
 
         this.selectedEntity = null;
         this.selectedObject = null;
+        this.onChanged?.();
 
     }
 

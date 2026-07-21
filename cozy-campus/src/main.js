@@ -1,20 +1,21 @@
 import "./style.css";
 
 import { Renderer } from "./Renderer";
-import { Scene } from "./Scene";
+import { Game } from "./Game";
+import { CozyCampusLevel } from "./levels/CozyCampusLevel";
 
 const renderer = new Renderer();
 
-const scene = new Scene(renderer);
+const game = new Game(renderer, { level: new CozyCampusLevel() });
 
 // O helper pode ser habilitado durante o desenvolvimento.
-scene.setNavigationHelperVisible(true);
+game.setNavigationHelperVisible(true);
 
-scene.start();
+game.start();
 
 function disposeGame() {
 
-    scene.dispose();
+    game.dispose();
     renderer.dispose();
 
 }

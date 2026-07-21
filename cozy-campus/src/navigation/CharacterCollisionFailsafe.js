@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { SpatialHash } from "./SpatialHash.js";
 
 // CollisionFailsafe is only a predictive brake.
 //
@@ -20,10 +21,40 @@ export class CharacterCollisionFailsafe {
         this.predictionTime = predictionTime;
         this.safetyPadding = safetyPadding;
         this.waitingFor = new Map();
+        this.waitDetails = new Map();
         this.velocity = new THREE.Vector3();
         this.otherVelocity = new THREE.Vector3();
         this.relativePosition = new THREE.Vector3();
         this.relativeVelocity = new THREE.Vector3();
+        this.spatialHash = new SpatialHash(detectionRadius);
+        this.neighbors = [];
+        this.actorOrder = new Map();
+        this.frameActors = [];
+        this.spatialHashThreshold = 16;
+        this.metrics = {
+            actors: 0,
+            queries: 0,
+            candidateChecks: 0
+        };
+
+    }
+
+    beginFrame(actors = [...this.owner.agents.keys()]) {
+
+        const activeActors = actors.filter(actor => actor.isActive());
+
+        this.frameActors = activeActors;
+
+        if (activeActors.length >= this.spatialHashThreshold) {
+            this.spatialHash.rebuild(activeActors);
+        }
+        this.actorOrder.clear();
+        activeActors.forEach((actor, index) => {
+            this.actorOrder.set(actor, index);
+        });
+        this.metrics.actors = activeActors.length;
+        this.metrics.queries = 0;
+        this.metrics.candidateChecks = 0;
 
     }
 
@@ -37,6 +68,11 @@ export class CharacterCollisionFailsafe {
 
             const previous = this.waitingFor.get(actor);
             this.waitingFor.set(actor, endpointBlocker);
+            this.waitDetails.set(actor, {
+                blocker: endpointBlocker,
+                kind: "endpoint",
+                clearance: this.getPlanarDistance(actor, endpointBlocker)
+            });
 
             if (previous !== endpointBlocker) {
 
@@ -54,10 +90,22 @@ export class CharacterCollisionFailsafe {
         this.getIntendedVelocity(actor, target, this.velocity);
         let blocker = null;
         let closestClearance = Infinity;
+        let collisionKind = "predicted";
 
-        for (const other of this.owner.agents.keys()) {
+        const nearbyActors = this.frameActors.length >=
+            this.spatialHashThreshold
+            ? this.spatialHash.queryRadius(
+                actor.object3D.position,
+                this.detectionRadius,
+                this.neighbors
+            )
+            : this.frameActors;
+        this.metrics.queries++;
+
+        for (const other of nearbyActors) {
 
             if (other === actor || !other.isActive()) continue;
+            this.metrics.candidateChecks++;
             if (!this.hasVerticalOverlap(actor, other)) continue;
 
             const currentDistance = this.getPlanarDistance(actor, other);
@@ -88,6 +136,7 @@ export class CharacterCollisionFailsafe {
 
                 blocker = other;
                 closestClearance = currentDistance;
+                collisionKind = "overlap";
                 continue;
 
             }
@@ -104,6 +153,7 @@ export class CharacterCollisionFailsafe {
 
                 blocker = other;
                 closestClearance = predictedClearance;
+                collisionKind = "predicted";
 
             }
 
@@ -118,6 +168,11 @@ export class CharacterCollisionFailsafe {
 
         const previous = this.waitingFor.get(actor);
         this.waitingFor.set(actor, blocker);
+        this.waitDetails.set(actor, {
+            blocker,
+            kind: collisionKind,
+            clearance: closestClearance
+        });
 
         if (previous !== blocker) {
 
@@ -302,8 +357,8 @@ export class CharacterCollisionFailsafe {
 
         // Stable registration order resolves ties. Unlike reciprocal
         // waiting-state checks, this decision cannot flip from frame to frame.
-        const actors = [...this.owner.agents.keys()];
-        return actors.indexOf(actor) > actors.indexOf(other);
+        return (this.actorOrder.get(actor) ?? Infinity) >
+            (this.actorOrder.get(other) ?? Infinity);
 
     }
 
@@ -338,6 +393,7 @@ export class CharacterCollisionFailsafe {
         if (!blocker) return;
 
         this.waitingFor.delete(actor);
+        this.waitDetails.delete(actor);
         console.log(
             `[CollisionFailsafe] ${actor.name} may continue; ` +
             `${blocker.name} is clear.`
@@ -351,13 +407,23 @@ export class CharacterCollisionFailsafe {
 
     }
 
+    getDebugState(actor) {
+
+        return this.waitDetails.get(actor) ?? null;
+
+    }
+
     cancel(actor) {
 
         this.waitingFor.delete(actor);
+        this.waitDetails.delete(actor);
 
         for (const [candidate, blocker] of this.waitingFor) {
 
-            if (blocker === actor) this.waitingFor.delete(candidate);
+            if (blocker === actor) {
+                this.waitingFor.delete(candidate);
+                this.waitDetails.delete(candidate);
+            }
 
         }
 

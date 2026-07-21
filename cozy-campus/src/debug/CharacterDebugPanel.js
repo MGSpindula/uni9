@@ -42,6 +42,9 @@ export class CharacterDebugPanel {
             const state = document.createElement("span");
             const details = document.createElement("dl");
 
+            card.dataset.visibility = row.offscreen ? "offscreen" : "onscreen";
+            card.dataset.collision = row.collisionActive ? "waiting" : "clear";
+
             heading.textContent = row.name;
             state.className = `character-debug-state ${row.state.toLowerCase()}`;
             state.textContent = row.state;
@@ -52,6 +55,7 @@ export class CharacterDebugPanel {
             this.appendDetail(details, "Nav phase", row.phase);
             this.appendDetail(details, "Traversal", row.traversal);
             this.appendDetail(details, "Position", row.position);
+            this.appendDetail(details, "View", row.view);
             this.appendDetail(details, "Location", row.location);
             this.appendDetail(details, "Lane", row.lane);
             this.appendDetail(details, "Next", row.next);
@@ -60,6 +64,8 @@ export class CharacterDebugPanel {
             this.appendDetail(details, "Interact.", row.interaction);
             this.appendDetail(details, "Queue", row.queue);
             this.appendDetail(details, "Wait", row.wait);
+            this.appendDetail(details, "Collision", row.collision);
+            this.appendDetail(details, "Recovery", row.recovery);
             this.appendDetail(details, "Flags", row.flags);
             card.append(details);
             this.element.append(card);

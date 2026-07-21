@@ -12,6 +12,7 @@ export class NavigationConnector {
         // them. The connector itself keeps only its authored points here.
         this.pathfinder = null;
         this.routeGeometry = null;
+        this.onPointsChanged = null;
 
     }
 
@@ -39,6 +40,7 @@ export class NavigationConnector {
 
         this.points.set(point.id, point);
         this.connect(point);
+        this.onPointsChanged?.();
 
         return point.connection !== null;
 
@@ -58,6 +60,7 @@ export class NavigationConnector {
         );
 
         point.connection = null;
+        this.onPointsChanged?.();
 
         return true;
 

@@ -10,7 +10,7 @@ import { NavigationGraph } from "../../src/navigation/NavigationGraph";
 import { CharacterNavigationSystem } from "../../src/navigation/CharacterNavigationSystem";
 import { WaitReason } from "../../src/navigation/WaitReason";
 import { UseAvailableInteractionBehavior } from "../../src/characters/behaviors/UseAvailableInteractionBehavior";
-import { Scene } from "../../src/Scene";
+import { GameLoop } from "../../src/game/GameLoop";
 import { NavigationAgent } from "../../src/navigation/NavigationAgent";
 import { NavigationPhase } from "../../src/navigation/NavigationPhase";
 import { RouteSegmentType } from "../../src/navigation/RouteSegment";
@@ -19,6 +19,8 @@ import { NavigationTrafficState } from "../../src/navigation/NavigationTrafficSt
 import { Pathfinder } from "../../src/navigation/Pathfinder";
 import { InteractionSelectionStrategy } from "../../src/characters/behaviors/InteractionSelectionStrategy";
 import { ShortTermBehaviorMemory } from "../../src/characters/behaviors/ShortTermBehaviorMemory";
+import { SpatialHash } from "../../src/navigation/SpatialHash.js";
+import { NPCController } from "../../src/characters/NPCController";
 
 const STEP = 1 / 30;
 
@@ -131,6 +133,85 @@ test("topology and pathfinding work without actors or traffic state", () => {
 
 });
 
+test("spatial hash returns nearby actors across cell boundaries", () => {
+
+    const nearLeft = { position: new THREE.Vector3(-0.1, 0, 0) };
+    const nearRight = { position: new THREE.Vector3(0.1, 0, 0) };
+    const far = { position: new THREE.Vector3(8, 0, 8) };
+    const hash = new SpatialHash(1.8);
+
+    hash.rebuild([nearLeft, nearRight, far], actor => actor.position);
+
+    const neighbors = hash.queryRadius(
+        new THREE.Vector3(0, 0, 0),
+        1.8
+    );
+
+    assert.equal(neighbors.includes(nearLeft), true);
+    assert.equal(neighbors.includes(nearRight), true);
+    assert.equal(neighbors.includes(far), false);
+
+});
+
+test("offscreen NPCs keep choosing activities on a reduced cadence", () => {
+
+    let choices = 0;
+    const npc = {
+        name: "Background NPC",
+        isState: () => false
+    };
+    const controller = new NPCController({
+        npc,
+        navigationSystem: {
+            getOccupiedInteractionPoint: () => null
+        },
+        interactionBehavior: {
+            update() {},
+            tryStart() {
+                choices++;
+                return true;
+            }
+        },
+        closedLoopChance: 0
+    });
+
+    controller.update(1, { visible: false, distance: 30 });
+    assert.equal(choices, 0);
+
+    controller.update(1, { visible: false, distance: 30 });
+    assert.equal(choices, 1);
+
+});
+
+test("offscreen NPCs leave completed interactions", () => {
+
+    const point = { id: "background:interaction" };
+    let excludedPoint = null;
+    const npc = {
+        name: "Interacting NPC",
+        isState: () => false
+    };
+    const controller = new NPCController({
+        npc,
+        navigationSystem: {
+            getOccupiedInteractionPoint: () => point
+        },
+        interactionBehavior: {
+            update() {},
+            tryStart(actor, options) {
+                excludedPoint = options.excludePoint;
+                return true;
+            }
+        },
+        closedLoopChance: 0
+    });
+
+    controller.update(5.1, { visible: false, distance: 30 });
+
+    assert.equal(excludedPoint, point);
+
+});
+
 test("NPC interaction scoring prefers route cost and low congestion", () => {
 
     const actor = { name: "Planner NPC" };
@@ -207,7 +288,7 @@ test("short-term behavior memory enforces cooldown and activity variety", () => 
 
 });
 
-test("Scene executes character frame phases in authoritative order", () => {
+test("GameLoop executes character frame phases in authoritative order", () => {
 
     const calls = [];
     const character = {
@@ -223,20 +304,31 @@ test("Scene executes character frame phases in authoritative order", () => {
         isActive: () => true,
         update: () => calls.push("world entity")
     };
-    const scene = {
-        selection: { update: () => calls.push("input") },
-        controls: { update: () => calls.push("camera input") },
-        objects: [worldEntity, character],
-        controllers: [{ update: () => calls.push("npc decision") }],
-        characterNavigation: {
-            agents: new Map([[character, {}]]),
+    const navigation = {
             updatePlanning: () => calls.push("planning"),
             updateTraffic: () => calls.push("traffic update"),
+            prepareCollisionFrame: () => {},
             solvePhysics: () => calls.push("physics")
-        }
+    };
+    const game = {
+        services: {
+            selection: { update: () => calls.push("input") },
+            characterNavigation: navigation
+        },
+        renderPipeline: {
+            controls: { update: () => calls.push("camera input") },
+            camera: null
+        },
+        world: {
+            entities: [worldEntity, character],
+            characters: [character],
+            controllers: [{ update: () => calls.push("npc decision") }]
+        },
+        hasContinuousVisualActivity: () => false,
+        requestRender() {}
     };
 
-    Scene.prototype.update.call(scene, STEP);
+    new GameLoop(game).update(STEP);
 
     assert.deepEqual(calls, [
         "input",

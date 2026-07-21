@@ -82,4 +82,17 @@ canvas {
 .character-debug-state { color: #7ed6a5; }
 .character-debug-state.waiting { color: #ffd166; }
 .character-debug-state.idle {color: #9fc5ff;}
+.character-debug section[data-visibility="offscreen"] {
+    border-left: 3px solid #8396ad;
+    padding-left: 7px;
+    opacity: 0.78;
+}
+.character-debug section[data-collision="waiting"] {
+    border-left: 3px solid #ff7b7b;
+    padding-left: 7px;
+    opacity: 1;
+}
+.character-debug section[data-collision="waiting"] .character-debug-state {
+    color: #ff9b7b;
+}
 .character-debug.collapsed { width: 190px; overflow: hidden; }

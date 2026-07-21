@@ -9,6 +9,12 @@ export class Renderer {
         this.renderer = new THREE.WebGLRenderer({
             antialias: false
         });
+        this.qualityPresets = {
+            low: { pixelRatio: 1, shadows: false, samples: 0 },
+            medium: { pixelRatio: 1.25, shadows: true, samples: 2 },
+            high: { pixelRatio: 1.5, shadows: true, samples: 4 }
+        };
+        this.qualityPreset = "high";
         this.renderer.shadowMap.enabled = true;
         this.renderer.setSize(
             window.innerWidth,
@@ -34,13 +40,29 @@ export class Renderer {
     resize() {
 
         this.renderer.setPixelRatio(
-            Math.min(window.devicePixelRatio, 1.5)
+            Math.min(
+                window.devicePixelRatio,
+                this.qualityPresets[this.qualityPreset].pixelRatio
+            )
         );
 
         this.renderer.setSize(
             window.innerWidth,
             window.innerHeight
         );
+
+    }
+
+    setQualityPreset(name) {
+
+        const preset = this.qualityPresets[name];
+
+        if (!preset) throw new Error(`Unknown quality preset "${name}".`);
+
+        this.qualityPreset = name;
+        this.renderer.shadowMap.enabled = preset.shadows;
+        this.resize();
+        return { ...preset };
 
     }
 

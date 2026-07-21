@@ -30,6 +30,10 @@ export class NPCController {
         this.state = "idle";
 
         this.elapsed = 0;
+        this.decisionElapsed = 0;
+        this.nearDecisionInterval = 0.2 +
+            (this.hashName(npc.name) % 300) / 1000;
+        this.offscreenDecisionInterval = 2;
 
         this.interactionDuration = 5;
         this.retryDuration = 2;
@@ -38,7 +42,7 @@ export class NPCController {
 
     }
 
-    update(delta) {
+    update(delta, { visible = true, distance = 0 } = {}) {
 
         // Behavioral time advances even while navigation owns the actor. This
         // keeps cooldowns and recent-memory decay independent from locomotion,
@@ -93,18 +97,39 @@ export class NPCController {
 
         }
 
-        if (
-            this.elapsed <
-            this.nextDecisionIn
-        ) {
+        this.decisionElapsed += delta;
+        const cadence = !visible
+            ? this.offscreenDecisionInterval
+            : distance <= 18
+                ? this.nearDecisionInterval
+                : 1;
+        const requiredDelay = Math.max(cadence, this.nextDecisionIn);
+
+        if (this.decisionElapsed < requiredDelay) {
 
             return;
 
         }
 
         this.elapsed = 0;
+        this.decisionElapsed = 0;
+        this.nextDecisionIn = 0;
+
+        if (!visible) this.state = "offscreen background decision";
 
         this.tryChooseActivity();
+
+    }
+
+    hashName(name) {
+
+        let hash = 0;
+
+        for (let index = 0; index < name.length; index++) {
+            hash = (Math.imul(hash, 31) + name.charCodeAt(index)) >>> 0;
+        }
+
+        return hash;
 
     }
 

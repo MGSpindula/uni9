@@ -116,6 +116,13 @@ export class PostProcessing {
 
     }
 
+    setMultisampling(samples) {
+
+        this.composer.renderTarget1.samples = samples;
+        this.composer.renderTarget2.samples = samples;
+
+    }
+
     dispose() {
 
         for (const effect of [...this.effects]) {

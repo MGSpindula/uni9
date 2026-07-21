@@ -9,6 +9,7 @@ export class PerformanceDebugPanel {
         this.updateTime = 0;
         this.renderTime = 0;
         this.maximumFrameTime = 0;
+        this.renderedFrames = 0;
 
         this.element = document.createElement("aside");
         this.element.className = "performance-debug";
@@ -19,6 +20,8 @@ export class PerformanceDebugPanel {
                 <dt>Frame</dt><dd data-value="frame">--</dd>
                 <dt>Update</dt><dd data-value="update">--</dd>
                 <dt>Render</dt><dd data-value="render">--</dd>
+                <dt>Rendered</dt><dd data-value="rendered">--</dd>
+                <dt>Collision</dt><dd data-value="collision">--</dd>
                 <dt>Worst</dt><dd data-value="worst">--</dd>
                 <dt>Calls</dt><dd data-value="calls">--</dd>
                 <dt>Triangles</dt><dd data-value="triangles">--</dd>
@@ -41,13 +44,22 @@ export class PerformanceDebugPanel {
 
     // Called once per animation frame. Measurements are accumulated and the
     // HTML is updated only twice per second, keeping the profiler inexpensive.
-    record({ now, frame, update, render, renderer }) {
+    record({
+        now,
+        frame,
+        update,
+        render,
+        rendered = true,
+        renderer,
+        collision = null
+    }) {
 
         this.frames++;
         this.frameTime += frame;
         this.updateTime += update;
         this.renderTime += render;
         this.maximumFrameTime = Math.max(this.maximumFrameTime, frame);
+        if (rendered) this.renderedFrames++;
 
         const elapsed = now - this.lastRefresh;
         if (elapsed < this.refreshInterval) return;
@@ -60,6 +72,14 @@ export class PerformanceDebugPanel {
         this.set("frame", `${(this.frameTime / divisor).toFixed(2)} ms`);
         this.set("update", `${(this.updateTime / divisor).toFixed(2)} ms`);
         this.set("render", `${(this.renderTime / divisor).toFixed(2)} ms`);
+        this.set("rendered", `${this.renderedFrames}/${this.frames} frames`);
+        this.set(
+            "collision",
+            collision
+                ? `${collision.candidateChecks} checks / ` +
+                    `${collision.queries} queries`
+                : "--"
+        );
         this.set("worst", `${this.maximumFrameTime.toFixed(2)} ms`);
         this.set("calls", info.render.calls.toLocaleString());
         this.set("triangles", info.render.triangles.toLocaleString());
@@ -89,6 +109,7 @@ export class PerformanceDebugPanel {
         this.updateTime = 0;
         this.renderTime = 0;
         this.maximumFrameTime = 0;
+        this.renderedFrames = 0;
 
     }
 

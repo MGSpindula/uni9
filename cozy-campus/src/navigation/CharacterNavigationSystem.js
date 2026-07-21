@@ -1912,6 +1912,12 @@ export class CharacterNavigationSystem {
 
     }
 
+    prepareCollisionFrame(characters) {
+
+        this.collisionFailsafe.beginFrame(characters);
+
+    }
+
     monitorNavigationProgress(...args) {
 
         return this.recoveryPolicy.monitorNavigationProgress(...args);
@@ -2149,6 +2155,7 @@ export class CharacterNavigationSystem {
             )
             : null;
         const interaction = context.pendingInteraction?.point;
+        const collision = this.collisionFailsafe.getDebugState(actor);
         const flags = [
             context.turningAround && "turning",
             context.preparingInteraction && "interaction-entry",
@@ -2224,6 +2231,21 @@ export class CharacterNavigationSystem {
             wait: traffic.waitReason ?? (actor.navigation.isPaused()
                 ? "navigation paused"
                 : "—"),
+            collision: collision
+                ? `${collision.kind}: ${collision.blocker.name} ` +
+                    `(${collision.clearance.toFixed(2)}m, ` +
+                    `${context.collisionWaitElapsed.toFixed(1)}s)`
+                : "clear",
+            collisionActive: Boolean(collision),
+            recovery: context.recoveryPending
+                ? `navigation ${context.recoveryElapsed.toFixed(1)}s / ` +
+                    `${context.recoveryTimeout.toFixed(1)}s`
+                : collision && actor.navigationIntentPolicy !== "persistent"
+                    ? `collision timeout ` +
+                        `${context.collisionWaitElapsed.toFixed(1)}s / 4.0s`
+                    : collision
+                        ? "persistent intent preserved"
+                        : "—",
             flags: flags.join(", ") || "—"
         };
 
