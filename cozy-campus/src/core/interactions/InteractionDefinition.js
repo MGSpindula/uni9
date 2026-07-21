@@ -6,7 +6,11 @@ export class InteractionDefinition {
         point,
         requirements = [],
         available = null,
-        execute = null
+        execute = null,
+        utility = 0,
+        cooldown = 8,
+        repetitionKey = null,
+        metadata = {}
     }) {
 
         if (!id) {
@@ -53,6 +57,14 @@ export class InteractionDefinition {
         this.executeCallback =
             execute;
 
+        // Behavioral metadata is independent from animation/pose tags. A
+        // complex task may use utility as a function of needs, schedules or
+        // quests and group several definitions under one repetitionKey.
+        this.utility = utility;
+        this.cooldown = cooldown;
+        this.repetitionKey = repetitionKey ?? id;
+        this.metadata = { ...metadata };
+
     }
 
     hasTags(tags = []) {
@@ -89,6 +101,27 @@ export class InteractionDefinition {
                 requirement(context) !==
                 false
         );
+
+    }
+
+    canConsider(context) {
+
+        // Requirements are structural/behavioral constraints (role, quest,
+        // inventory, schedule). `available` is deliberately not checked here:
+        // occupancy and temporary target state belong in the congestion score.
+        return this.requirements.every(
+            requirement => requirement(context) !== false
+        );
+
+    }
+
+    getUtility(context) {
+
+        const value = typeof this.utility === "function"
+            ? this.utility(context)
+            : this.utility;
+
+        return Number.isFinite(value) ? value : 0;
 
     }
 

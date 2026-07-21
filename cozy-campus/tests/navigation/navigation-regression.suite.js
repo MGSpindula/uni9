@@ -17,6 +17,8 @@ import { RouteSegmentType } from "../../src/navigation/RouteSegment";
 import { NavigationGraphHelper } from "../../src/navigation/NavigationGraphHelper";
 import { NavigationTrafficState } from "../../src/navigation/NavigationTrafficState";
 import { Pathfinder } from "../../src/navigation/Pathfinder";
+import { InteractionSelectionStrategy } from "../../src/characters/behaviors/InteractionSelectionStrategy";
+import { ShortTermBehaviorMemory } from "../../src/characters/behaviors/ShortTermBehaviorMemory";
 
 const STEP = 1 / 30;
 
@@ -126,6 +128,82 @@ test("topology and pathfinding work without actors or traffic state", () => {
     assert.equal(path.cost, 8);
     assert.equal("occupants" in graph.requireNode("a"), false);
     assert.equal("reservations" in graph.requireConnection("a", "b"), false);
+
+});
+
+test("NPC interaction scoring prefers route cost and low congestion", () => {
+
+    const actor = { name: "Planner NPC" };
+    const createCandidate = (id, pathCost, congestion) => ({
+        target: {},
+        point: { id: `point:${id}` },
+        definition: {
+            id,
+            repetitionKey: id,
+            getUtility: () => 0
+        },
+        navigation: { reachable: true, pathCost, congestion }
+    });
+    const geometricallyNearButCostly = createCandidate("near", 12, 1);
+    const fartherButClear = createCandidate("clear", 5, 0);
+    const memory = new ShortTermBehaviorMemory();
+    const strategy = new InteractionSelectionStrategy();
+    const ranked = strategy.rank({
+        actor,
+        candidates: [geometricallyNearButCostly, fartherButClear],
+        memory,
+        evaluate: candidate => candidate.navigation
+    });
+
+    assert.equal(ranked[0].definition.id, "clear");
+
+});
+
+test("short-term behavior memory enforces cooldown and activity variety", () => {
+
+    const actor = { name: "Memory NPC" };
+    const repeated = {
+        target: {},
+        point: { id: "chair:01" },
+        definition: {
+            id: "sit:01",
+            repetitionKey: "sit",
+            getUtility: () => 0
+        }
+    };
+    const alternative = {
+        target: {},
+        point: { id: "window:01" },
+        definition: {
+            id: "observe:01",
+            repetitionKey: "observe",
+            getUtility: () => 0
+        }
+    };
+    const memory = new ShortTermBehaviorMemory();
+    const strategy = new InteractionSelectionStrategy();
+
+    memory.remember(repeated, 8);
+
+    const ranked = strategy.rank({
+        actor,
+        candidates: [repeated, alternative],
+        memory,
+        evaluate: () => ({
+            reachable: true,
+            pathCost: 4,
+            congestion: 0
+        })
+    });
+
+    assert.deepEqual(
+        ranked.map(candidate => candidate.definition.id),
+        ["observe:01"]
+    );
+
+    memory.update(9);
+    assert.equal(memory.isCoolingDown(repeated), false);
+    assert.ok(memory.getRepetitionPenalty(repeated) > 0);
 
 });
 

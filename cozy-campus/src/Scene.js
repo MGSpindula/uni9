@@ -361,13 +361,19 @@ export class Scene {
         // Their controllers differ, but navigation and interaction do not.
         character.setGrounding(this.characterGrounding);
         this.characterNavigation.registerActor(character, { spawnId });
-        this.interactionSystem.registerActor(character, request =>
-            this.characterNavigation.moveToInteraction(
-                character,
-                request.point,
-                request.onArrive
-            )
-        );
+        this.interactionSystem.registerActor(character, {
+            navigate: request =>
+                this.characterNavigation.moveToInteraction(
+                    character,
+                    request.point,
+                    request.onArrive
+                ),
+            evaluate: candidate =>
+                this.characterNavigation.evaluateInteraction(
+                    character,
+                    candidate.point
+                )
+        });
 
     }
 
@@ -412,10 +418,16 @@ export class Scene {
                 const controller = this.controllers.find(candidate =>
                     candidate.npc === actor
                 );
+                const decision = actor.lastBehaviorDecision;
 
                 return {
                     ...navigation,
-                    behavior: controller?.state ?? "player input"
+                    behavior: controller?.state ?? "player input",
+                    choice: decision
+                        ? `${decision.interactionId} ` +
+                            `(score ${decision.score.toFixed(2)}, ` +
+                            `route ${decision.pathCost.toFixed(1)})`
+                        : null
                 };
 
             })

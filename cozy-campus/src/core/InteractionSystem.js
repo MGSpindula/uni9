@@ -19,7 +19,7 @@ export class InteractionSystem {
 
     }
 
-    registerActor(actor, navigate) {
+    registerActor(actor, adapter) {
 
         if (!actor) {
 
@@ -30,10 +30,11 @@ export class InteractionSystem {
 
         }
 
-        if (
-            typeof navigate !==
-            "function"
-        ) {
+        const normalized = typeof adapter === "function"
+            ? { navigate: adapter, evaluate: null }
+            : adapter;
+
+        if (typeof normalized?.navigate !== "function") {
 
             throw new Error(
                 `Actor "${actor.name}" ` +
@@ -44,7 +45,7 @@ export class InteractionSystem {
 
         this.actorNavigators.set(
             actor,
-            navigate
+            normalized
         );
 
     }
@@ -120,6 +121,36 @@ export class InteractionSystem {
 
     }
 
+    findCandidates(request) {
+
+        return this.query.findCandidates({
+            actor: request.actor,
+            target: request.target ?? null,
+            interactionId: request.interactionId ?? null,
+            tags: request.tags ?? [],
+            available: true,
+            includeTemporarilyUnavailable:
+                request.includeTemporarilyUnavailable ?? false,
+            excludePoint: request.excludePoint ?? null,
+            excludePoints: request.excludePoints ?? [],
+            excludePointIds: request.excludePointIds ?? []
+        });
+
+    }
+
+    evaluate(actor, candidate) {
+
+        const adapter = this.actorNavigators.get(actor);
+
+        return adapter?.evaluate?.(candidate) ?? {
+            reachable: true,
+            pathCost: Math.sqrt(candidate.distanceSquared),
+            congestion: candidate.temporarilyAvailable ? 0 : 1,
+            waitPenalty: 0
+        };
+
+    }
+
     request(request) {
 
         const actor =
@@ -131,12 +162,12 @@ export class InteractionSystem {
 
         }
 
-        const navigate =
+        const adapter =
             this.actorNavigators.get(
                 actor
             );
 
-        if (!navigate) {
+        if (!adapter) {
 
             console.log(
                 `[InteractionSystem] ` +
@@ -148,14 +179,23 @@ export class InteractionSystem {
 
         }
 
-        const match =
-            this.find(request);
+        const match = request.match ?? this.find(request);
 
         if (!match) {
 
             return false;
 
         }
+
+        return this.requestMatch(actor, match, request);
+
+    }
+
+    requestMatch(actor, match, request = {}) {
+
+        const adapter = this.actorNavigators.get(actor);
+
+        if (!adapter || !match) return false;
 
         const {
             target,
@@ -188,10 +228,14 @@ export class InteractionSystem {
 
         };
 
-        return navigate({
+        const accepted = adapter.navigate({
             point,
             onArrive
         });
+
+        if (accepted) request.onAccepted?.(match);
+
+        return accepted;
 
     }
 

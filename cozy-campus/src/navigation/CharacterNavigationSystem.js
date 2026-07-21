@@ -955,6 +955,85 @@ export class CharacterNavigationSystem {
 
     }
 
+    evaluateInteraction(actor, point) {
+
+        const context = this.requireContext(actor);
+        const candidate = this.findInteractionRouteCandidate(
+            context,
+            point,
+            { ignorePointAvailability: true }
+        );
+
+        if (!candidate) return { reachable: false };
+
+        const nodeIds = this.getGraphWaypointIds(candidate.route.waypoints);
+        const loads = [];
+        const pointUsers = new Set([
+            ...point.occupants,
+            ...point.reservations
+        ]);
+
+        pointUsers.delete(actor);
+        loads.push(Math.min(1, pointUsers.size / Math.max(1, point.capacity)));
+
+        for (const nodeId of nodeIds) {
+
+            const state = this.trafficState.getNodeState(nodeId);
+            const users = new Set([
+                ...state.occupants,
+                ...state.reservations,
+                ...state.transitReservations
+            ]);
+
+            users.delete(actor);
+            loads.push(Math.min(1, users.size));
+
+        }
+
+        for (let index = 0; index < nodeIds.length - 1; index++) {
+
+            const state = this.trafficState.getConnectionState(
+                nodeIds[index],
+                nodeIds[index + 1]
+            );
+            const busyLanes = state.lanes.filter(lane => {
+                const users = new Set([
+                    ...lane.occupants,
+                    ...lane.reservations
+                ]);
+                users.delete(actor);
+                return users.size > 0;
+            }).length;
+
+            loads.push(busyLanes / state.lanes.length);
+
+        }
+
+        const access = this.connector.connect(point.via ?? point, {
+            silent: true
+        });
+        const queueLength = (access?.nodeIds ?? []).reduce(
+            (maximum, nodeId) => Math.max(
+                maximum,
+                this.traffic.departures.queues.get(nodeId)?.length ?? 0,
+                this.traffic.arrivals.queues.get(nodeId)?.length ?? 0
+            ),
+            0
+        );
+
+        return {
+            reachable: true,
+            pathCost: candidate.route.cost,
+            congestion: loads.length > 0
+                ? loads.reduce((sum, load) => sum + load, 0) / loads.length
+                : 0,
+            waitPenalty: Math.min(1, queueLength / 3),
+            originId: candidate.origin.id,
+            nodeIds
+        };
+
+    }
+
     // -----------------------------
     // Planning
     // -----------------------------

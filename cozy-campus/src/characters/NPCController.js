@@ -40,6 +40,11 @@ export class NPCController {
 
     update(delta) {
 
+        // Behavioral time advances even while navigation owns the actor. This
+        // keeps cooldowns and recent-memory decay independent from locomotion,
+        // queues and interaction animation duration.
+        this.interactionBehavior.update?.(this.npc, delta);
+
         if (
             this.npc.isState(
                 EntityState.WALKING

@@ -1,5 +1,8 @@
 import * as THREE from "three";
 
+// Query Object: enumerates facts, but does not decide what an NPC should do.
+// Players may still ask for the nearest exact match; autonomous actors pass
+// these candidates to a behavioral selection strategy.
 export class InteractionQuery {
 
     constructor(targets) {
@@ -9,136 +12,82 @@ export class InteractionQuery {
 
     }
 
-    findNearest({
+    findCandidates({
         actor,
         target = null,
         interactionId = null,
         tags = [],
         available = true,
+        includeTemporarilyUnavailable = false,
         excludePoint = null,
         excludePoints = [],
         excludePointIds = []
     }) {
 
-        if (!actor?.object3D) {
+        if (!actor?.object3D) return [];
 
-            return null;
+        const targets = target ? [target] : this.targets;
+        const results = [];
 
-        }
+        for (const candidateTarget of targets) {
 
-        const candidates =
-            target
-                ? [target]
-                : this.targets;
-
-        let nearest = null;
-
-        let nearestDistanceSquared =
-            Infinity;
-
-        for (
-            const candidate of
-            candidates
-        ) {
-
-            if (!candidate) continue;
+            if (!candidateTarget) continue;
 
             const definitions =
-                candidate
-                    .getInteractionDefinitions?.() ??
-                [];
+                candidateTarget.getInteractionDefinitions?.() ?? [];
 
-            for (
-                const definition of
-                definitions
-            ) {
+            for (const definition of definitions) {
 
-                if (
-                    definition.point ===
-                    excludePoint ||
+                if (definition.point === excludePoint ||
                     excludePoints.includes(definition.point) ||
-                    excludePointIds.includes(definition.point.id)
-                ) {
-
-                    continue;
-
-                }
-
-                if (
-                    interactionId &&
-                    definition.id !==
-                    interactionId
-                ) {
-
-                    continue;
-
-                }
-
-                if (
-                    !definition.hasTags(tags)
-                ) {
-
-                    continue;
-
-                }
+                    excludePointIds.includes(definition.point.id)) continue;
+                if (interactionId && definition.id !== interactionId) continue;
+                if (!definition.hasTags(tags)) continue;
 
                 const context = {
                     actor,
-                    target: candidate,
+                    target: candidateTarget,
                     definition,
-                    point:
-                        definition.point
+                    point: definition.point
                 };
 
-                if (
-                    available &&
-                    !definition.canExecute(
-                        context
-                    )
-                ) {
+                if (!definition.canConsider(context)) continue;
+                if (available &&
+                    !includeTemporarilyUnavailable &&
+                    !definition.canExecute(context)) continue;
 
-                    continue;
+                const position = definition.point.getWorldPosition(
+                    this.worldPosition
+                );
 
-                }
-
-                const position =
-                    definition.point
-                        .getWorldPosition(
-                            this.worldPosition
-                        );
-
-                const distanceSquared =
-                    actor.object3D.position
-                        .distanceToSquared(
-                            position
-                        );
-
-                if (
-                    distanceSquared >=
-                    nearestDistanceSquared
-                ) {
-
-                    continue;
-
-                }
-
-                nearestDistanceSquared =
-                    distanceSquared;
-
-                nearest = {
-                    target: candidate,
+                results.push({
+                    target: candidateTarget,
                     definition,
-                    point:
-                        definition.point,
-
-                    distanceSquared
-                };
+                    point: definition.point,
+                    distanceSquared: actor.object3D.position
+                        .distanceToSquared(position),
+                    temporarilyAvailable: definition.canExecute(context)
+                });
 
             }
 
         }
 
-        return nearest;
+        return results;
+
+    }
+
+    findNearest(request) {
+
+        const candidates = this.findCandidates(request);
+
+        if (candidates.length === 0) return null;
+
+        return candidates.reduce((nearest, candidate) =>
+            candidate.distanceSquared < nearest.distanceSquared
+                ? candidate
+                : nearest
+        );
 
     }
 

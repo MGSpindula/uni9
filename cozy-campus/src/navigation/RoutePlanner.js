@@ -10,7 +10,9 @@ export class RoutePlanner {
 
     }
 
-    findInteractionRouteCandidate(context, point) {
+    findInteractionRouteCandidate(context, point, {
+        ignorePointAvailability = false
+    } = {}) {
 
         return this.getOrigins(context)
             .sort((first, second) => first.accessCost - second.accessCost)
@@ -22,7 +24,8 @@ export class RoutePlanner {
                     context.actor,
                     {
                         avoidFirstStepTo:
-                            this.navigation.getAvoidFirstStepTo(context, origin.id)
+                            this.navigation.getAvoidFirstStepTo(context, origin.id),
+                        ignorePointAvailability
                     }
                 )
             }))

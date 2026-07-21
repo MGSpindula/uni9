@@ -571,13 +571,15 @@ export class NavigationConnector {
     }
 
     createRoute(point, startId, agent, {
-        avoidFirstStepTo = null
+        avoidFirstStepTo = null,
+        ignorePointAvailability = false
     } = {}) {
 
         const accessPoint = point.via ?? point;
 
-        if (!this.isPointAvailable(point, agent) ||
-            !this.isPointAvailable(accessPoint, agent)) return null;
+        if (!ignorePointAvailability &&
+            (!this.isPointAvailable(point, agent) ||
+                !this.isPointAvailable(accessPoint, agent))) return null;
 
         // Reconnect because graph blocking and object transforms can change.
         const connection = this.connect(accessPoint);
