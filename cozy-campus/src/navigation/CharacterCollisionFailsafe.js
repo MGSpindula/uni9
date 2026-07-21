@@ -55,7 +55,7 @@ export class CharacterCollisionFailsafe {
         let blocker = null;
         let closestClearance = Infinity;
 
-        for (const other of this.owner.contexts.keys()) {
+        for (const other of this.owner.agents.keys()) {
 
             if (other === actor || !other.isActive()) continue;
             if (!this.hasVerticalOverlap(actor, other)) continue;
@@ -146,12 +146,12 @@ export class CharacterCollisionFailsafe {
         // here used to leave actors frozen after an interaction until that
         // remote reservation disappeared. Only a real occupant may trigger
         // endpoint collision waiting; traffic order is settled on arrival.
-        if (graph.isNodePhysicallyAvailable(
+        if (this.owner.trafficState.isNodePhysicallyAvailable(
             connection.toId,
             actor
         )) return null;
 
-        const laneIndex = graph.getConnectionLaneIndex(
+        const laneIndex = this.owner.trafficState.getConnectionLaneIndex(
             connection.fromId,
             connection.toId,
             actor
@@ -159,7 +159,7 @@ export class CharacterCollisionFailsafe {
 
         if (laneIndex === null) return null;
 
-        const endpoint = graph.getConnectionLaneNodePosition(
+        const endpoint = this.owner.routeGeometry.getConnectionLaneNodePosition(
             connection.toId,
             connection.fromId,
             connection.toId,
@@ -173,10 +173,10 @@ export class CharacterCollisionFailsafe {
         if (actor.object3D.position.distanceTo(endpoint) >
             stoppingDistance) return null;
 
-        const node = graph.requireNode(connection.toId);
+        const state = this.owner.trafficState.getNodeState(connection.toId);
 
-        return [...node.occupants].find(candidate =>
-            candidate !== actor && !node.restingAgents.has(candidate)
+        return [...state.occupants].find(candidate =>
+            candidate !== actor && !state.restingAgents.has(candidate)
         ) ?? null;
 
     }
@@ -272,12 +272,12 @@ export class CharacterCollisionFailsafe {
 
         if (!sameConnection) return false;
 
-        const firstLane = this.owner.graph.getConnectionLaneIndex(
+        const firstLane = this.owner.trafficState.getConnectionLaneIndex(
             first.fromId,
             first.toId,
             actor
         );
-        const secondLane = this.owner.graph.getConnectionLaneIndex(
+        const secondLane = this.owner.trafficState.getConnectionLaneIndex(
             second.fromId,
             second.toId,
             other
@@ -302,14 +302,14 @@ export class CharacterCollisionFailsafe {
 
         // Stable registration order resolves ties. Unlike reciprocal
         // waiting-state checks, this decision cannot flip from frame to frame.
-        const actors = [...this.owner.contexts.keys()];
+        const actors = [...this.owner.agents.keys()];
         return actors.indexOf(actor) > actors.indexOf(other);
 
     }
 
     getCommitmentPriority(actor) {
 
-        const context = this.owner.contexts.get(actor);
+        const context = this.owner.agents.get(actor);
         const base = actor.navigationPriority ?? 0;
 
         if (!context) return base;

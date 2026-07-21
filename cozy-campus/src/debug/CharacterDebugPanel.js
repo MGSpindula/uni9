@@ -48,6 +48,7 @@ export class CharacterDebugPanel {
             card.append(heading, state);
 
             this.appendDetail(details, "Behavior", row.behavior);
+            this.appendDetail(details, "Nav phase", row.phase);
             this.appendDetail(details, "Traversal", row.traversal);
             this.appendDetail(details, "Position", row.position);
             this.appendDetail(details, "Location", row.location);

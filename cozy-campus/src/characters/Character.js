@@ -34,6 +34,11 @@ export class Character extends Entity {
         this.departureRequestedHandler = null;
         this.navigationCancelledHandler = null;
         this.movementGuard = null;
+        this.movementFrame = {
+            waypoint: null,
+            trafficAuthorized: false,
+            collisionAuthorized: false
+        };
 
         // Keep a wider base circle so contacts are predicted sooner and actors
         // separate without vibrating while trying to occupy the same lane.
@@ -261,39 +266,96 @@ export class Character extends Entity {
 
     update(delta) {
 
-        super.update(delta);
-        this.updateMovement(delta);
-        this.grounding?.update(this);
-        this.animation?.update(delta, this.locomotion.getMotionState());
+        // Compatibility entry point for callers that update an isolated
+        // Character. Scene uses the explicit phases below and never calls this
+        // method for registered characters.
+        this.updateAnimation(delta);
+
+    }
+
+    authorizeMovementTraffic() {
+
+        const frame = this.movementFrame;
+        const waypoint = this.navigation.getCurrentWaypoint();
+
+        frame.waypoint = null;
+        frame.trafficAuthorized = false;
+        frame.collisionAuthorized = false;
+
+        if (!waypoint || this.navigation.isPaused()) return false;
+
+        // prepareTraversalTo() is the only part of Character allowed to ask
+        // NavigationTrafficSystem for a node/lane/interaction authorization.
+        // Scene calls it during the traffic phase, before any body can move.
+        if (!this.prepareTraversalTo(waypoint)) return false;
+
+        frame.waypoint = waypoint;
+        frame.trafficAuthorized = true;
+        return true;
+
+    }
+
+    prepareMovement() {
+
+        this.locomotion.beginFrame();
+
+        const frame = this.movementFrame;
+
+        // A traffic callback may replace or pause the route. Never apply an
+        // authorization issued for a waypoint that is no longer current.
+        if (!frame.trafficAuthorized ||
+            frame.waypoint !== this.navigation.getCurrentWaypoint() ||
+            this.navigation.isPaused()) {
+
+            frame.waypoint = null;
+            return false;
+
+        }
+
+        return true;
+
+    }
+
+    evaluateMovementGuard(delta) {
+
+        const frame = this.movementFrame;
+        const waypoint = frame.waypoint;
+
+        if (!waypoint) return false;
+
+        // CharacterCollisionFailsafe is a boolean brake. It may deny this
+        // frame, but it cannot insert a waypoint, choose a lane or mutate the
+        // route prepared by NavigationGraph/NavigationTrafficSystem.
+        frame.collisionAuthorized = this.movementGuard?.(
+            waypoint.position,
+            delta
+        ) ?? true;
+
+        if (!frame.collisionAuthorized) {
+
+            this.setState(EntityState.WAITING);
+            return false;
+
+        }
+
+        return true;
 
     }
 
     updateMovement(delta) {
 
-        this.locomotion.beginFrame();
+        const frame = this.movementFrame;
+        const waypoint = frame.waypoint;
 
-        let waypoint = this.navigation.getCurrentWaypoint();
+        if (!waypoint ||
+            !frame.trafficAuthorized ||
+            !frame.collisionAuthorized ||
+            this.navigation.isPaused()) return;
 
-        // A movement guard may only brake locomotion. It cannot replace the
-        // authored Navigation curve with an improvised sidestep.
-        const movementAllowed = this.movementGuard?.(
-            waypoint?.position ?? null,
-            delta
-        );
-
-        if (movementAllowed === false) {
-
-            this.setState(EntityState.WAITING);
-            return;
-
-        }
-
-        if (this.navigation.isPaused()) return;
-
-        // Re-read after the guard in case another system paused navigation.
-        waypoint = this.navigation.getCurrentWaypoint();
-
-        if (!waypoint || !this.prepareTraversalTo(waypoint)) return;
+        // Consume this authorization once. The next frame must revalidate the
+        // current route against traffic and collision state.
+        frame.trafficAuthorized = false;
+        frame.collisionAuthorized = false;
 
         const movementOptions = {
             // Facing always follows the authored route unless the waypoint
@@ -404,19 +466,23 @@ export class Character extends Entity {
 
             }
 
-        } else if (waypoint.id) {
-
-            // advance() has selected a different waypoint. Prepare that next
-            // segment now, without recursively preparing the completed node.
-            const nextWaypoint = this.navigation.getCurrentWaypoint();
-
-            if (nextWaypoint && nextWaypoint !== waypoint) {
-
-                this.prepareTraversalTo(nextWaypoint);
-
-            }
-
         }
+
+    }
+
+    updateGrounding() {
+
+        this.grounding?.update(this);
+
+    }
+
+    updateAnimation(delta) {
+
+        // Entity tweens are presentation/interaction transitions. Updating
+        // them here prevents an animation callback from changing a route in
+        // the middle of the traffic or physics phases.
+        super.update(delta);
+        this.animation?.update(delta, this.locomotion.getMotionState());
 
     }
 

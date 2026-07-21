@@ -44,7 +44,7 @@ export class InteractionNavigation {
         // A direct approach from the current segment must remain on the lane
         // the actor already owns. Choosing by proximity could make it cross to
         // the opposite side immediately before the interaction anchor.
-        const laneIndex = this.graph.getConnectionLaneIndex(
+        const laneIndex = this.owner.trafficState.getConnectionLaneIndex(
             traversal.currentConnection.fromId,
             traversal.currentConnection.toId,
             actor
@@ -57,7 +57,9 @@ export class InteractionNavigation {
                 access,
                 laneIndex
             ),
-            plannedLaneIndex: laneIndex,
+            // This actor already occupies the connection, so this is observed
+            // authority rather than a lane prediction.
+            authorizedLaneIndex: laneIndex,
             leavingGraph: true,
             departureRequest: { connection: true }
         }];
@@ -89,13 +91,16 @@ export class InteractionNavigation {
         if (waypoint.leavingGraph) {
 
             context.traversingInteractionCurve = false;
-            this.graph.clearActiveLaneCurve(actor);
+            this.owner.routeGeometry.clearActiveLaneCurve(actor);
 
             const traversal = actor.navigation.getTraversalState();
 
             if (traversal.currentNodeId) {
 
-                this.graph.releaseNode(traversal.currentNodeId, actor);
+                this.owner.trafficState.releaseNode(
+                    traversal.currentNodeId,
+                    actor
+                );
                 // The portal is already outside the graph node. Keeping the
                 // old id here made debug and recovery believe that the actor
                 // was simultaneously at the node and at the InteractionPoint.
@@ -105,7 +110,7 @@ export class InteractionNavigation {
 
             if (traversal.currentConnection) {
 
-                this.graph.releaseConnection(
+                this.owner.trafficState.releaseConnection(
                     traversal.currentConnection.fromId,
                     traversal.currentConnection.toId,
                     actor
@@ -141,8 +146,8 @@ export class InteractionNavigation {
                 // ownership, so entering the portal must do it explicitly.
                 this.owner.traffic.claimPhysicalArrival(nodeId, actor);
 
-                if (!this.graph.isNodeAvailable(nodeId, actor) ||
-                    !this.graph.occupyNode(nodeId, actor)) {
+                if (!this.owner.trafficState.isNodeAvailable(nodeId, actor) ||
+                    !this.owner.trafficState.occupyNode(nodeId, actor)) {
 
                     this.owner.traffic.setWaitReason(
                         actor,
@@ -194,7 +199,7 @@ export class InteractionNavigation {
 
             if (traversal.currentNodeId) {
 
-                this.graph.releaseNode(
+                this.owner.trafficState.releaseNode(
                     traversal.currentNodeId,
                     actor
                 );
@@ -206,7 +211,7 @@ export class InteractionNavigation {
 
             if (traversal.currentConnection) {
 
-                this.graph.releaseConnection(
+                this.owner.trafficState.releaseConnection(
                     traversal.currentConnection.fromId,
                     traversal.currentConnection.toId,
                     actor

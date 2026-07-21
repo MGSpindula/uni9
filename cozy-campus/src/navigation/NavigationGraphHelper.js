@@ -4,6 +4,8 @@ export class NavigationGraphHelper extends THREE.Group {
 
     constructor(graph, {
         connector = null,
+        trafficState = null,
+        routeGeometry = null,
         nodeColor = 0xffcc33,
         edgeColor = 0x3366ff,
         blockedColor = 0xff3344,
@@ -18,6 +20,8 @@ export class NavigationGraphHelper extends THREE.Group {
 
         this.graph = graph;
         this.connector = connector;
+        this.trafficState = trafficState;
+        this.routeGeometry = routeGeometry;
         this.nodeColor = nodeColor;
         this.edgeColor = edgeColor;
         this.blockedColor = blockedColor;
@@ -158,9 +162,20 @@ export class NavigationGraphHelper extends THREE.Group {
                 const sideX = deltaZ / length;
                 const sideZ = -deltaX / length;
 
-                for (const lane of connection.lanes) {
+                const connectionState = this.trafficState
+                    ?.getConnectionState(connection.fromId, connection.toId);
+                const lanes = connectionState?.lanes ?? Array.from(
+                    { length: connection.laneCount },
+                    (_, index) => ({
+                        index,
+                        occupants: new Set(),
+                        reservations: new Set()
+                    })
+                );
 
-                    const center = (connection.lanes.length - 1) / 2;
+                for (const lane of lanes) {
+
+                    const center = (connection.laneCount - 1) / 2;
                     const offset =
                         (lane.index - center) * connection.laneWidth;
                     const start = canonicalStart.position.clone();
@@ -176,7 +191,7 @@ export class NavigationGraphHelper extends THREE.Group {
                     // The full lane reaches a node through these portals,
                     // rather than through its exact center. Keeping them
                     // visible makes laneRadius and the curve handoff editable.
-                    const laneStart = this.graph
+                    const laneStart = this.routeGeometry
                         .getConnectionLaneNodePosition(
                             connection.fromId,
                             connection.fromId,
@@ -184,7 +199,7 @@ export class NavigationGraphHelper extends THREE.Group {
                             lane.index
                         )
                         .add(new THREE.Vector3(0, this.height + 0.025, 0));
-                    const laneEnd = this.graph
+                    const laneEnd = this.routeGeometry
                         .getConnectionLaneNodePosition(
                             connection.toId,
                             connection.fromId,
@@ -233,7 +248,7 @@ export class NavigationGraphHelper extends THREE.Group {
         this.addLanePortalMarkers(lanePortalPoints);
         this.addActiveLaneCurves();
         this.activeLaneCurveRevision =
-            this.graph.activeLaneCurveRevision ?? 0;
+            this.routeGeometry?.activeLaneCurveRevision ?? 0;
         this.addInteractionPoints();
         this.addGeneratedAccessAnchors();
 
@@ -288,9 +303,20 @@ export class NavigationGraphHelper extends THREE.Group {
                 const sideX = deltaZ / length;
                 const sideZ = -deltaX / length;
 
-                for (const lane of connection.lanes) {
+                const connectionState = this.trafficState
+                    ?.getConnectionState(connection.fromId, connection.toId);
+                const lanes = connectionState?.lanes ?? Array.from(
+                    { length: connection.laneCount },
+                    (_, index) => ({
+                        index,
+                        occupants: new Set(),
+                        reservations: new Set()
+                    })
+                );
 
-                    const center = (connection.lanes.length - 1) * 0.5;
+                for (const lane of lanes) {
+
+                    const center = (connection.laneCount - 1) * 0.5;
                     const offset = (lane.index - center) * connection.laneWidth;
                     const start = startNode.position.clone();
                     const end = endNode.position.clone();
@@ -376,10 +402,14 @@ export class NavigationGraphHelper extends THREE.Group {
 
     refreshActiveLaneCurves() {
 
-        const revision = this.graph.activeLaneCurveRevision ?? 0;
+        const revision = this.routeGeometry?.activeLaneCurveRevision ?? 0;
         if (revision === this.activeLaneCurveRevision) return;
 
         this.removeChildren(child =>
+            child.name.endsWith(":NavigationSegments") ||
+            child.name.endsWith(":NavigationSegmentsDirection") ||
+            // Remove debug objects left by projects/hot reloads created
+            // before RouteGeometry replaced the global RouteSpline.
             child.name.endsWith(":NavigationSpline") ||
             child.name.endsWith(":NavigationSplineDirection")
         );
@@ -420,7 +450,8 @@ export class NavigationGraphHelper extends THREE.Group {
 
     addActiveLaneCurves() {
 
-        for (const [actor, points] of this.graph.activeLaneCurves) {
+        for (const [actor, points] of
+            this.routeGeometry?.activeLaneCurves ?? []) {
 
             if (points.length < 2) continue;
 
@@ -434,9 +465,8 @@ export class NavigationGraphHelper extends THREE.Group {
 
             });
 
-            // This is the actor's complete active spline, sampled densely for
-            // debugging. Its color matches the actor so simultaneous routes
-            // remain readable.
+            // Only the currently authorized geometry is rendered. Its color
+            // matches the actor so simultaneous segments remain readable.
             const curve = new THREE.Line(
                 new THREE.BufferGeometry().setFromPoints(curvePoints),
                 new THREE.LineBasicMaterial({
@@ -444,7 +474,7 @@ export class NavigationGraphHelper extends THREE.Group {
                     depthTest: false
                 })
             );
-            curve.name = `${actor.name}:NavigationSpline`;
+            curve.name = `${actor.name}:NavigationSegments`;
             curve.renderOrder = 1001;
             curve.raycast = () => {};
             this.add(curve);
@@ -465,7 +495,7 @@ export class NavigationGraphHelper extends THREE.Group {
                     0.12,
                     0.08
                 );
-                arrow.name = `${actor.name}:NavigationSplineDirection`;
+                arrow.name = `${actor.name}:NavigationSegmentsDirection`;
                 arrow.line.raycast = () => {};
                 arrow.cone.raycast = () => {};
                 this.add(arrow);
@@ -722,12 +752,14 @@ export class NavigationGraphHelper extends THREE.Group {
 
     getNodeColor(node, highlighted = false) {
 
+        const state = this.getNodeTrafficState(node.id);
+
         if (node.blocked) return this.blockedColor;
-        if (node.occupants.size > 0 &&
-            !this.graph.isNodePassable(node.id)) return this.occupiedColor;
+        if (state.occupants.size > 0 &&
+            !this.isNodePassable(node.id)) return this.occupiedColor;
         if (highlighted) return 0x33ff66;
-        if (node.reservations.size > 0 ||
-            node.transitReservations.size > 0) {
+        if (state.reservations.size > 0 ||
+            state.transitReservations.size > 0) {
 
             return this.reservedColor;
 
@@ -748,14 +780,35 @@ export class NavigationGraphHelper extends THREE.Group {
 
     getNodePresentationKey(node) {
 
+        const state = this.getNodeTrafficState(node.id);
+
         return [
             node.blocked,
-            node.occupants.size,
-            node.reservations.size,
-            node.transitReservations.size,
-            this.graph.isNodePassable(node.id),
+            state.occupants.size,
+            state.reservations.size,
+            state.transitReservations.size,
+            this.isNodePassable(node.id),
             node.id === this.highlightedNodeId
         ].join(":");
+
+    }
+
+    getNodeTrafficState(nodeId) {
+
+        return this.trafficState?.getNodeState(nodeId) ?? {
+            occupants: new Set(),
+            reservations: new Set(),
+            transitReservations: new Set(),
+            restingAgents: new Set()
+        };
+
+    }
+
+    isNodePassable(nodeId) {
+
+        return this.trafficState
+            ? this.trafficState.isNodePassable(nodeId)
+            : !this.graph.isNodeBlocked(nodeId);
 
     }
 
@@ -818,18 +871,19 @@ export class NavigationGraphHelper extends THREE.Group {
         context.fillStyle = "rgba(15, 20, 30, 0.8)";
         context.fillRect(0, 0, canvas.width, canvas.height);
         const highlighted = node.id === this.highlightedNodeId;
+        const state = this.getNodeTrafficState(node.id);
         const labelColor = node.blocked
                 ? "#ff6675"
-                : node.occupants.size > 0
-                    ? !this.graph.isNodePassable(node.id)
+                : state.occupants.size > 0
+                    ? !this.isNodePassable(node.id)
                         ? "#ffb366"
                         : highlighted
                         ? "#66ff8a"
                         : "#66ff8a"
                     : highlighted
                         ? "#66ff8a"
-                    : node.reservations.size > 0 ||
-                        node.transitReservations.size > 0
+                    : state.reservations.size > 0 ||
+                        state.transitReservations.size > 0
                         ? "#66ddff"
                         : "#ffe680";
 
@@ -841,13 +895,13 @@ export class NavigationGraphHelper extends THREE.Group {
         context.textBaseline = "middle";
         const status = node.blocked
             ? "blocked"
-            : node.occupants.size > 0
-                ? this.graph.isNodePassable(node.id)
+            : state.occupants.size > 0
+                ? this.isNodePassable(node.id)
                     ? "resting, passable"
                     : "occupied, impassable"
-                : node.reservations.size > 0 ||
-                    node.transitReservations.size > 0
-                    ? node.reservations.size > 0
+                : state.reservations.size > 0 ||
+                    state.transitReservations.size > 0
+                    ? state.reservations.size > 0
                         ? "reserved"
                         : "transit reserved"
                     : null;

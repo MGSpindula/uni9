@@ -8,6 +8,10 @@ export class NavigationConnector {
         this.graph = graph;
         this.points = new Map();
         this.anchors = new Map();
+        // CharacterNavigationSystem injects runtime services after creating
+        // them. The connector itself keeps only its authored points here.
+        this.pathfinder = null;
+        this.routeGeometry = null;
 
     }
 
@@ -237,7 +241,7 @@ export class NavigationConnector {
             return {
                 nodeIds: [node.id],
                 projectedPosition,
-                distanceSquared: this.graph.getPlanarDistanceSquared(
+                distanceSquared: this.routeGeometry.getPlanarDistanceSquared(
                     position,
                     projectedPosition
                 )
@@ -268,7 +272,7 @@ export class NavigationConnector {
                 .map(node => node.id),
             segmentNodeIds: [from.id, to.id],
             projectedPosition,
-            distanceSquared: this.graph.getPlanarDistanceSquared(
+            distanceSquared: this.routeGeometry.getPlanarDistanceSquared(
                 position,
                 projectedPosition
             )
@@ -586,7 +590,7 @@ export class NavigationConnector {
         const createCandidates = avoidedNodeId => connection.nodeIds
             .map(endpointId => {
 
-                const path = this.graph.findPreferredPath(
+                const path = this.pathfinder.findPreferredPath(
                     startId,
                     endpointId,
                     agent,
@@ -612,7 +616,7 @@ export class NavigationConnector {
                         path.nodeIds[1] === avoidFirstStepTo,
                     requiresAccessUTurn: false,
                     cost: path.cost + Math.sqrt(
-                        this.graph.getPlanarDistanceSquared(
+                        this.routeGeometry.getPlanarDistanceSquared(
                             this.graph.requireNode(endpointId).position,
                             connection.projectedPosition
                         )
@@ -655,7 +659,7 @@ export class NavigationConnector {
             current.cost < best.cost ? current : best
         );
         const waypoints =
-            this.graph.createWaypoints(
+            this.routeGeometry.createWaypoints(
                 route.path.nodeIds
             );
 
@@ -672,7 +676,7 @@ export class NavigationConnector {
         );
         const laneStartPosition = laneIndex === null
             ? null
-            : this.graph.getConnectionLaneNodePosition(
+            : this.routeGeometry.getConnectionLaneNodePosition(
                 route.endpointId,
                 route.endpointId,
                 otherNodeId,
@@ -699,7 +703,7 @@ export class NavigationConnector {
             // same lane geometry as ordinary traffic. The TrafficSystem uses
             // this portal to make endpoint -> lane start -> anchor explicit.
             laneStartPosition,
-            plannedLaneIndex: laneIndex,
+            preferredLaneIndex: laneIndex,
             requiresPostLoopUTurn: route.requiresAccessUTurn
         });
 
@@ -788,7 +792,7 @@ export class NavigationConnector {
         waypoints.push({
             id: null,
             position: portalPosition,
-            plannedLaneIndex: laneIndex,
+            preferredLaneIndex: laneIndex,
             leavingInteraction: true,
             // When already standing at approach, this is the first exit
             // waypoint and therefore owns the same immediate 180° turn.
@@ -800,13 +804,13 @@ export class NavigationConnector {
                     fromId: otherNodeId,
                     toId: destinationNodeId,
                     anchorId: connection.anchor?.id ?? null,
-                    laneIndex,
+                    preferredLaneIndex: laneIndex,
                     originKey: `interaction:${accessPoint.id}`
                 }
                 : null,
-            // A direct connectTo: "node" has no edge/lane to enter. Reaching
-            // its portal therefore means the actor physically entered that
-            // graph node and must establish currentNodeId before continuing.
+            // A direct connectTo: "node" starts with the center only as a
+            // topological placeholder. If the route continues through an
+            // edge, RouteGeometryBuilder replaces it with that lane start.
             graphEntryNodeId: destinationNodeId &&
                 connection.nodeIds?.length === 1 &&
                 connection.nodeIds[0] === destinationNodeId

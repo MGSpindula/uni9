@@ -323,14 +323,6 @@ export class Scene {
         this.navigationConnector = new NavigationConnector(
             this.navigationGraph
         );
-        this.navigationHelper =
-            new NavigationGraphHelper(
-                this.navigationGraph,
-                {
-                    connector:
-                        this.navigationConnector
-                }
-            );
         this.characterNavigation =
             new CharacterNavigationSystem({
                 graph:
@@ -339,9 +331,20 @@ export class Scene {
                 connector:
                     this.navigationConnector,
 
-                helper:
-                    this.navigationHelper
+                helper: null
             });
+        this.navigationHelper =
+            new NavigationGraphHelper(
+                this.navigationGraph,
+                {
+                    connector: this.navigationConnector,
+                    trafficState:
+                        this.characterNavigation.trafficState,
+                    routeGeometry:
+                        this.characterNavigation.routeGeometry
+                }
+            );
+        this.characterNavigation.helper = this.navigationHelper;
         this.scene.add(this.navigationHelper);
         this.navigationHelper.highlightNode("spawn");
 
@@ -359,7 +362,7 @@ export class Scene {
         character.setGrounding(this.characterGrounding);
         this.characterNavigation.registerActor(character, { spawnId });
         this.interactionSystem.registerActor(character, request =>
-            this.characterNavigation.moveToInteractionPoint(
+            this.characterNavigation.moveToInteraction(
                 character,
                 request.point,
                 request.onArrive
@@ -485,11 +488,19 @@ export class Scene {
 
     update(delta) {
 
+        // 1. Input and pointer-derived state.
         this.selection.update();
+        this.controls.update();
 
+        const characters = [...this.characterNavigation.agents.keys()]
+            .filter(character => character.isActive());
+        const characterSet = new Set(characters);
+
+        // Non-character entities keep their ordinary lifecycle. Character
+        // presentation is intentionally deferred until after physics below.
         for (const object of this.objects) {
 
-            if (object.isActive()) {
+            if (object.isActive() && !characterSet.has(object)) {
 
                 object.update(delta);
 
@@ -497,15 +508,63 @@ export class Scene {
 
         }
 
+        // 2. AI decisions publish intents; they never move bodies directly.
         for (const controller of this.controllers) {
 
             controller.update(delta);
 
         }
 
-        this.controls.update();
+        // 3. Retry, recovery and route planning consume the newest intents.
+        this.characterNavigation.updatePlanning(delta);
 
-        this.characterNavigation.update(delta);
+        // 4. Queue state is advanced, then every current waypoint requests
+        // its node/lane/interaction authorization for this frame.
+        this.characterNavigation.updateTraffic(delta);
+
+        for (const character of characters) {
+
+            character.authorizeMovementTraffic();
+
+        }
+
+        // 5. Locomotion publishes the movement it would apply this frame.
+        for (const character of characters) {
+
+            character.prepareMovement();
+
+        }
+
+        // 6. CollisionFailsafe may only brake that intended movement.
+        for (const character of characters) {
+
+            character.evaluateMovementGuard(delta);
+
+        }
+
+        for (const character of characters) {
+
+            character.updateMovement(delta);
+
+        }
+
+        // 7. Cannon separates residual body contacts; it never chooses paths.
+        this.characterNavigation.solvePhysics(delta);
+
+        // 8. The walkable surface owns the final vertical position.
+        for (const character of characters) {
+
+            character.updateGrounding();
+
+        }
+
+        // 9. Animation consumes the final motion produced by this frame.
+        for (const character of characters) {
+
+            character.updateAnimation(delta);
+
+        }
+
 
     }
 

@@ -4,7 +4,9 @@ export class Locomotion {
 
     constructor(object3D, { speed = 3, turnSpeed = 8, arrivalDistance = 0.05 } = {}) {
 
-        // Locomotion owns physical displacement, never animation selection.
+        // Authority: apply movement already authorized by NavigationTraffic
+        // and CharacterCollisionFailsafe. Locomotion never chooses a route,
+        // reserves a resource or selects an animation.
         this.object3D = object3D;
         this.speed = speed;
         this.turnSpeed = turnSpeed;
@@ -156,10 +158,9 @@ export class Locomotion {
 
         if (nextDistance < targetDistance) return false;
 
-        // A route-wide spline has semantic anchors along one persistent
-        // curve. Reaching a node pauses at its distance but does not reset the
-        // curve; after traffic accepts the next segment locomotion continues
-        // from this exact arc-length position.
+        // Every authorized segment owns a small local curve. Reset at its end;
+        // the next segment will start at this exact portal with a matching
+        // tangent, without retaining geometry for the rest of the route.
         if (finishCurve || targetDistance >= length) this.resetCurve();
         return true;
 
