@@ -163,25 +163,12 @@ export class InteractionTraversalCoordinator {
                 )
         ) {
 
-            if (
-                requiresApproachReservation &&
-                context.traversal
-                    .interactionExitPoint ===
-                approachPoint
-            ) {
-
-                this.interactionTraffic
-                    .releasePoint(
-                        approachPoint,
-                        actor
-                    );
-
-                context.traversal
-                    .interactionExitPoint =
-                    null;
-
-            }
-
+            /*
+             * ActionPoint continua ocupado.
+             * ApproachPoint continua reservado.
+             * Queue, lane e node movement permanecem
+             * como uma única transação.
+             */
             context.wait.retryElapsed =
                 0;
 
@@ -239,11 +226,21 @@ export class InteractionTraversalCoordinator {
 
     }
 
-    completeInteractionExit(context) {
+    completeInteractionExit(
+        context
+    ) {
 
-        this.leaveInteractionPoint(context);
-        this.releaseInteractionExitPoint(context);
-        context.interaction.exitCommitted = false;
+        this.leaveInteractionPoint(
+            context
+        );
+
+        this.releaseInteractionExitPoint(
+            context
+        );
+
+        context.interaction
+            .exitCommitted =
+            false;
 
     }
 
@@ -261,22 +258,74 @@ export class InteractionTraversalCoordinator {
 
     }
 
-    leaveInteractionPoint(context) {
+    leaveInteractionPoint(
+        context
+    ) {
 
-        if (!context.traversal.interactionPoint) return;
+        const actor =
+            context.actor;
 
-        if (context.interaction.active?.point === context.traversal.interactionPoint) {
+        const traversalPoint =
+            context.traversal
+                .interactionPoint;
 
-            this.finishActiveInteraction(context);
+        const activePoint =
+            context.interaction
+                .active
+                ?.point ??
+            null;
+
+        /*
+         * Executa primeiro o callback autoral de
+         * encerramento da interação.
+         */
+        if (
+            context.interaction.active
+        ) {
+
+            this.finishActiveInteraction(
+                context
+            );
 
         }
 
-        this.interactionTraffic.releasePoint(
-            context.traversal.interactionPoint,
-            context.actor
-        );
+        /*
+         * A referência no NavigationAgent não é
+         * autoridade de tráfego. O ponto precisa
+         * ser removido explicitamente do
+         * InteractionTrafficState.
+         */
+        if (traversalPoint) {
 
-        context.traversal.interactionPoint = null;
+            this.interactionTraffic
+                .releasePoint(
+                    traversalPoint,
+                    actor
+                );
+
+        }
+
+        /*
+         * Limpeza defensiva para estados antigos
+         * em que interaction.active.point e
+         * traversal.interactionPoint divergiram.
+         */
+        if (
+            activePoint &&
+            activePoint !== traversalPoint
+        ) {
+
+            this.interactionTraffic
+                .releasePoint(
+                    activePoint,
+                    actor
+                );
+
+        }
+
+        context.traversal
+            .interactionPoint =
+            null;
 
     }
 

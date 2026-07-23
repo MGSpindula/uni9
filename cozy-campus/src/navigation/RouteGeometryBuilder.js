@@ -380,6 +380,103 @@ export class RouteGeometryBuilder {
 
     }
 
+    createJunctionTransitionSegment({
+        start,
+        end,
+        startDirection,
+        endDirection,
+        nodeId,
+        laneIndex = null
+    }) {
+
+        const circularHandle =
+            this.getJunctionHandleLength({
+                start,
+                end,
+                startDirection,
+                endDirection,
+                nodeId
+            });
+
+        let startHandle =
+            circularHandle;
+
+        let endHandle =
+            circularHandle;
+
+        let segment =
+            null;
+
+        for (
+            let attempt = 0;
+            attempt < 5;
+            attempt++
+        ) {
+
+            const curve =
+                new THREE.CubicBezierCurve3(
+                    start.clone(),
+
+                    start.clone()
+                        .addScaledVector(
+                            startDirection,
+                            startHandle
+                        ),
+
+                    end.clone()
+                        .addScaledVector(
+                            endDirection,
+                            -endHandle
+                        ),
+
+                    end.clone()
+                );
+
+            segment =
+                new RouteSegment({
+                    type:
+                        RouteSegmentType
+                            .JUNCTION_TRANSITION,
+
+                    curve,
+
+                    resource:
+                        this.graph.requireNode(
+                            nodeId
+                        ),
+
+                    laneIndex
+                });
+
+            const validation =
+                segment.validate({
+                    maxTurnRadians:
+                        Math.PI * 0.55,
+
+                    allowChordReversal:
+                        true
+                });
+
+            if (
+                validation.valid
+            ) {
+
+                break;
+
+            }
+
+            startHandle *=
+                0.65;
+
+            endHandle *=
+                0.65;
+
+        }
+
+        return segment;
+
+    }
+
     createAuthorizedConnectionGeometry({
         actor,
         fromId,
@@ -423,53 +520,28 @@ export class RouteGeometryBuilder {
                 startDirection.normalize();
             }
 
-            const circularHandle = this.getJunctionHandleLength({
-                start: startPosition,
-                end: laneStart,
-                startDirection,
-                endDirection: laneDirection,
-                nodeId: fromId
-            });
-            let startHandle = circularHandle;
-            let joinHandle = circularHandle;
-            let segment = null;
+            const segment =
+                this.createJunctionTransitionSegment({
+                    start:
+                        startPosition,
 
-            // Never discard an observed incoming tangent. If large handles
-            // overshoot, shorten their magnitude while retaining both endpoint
-            // directions. This preserves G1 continuity even on obtuse turns.
-            for (let attempt = 0; attempt < 5; attempt++) {
+                    end:
+                        laneStart,
 
-                const curve = new THREE.CubicBezierCurve3(
-                    startPosition.clone(),
-                    startPosition.clone().addScaledVector(
-                        startDirection,
-                        startHandle
-                    ),
-                    laneStart.clone().addScaledVector(
+                    startDirection,
+
+                    endDirection:
                         laneDirection,
-                        -joinHandle
-                    ),
-                    laneStart.clone()
-                );
-                segment = new RouteSegment({
-                    type: RouteSegmentType.JUNCTION_TRANSITION,
-                    curve,
-                    resource: this.graph.requireNode(fromId),
+
+                    nodeId:
+                        fromId,
+
                     laneIndex
                 });
-                const validation = segment.validate({
-                    maxTurnRadians: Math.PI * 0.55,
-                    allowChordReversal: true
-                });
 
-                if (validation.valid) break;
-
-                startHandle *= 0.65;
-                joinHandle *= 0.65;
-
-            }
-
-            geometry.add(segment);
+            geometry.add(
+                segment
+            );
 
         }
 

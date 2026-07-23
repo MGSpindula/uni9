@@ -213,6 +213,68 @@ export class Locomotion {
 
     }
 
+    retreatAlongDirection(
+        direction,
+        delta,
+        maximumDistance = Infinity,
+        {
+            followSurface = true
+        } = {}
+    ) {
+
+        this.direction
+            .copy(direction)
+            .setY(0);
+
+        if (
+            this.direction.lengthSq() <=
+            0.0001
+        ) {
+
+            return 0;
+
+        }
+
+        const distance =
+            Math.min(
+                this.speed * delta,
+                maximumDistance
+            );
+
+        if (
+            distance <= 0
+        ) {
+
+            return 0;
+
+        }
+
+        this.object3D.position
+            .addScaledVector(
+                this.direction.normalize(),
+                distance
+            );
+
+        if (!followSurface) {
+
+            this.object3D.position.y +=
+                direction.y *
+                distance;
+
+        }
+
+        this.recordMovement(
+            distance,
+            delta
+        );
+
+        this.motion.retreating =
+            true;
+
+        return distance;
+
+    }
+
     moveSideways(direction, delta, maximumDistance) {
 
         const distance = Math.min(this.speed * delta, maximumDistance);

@@ -33,89 +33,288 @@ export class CharacterCollisionSolver {
         this.secondTangent = new THREE.Vector3();
         this.sideDirection = new THREE.Vector3();
         this.centerPoint = new THREE.Vector3();
+        this.retreatDirection = new THREE.Vector3();
 
     }
 
-    resolve(actors, delta) {
+    resolve(
+        actors,
+        delta
+    ) {
 
-        const activeYielders = new Set();
+        const activeYielders =
+            new Set();
 
-        this.forEachOverlappingPair(actors, (first, second, required) => {
+        const requestedManeuvers =
+            new Map();
 
-            const encounter = this.owner.collisionFailsafe
-                .getOrCreateEncounter(first, second);
-            this.owner.collisionFailsafe.markEncounterCollision(
-                encounter,
+        this.forEachOverlappingPair(
+            actors,
+            (
                 first,
-                second
-            );
-            const actor = encounter.yielder;
-            const blocker = encounter.winner;
-            const maneuver = this.getOrCreateManeuver(
-                actor,
-                blocker,
-                encounter
-            );
+                second,
+                required
+            ) => {
 
-            activeYielders.add(actor);
-            maneuver.phase = maneuver.strategy === "lane-side-step"
-                ? "stepping-aside"
-                : "backing-up";
-            this.createSpace(actor, maneuver, delta);
+                const encounter =
+                    this.owner
+                        .collisionFailsafe
+                        .getOrCreateEncounter(
+                            first,
+                            second
+                        );
 
-            if (this.owner.collisionFailsafe.getPlanarDistance(
-                actor,
-                blocker
-            ) < required) maneuver.phase = "holding";
+                this.owner
+                    .collisionFailsafe
+                    .markEncounterCollision(
+                        encounter,
+                        first,
+                        second
+                    );
 
-        });
+                /*
+                 * O stale-node recovery já atribuiu
+                 * uma rota de saída. Recriar uma
+                 * manobra impediria essa rota de andar.
+                 */
+                if (
+                    encounter.recoveryActor
+                ) {
 
-        for (const [actor, maneuver] of [...this.maneuvers]) {
+                    return;
 
-            if (activeYielders.has(actor)) continue;
-
-            const clearance = this.owner.collisionFailsafe.getPlanarDistance(
-                actor,
-                maneuver.blocker
-            );
-            const releaseDistance = this.getRequiredClearance(
-                actor,
-                maneuver.blocker
-            ) + this.releaseMargin;
-
-            if (clearance >= releaseDistance) {
-
-                if (maneuver.strategy === "lane-side-step" &&
-                    !actor.locomotion.rejoinActiveCurve(
-                        delta * this.sideStepSpeedFactor
-                    )) {
-                    maneuver.phase = "rejoining";
-                    continue;
                 }
 
-                this.maneuvers.delete(actor);
-                continue;
+                const actor =
+                    encounter.yielder;
+
+                const blocker =
+                    encounter.winner;
+
+                const clearance =
+                    this.owner
+                        .collisionFailsafe
+                        .getPlanarDistance(
+                            actor,
+                            blocker
+                        );
+
+                const previous =
+                    requestedManeuvers.get(
+                        actor
+                    );
+
+                const nodePriority =
+                    encounter.nodeId
+                        ? 1
+                        : 0;
+
+                const shouldReplace =
+                    !previous ||
+                    nodePriority >
+                    previous.nodePriority ||
+                    (
+                        nodePriority ===
+                        previous.nodePriority &&
+                        clearance <
+                        previous.clearance
+                    );
+
+                if (!shouldReplace) {
+
+                    return;
+
+                }
+
+                requestedManeuvers.set(
+                    actor,
+                    {
+                        actor,
+                        blocker,
+                        encounter,
+                        required,
+                        clearance,
+                        nodePriority
+                    }
+                );
+
+            }
+        );
+
+        for (
+            const request of
+            requestedManeuvers.values()
+        ) {
+
+            const {
+                actor,
+                blocker,
+                encounter,
+                required
+            } = request;
+
+            const maneuver =
+                this.getOrCreateManeuver(
+                    actor,
+                    blocker,
+                    encounter
+                );
+
+            activeYielders.add(
+                actor
+            );
+
+            maneuver.phase =
+                maneuver.strategy ===
+                    "lane-side-step"
+
+                    ? "stepping-aside"
+                    : "backing-up";
+
+            const moved =
+                this.createSpace(
+                    actor,
+                    maneuver,
+                    delta
+                );
+
+            this.updateStall(
+                maneuver,
+                moved,
+                delta
+            );
+
+            if (
+                this.owner
+                    .collisionFailsafe
+                    .getPlanarDistance(
+                        actor,
+                        blocker
+                    ) <
+                required
+            ) {
+
+                maneuver.phase =
+                    "holding";
+
             }
 
-            // A rear-end encounter is not a right-of-way negotiation. The
-            // follower simply holds its place while the leader keeps moving;
-            // backing up is used only to undo real overlap in the block above.
-            // Repeating the retreat here made the follower leave its route and
-            // kept both actors inside an endless clearance agreement.
-            if (maneuver.strategy === "follow-wait") {
-                maneuver.phase = "following";
+        }
+
+        for (
+            const [
+                actor,
+                maneuver
+            ] of [...this.maneuvers]
+        ) {
+
+            if (
+                activeYielders.has(
+                    actor
+                )
+            ) {
+
                 continue;
+
             }
 
-            // If the winner remains too close, create a little more room by
-            // taking real backward steps. No movement is applied to blocker.
-            maneuver.phase = maneuver.strategy === "lane-side-step"
-                ? "stepping-aside"
-                : "backing-up";
-            this.createSpace(actor, maneuver, delta);
-            if (!actor.locomotion.motion.retreating &&
-                !actor.locomotion.motion.avoiding) {
-                maneuver.phase = "holding";
+            const clearance =
+                this.owner
+                    .collisionFailsafe
+                    .getPlanarDistance(
+                        actor,
+                        maneuver.blocker
+                    );
+
+            const releaseDistance =
+                this.getRequiredClearance(
+                    actor,
+                    maneuver.blocker
+                ) +
+                this.releaseMargin;
+
+            if (
+                clearance >=
+                releaseDistance
+            ) {
+
+                if (
+                    maneuver.strategy ===
+                    "lane-side-step" &&
+                    !actor.locomotion
+                        .rejoinActiveCurve(
+                            delta *
+                            this.sideStepSpeedFactor
+                        )
+                ) {
+
+                    maneuver.phase =
+                        "rejoining";
+
+                    continue;
+
+                }
+
+                maneuver.encounter
+                    .stalledElapsed =
+                    0;
+
+                this.maneuvers.delete(
+                    actor
+                );
+
+                continue;
+
+            }
+
+            if (
+                maneuver.strategy ===
+                "follow-wait"
+            ) {
+
+                maneuver.phase =
+                    "following";
+
+                this.updateStall(
+                    maneuver,
+                    0,
+                    delta
+                );
+
+                continue;
+
+            }
+
+            maneuver.phase =
+                maneuver.strategy ===
+                    "lane-side-step"
+
+                    ? "stepping-aside"
+                    : "backing-up";
+
+            const moved =
+                this.createSpace(
+                    actor,
+                    maneuver,
+                    delta
+                );
+
+            this.updateStall(
+                maneuver,
+                moved,
+                delta
+            );
+
+            if (
+                !actor.locomotion
+                    .motion.retreating &&
+                !actor.locomotion
+                    .motion.avoiding
+            ) {
+
+                maneuver.phase =
+                    "holding";
+
             }
 
         }
@@ -146,20 +345,262 @@ export class CharacterCollisionSolver {
 
     }
 
-    retreat(actor, maneuver, delta) {
+    retreat(
+        actor,
+        maneuver,
+        delta
+    ) {
 
-        const remaining = Math.max(
-            0,
-            this.maximumRetreatPerEncounter - maneuver.retreatDistance
-        );
-        if (remaining <= 0) return 0;
+        const clearance =
+            this.owner
+                .collisionFailsafe
+                .getPlanarDistance(
+                    actor,
+                    maneuver.blocker
+                );
 
-        const moved = actor.locomotion.retreatAlongCurve(
-            delta * this.retreatSpeedFactor,
-            remaining
-        );
-        maneuver.retreatDistance += moved;
+        const requiredDistance =
+            this.getRequiredClearance(
+                actor,
+                maneuver.blocker
+            ) +
+            this.releaseMargin;
+
+        const requiredMovement =
+            Math.max(
+                0,
+                requiredDistance -
+                clearance
+            );
+
+        maneuver.retreatLimit =
+            Math.max(
+                maneuver.retreatLimit ??
+                0,
+
+                this.maximumRetreatPerEncounter,
+
+                maneuver.retreatDistance +
+                requiredMovement +
+                0.08
+            );
+
+        const remaining =
+            Math.max(
+                0,
+                maneuver.retreatLimit -
+                maneuver.retreatDistance
+            );
+
+        if (
+            remaining <= 0
+        ) {
+
+            return 0;
+
+        }
+
+        let moved =
+            actor.locomotion
+                .retreatAlongCurve(
+                    delta *
+                    this.retreatSpeedFactor,
+
+                    remaining
+                );
+
+        /*
+         * Estado legado ou recovery pode ter
+         * apagado a curva sem apagar a conexão.
+         */
+        if (
+            moved <= 0.0001
+        ) {
+
+            const direction =
+                this.getEmergencyRetreatDirection(
+                    actor,
+                    maneuver.blocker
+                );
+
+            moved =
+                actor.locomotion
+                    .retreatAlongDirection(
+                        direction,
+
+                        delta *
+                        this.retreatSpeedFactor,
+
+                        remaining
+                    );
+
+        }
+
+        maneuver.retreatDistance +=
+            moved;
+
         return moved;
+
+    }
+
+    getEmergencyRetreatDirection(
+        actor,
+        blocker
+    ) {
+
+        const traversal =
+            actor.navigation
+                .getTraversalState();
+
+        if (
+            traversal.currentConnection
+        ) {
+
+            const from =
+                this.owner.graph
+                    .requireNode(
+                        traversal
+                            .currentConnection
+                            .fromId
+                    )
+                    .position;
+
+            const to =
+                this.owner.graph
+                    .requireNode(
+                        traversal
+                            .currentConnection
+                            .toId
+                    )
+                    .position;
+
+            return this.retreatDirection
+                .copy(from)
+                .sub(to)
+                .setY(0)
+                .normalize();
+
+        }
+
+        const context =
+            this.owner.agents.get(
+                actor
+            );
+
+        const arrivalFromNodeId =
+            context
+                ?.traversal
+                ?.arrivalFromNodeId;
+
+        if (
+            arrivalFromNodeId &&
+            this.owner.graph.hasNode(
+                arrivalFromNodeId
+            )
+        ) {
+
+            return this.retreatDirection
+                .copy(
+                    this.owner.graph
+                        .requireNode(
+                            arrivalFromNodeId
+                        )
+                        .position
+                )
+                .sub(
+                    actor.object3D.position
+                )
+                .setY(0)
+                .normalize();
+
+        }
+
+        return this.retreatDirection
+            .copy(
+                actor.object3D.position
+            )
+            .sub(
+                blocker.object3D.position
+            )
+            .setY(0)
+            .normalize();
+
+    }
+
+    updateStall(
+        maneuver,
+        moved,
+        delta
+    ) {
+
+        const encounter =
+            maneuver.encounter;
+
+        if (!encounter) {
+
+            return;
+
+        }
+
+        if (
+            moved > 0.0001
+        ) {
+
+            encounter.stalledElapsed =
+                0;
+
+            return;
+
+        }
+
+        encounter.stalledElapsed =
+            (
+                encounter.stalledElapsed ??
+                0
+            ) +
+            delta;
+
+    }
+
+    forceRetreat(
+        encounter
+    ) {
+
+        if (!encounter) {
+
+            return false;
+
+        }
+
+        encounter.recoveryActor =
+            null;
+
+        encounter.stalledElapsed =
+            0;
+
+        const maneuver =
+            this.getOrCreateManeuver(
+                encounter.yielder,
+                encounter.winner,
+                encounter
+            );
+
+        maneuver.strategy =
+            "backstep";
+
+        maneuver.sideDirection =
+            null;
+
+        maneuver.phase =
+            "backing-up";
+
+        maneuver.retreatDistance =
+            0;
+
+        maneuver.retreatLimit =
+            0;
+
+        return true;
 
     }
 
@@ -600,23 +1041,87 @@ export class CharacterCollisionSolver {
 
     }
 
-    getOrCreateManeuver(actor, blocker, encounter) {
+    getOrCreateManeuver(
+        actor,
+        blocker,
+        encounter
+    ) {
 
-        const existing = this.maneuvers.get(actor);
-        if (existing?.blocker === blocker) return existing;
+        const decision =
+            this.chooseStrategy(
+                actor,
+                blocker,
+                encounter
+            );
 
-        const decision = this.chooseStrategy(actor, blocker, encounter);
+        const existing =
+            this.maneuvers.get(
+                actor
+            );
+
+        if (
+            existing?.blocker ===
+            blocker
+        ) {
+
+            if (
+                existing.strategy !==
+                decision.strategy
+            ) {
+
+                existing.strategy =
+                    decision.strategy;
+
+                existing.sideDirection =
+                    decision.sideDirection;
+
+                existing.retreatDistance =
+                    0;
+
+                existing.retreatLimit =
+                    0;
+
+                existing.sideDistance =
+                    0;
+
+            }
+
+            existing.encounter =
+                encounter;
+
+            return existing;
+
+        }
+
         const maneuver = {
             actor,
             blocker,
             encounter,
-            phase: "holding",
-            strategy: decision.strategy,
-            sideDirection: decision.sideDirection,
-            retreatDistance: 0,
-            sideDistance: 0
+
+            phase:
+                "holding",
+
+            strategy:
+                decision.strategy,
+
+            sideDirection:
+                decision.sideDirection,
+
+            retreatDistance:
+                0,
+
+            retreatLimit:
+                0,
+
+            sideDistance:
+                0
         };
-        this.maneuvers.set(actor, maneuver);
+
+        this.maneuvers.set(
+            actor,
+            maneuver
+        );
+
         return maneuver;
 
     }

@@ -29,43 +29,72 @@ export class NavigationRecoveryPolicy {
         // encounter, loses reservations and can turn two nearby actors into a
         // permanent replan loop. CollisionFailsafe chooses a stable winner;
         // CollisionSolver creates space and rejoins the SAME route.
-        if (this.collisionFailsafe.isWaiting(actor)) {
+        if (
+            this.collisionFailsafe
+                .isWaiting(actor)
+        ) {
 
-            context.wait.collisionElapsed += delta;
-            context.recovery.elapsed = 0;
-            context.recovery.position.copy(actor.object3D.position);
+            context.wait.collisionElapsed +=
+                delta;
 
-            const encounter = this.collisionFailsafe.getEncounter(actor);
+            context.recovery.elapsed =
+                0;
 
-            // A collision physically occupying a node is a group deadlock,
-            // not an individual route failure. Reset all local competitors
-            // together so another actor cannot immediately inherit the same
-            // stale queue and recreate the collision.
-            if (encounter?.nodeId &&
-                context.wait.collisionElapsed >=
-                    context.wait.collisionTimeout) {
+            context.recovery.position
+                .copy(
+                    actor.object3D.position
+                );
 
-                return this.navigation.evacuateStaleNode(encounter.nodeId);
+            const encounter =
+                this.collisionFailsafe
+                    .getEncounter(
+                        actor
+                    );
+
+            if (!encounter) {
+
+                return false;
 
             }
 
-            const collisionMayExpire =
-                actor.navigationIntentPolicy !== "persistent" &&
-                !context.interaction.leaving &&
-                !context.interaction.exitCommitted;
+            const solverStalled =
+                (
+                    encounter.stalledElapsed ??
+                    0
+                ) >= 0.75;
 
-            if (collisionMayExpire &&
+            const timedOut =
                 context.wait.collisionElapsed >=
-                    context.wait.collisionTimeout) {
+                context.wait.collisionTimeout;
 
-                console.warn(
-                    `[NavigationRecovery] ${actor.name} abandons a stale ` +
-                    `collision route after ` +
-                    `${context.wait.collisionElapsed.toFixed(1)}s.`
-                );
-                this.navigation.metrics.increment("routeRecoveries");
-                this.abandonReplaceableRoute(context);
-                return true;
+            /*
+             * Nunca apague a rota enquanto os corpos
+             * ainda participam do mesmo encounter.
+             */
+            if (
+                encounter.nodeId &&
+                (
+                    solverStalled ||
+                    timedOut
+                )
+            ) {
+
+                return this.navigation
+                    .evacuateStaleNode(
+                        encounter.nodeId
+                    );
+
+            }
+
+            if (
+                solverStalled ||
+                timedOut
+            ) {
+
+                return this.navigation
+                    .resolveStaleCollision(
+                        encounter
+                    );
 
             }
 
@@ -201,6 +230,33 @@ export class NavigationRecoveryPolicy {
 
         }
 
+        /*
+        * Um NPC replaceable que não conseguiu chegar
+        * ao InteractionPoint precisa evitar esse mesmo
+        * ponto na próxima escolha de comportamento.
+        *
+        * Capture a referência antes de limpar o intent.
+        */
+        const rejectedPoint =
+            replaceableWait
+
+                ? context.intent
+                    .interaction
+                    ?.point ??
+                null
+
+                : null;
+
+        if (rejectedPoint) {
+
+            actor.navigationAvoidInteractionPoint =
+                rejectedPoint;
+
+            actor.navigationAvoidInteractionPointId =
+                rejectedPoint.id;
+
+        }
+
         console.warn(
             `[NavigationRecovery] ${actor.name} abandons a stale traffic wait ` +
             `at "${wait.resourceId}" and releases its route.`
@@ -222,12 +278,6 @@ export class NavigationRecoveryPolicy {
 
             actor.setState(EntityState.WAITING);
             this.navigation.retryPreservedIntent(context, { maxDetourFactor: 6 });
-
-        } else {
-
-            // Autonomous actors may abandon one ambient action. Their
-            // controller receives IDLE and chooses a new task next update.
-            this.abandonReplaceableRoute(context);
 
         }
 
@@ -263,7 +313,7 @@ export class NavigationRecoveryPolicy {
             // physically occupied right now is not. Cancel only the pending
             // departure and let the controller make another decision later.
             this.traffic.cancel(actor);
-        this.interactionTraffic.releaseReservations(actor);
+            this.interactionTraffic.releaseReservations(actor);
             this.navigation.trafficState.releaseReservations(actor);
             this.navigation.routeGeometry.clearActiveLaneCurve(actor);
             this.collisionFailsafe.cancel(actor);

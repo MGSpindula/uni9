@@ -174,6 +174,35 @@ export class CozyCampusInteractionPoints
                 )
             );
 
+        this.ballPoint =
+            this.addInteractionPoint(
+                new InteractionPoint(
+                    "ambient:ball",
+                    {
+                        position:
+                            new THREE.Vector3(
+                                -9, 
+                                0, 
+                                -1
+                            ),
+
+                        rotationY:
+                            Math.PI * 1,
+
+                        connectTo:
+                            "west-3",
+
+                        terminal:
+                            true,
+
+                        metadata: {
+                            pose: "stand",
+                            role: "action"
+                        }
+                    }
+                )
+            );
+
     }
 
     createDefinitions() {

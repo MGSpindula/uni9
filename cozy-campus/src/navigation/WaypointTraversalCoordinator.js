@@ -13,31 +13,92 @@ export class WaypointTraversalCoordinator {
 
     }
 
-    canAcceptArrival(context, waypoint, completedConnection) {
+    canAcceptArrival(
+        context,
+        waypoint,
+        completedConnection
+    ) {
 
-        if (!completedConnection || !waypoint?.id) return true;
+        if (
+            !completedConnection ||
+            !waypoint?.id
+        ) {
 
-        const nav = this.navigation;
-        const { actor } = context;
-        nav.traffic.claimPhysicalArrival(waypoint.id, actor);
+            return true;
 
-        if (!nav.traffic.hasArrivalGrant(waypoint.id, actor)) {
-            nav.traffic.setWaitReason(
-                actor,
-                waypoint.id,
-                WaitReason.ENDPOINT_WAIT
-            );
-            return false;
         }
 
-        if (!nav.traffic.canCrossNode(waypoint.id, actor)) {
-            nav.traffic.setWaitReason(
-                actor,
-                waypoint.id,
-                WaitReason.NODE_OCCUPIED
-            );
+        const nav =
+            this.navigation;
+
+        const {
+            actor
+        } = context;
+
+        /*
+         * Há uma única criação do pedido de chegada.
+         *
+         * Ela usa a conexão e a lane realmente
+         * ocupadas pelo ator.
+         */
+        if (
+            !nav.traffic
+                .claimPhysicalArrival(
+                    waypoint.id,
+                    actor,
+                    {
+                        completedConnection,
+                        waypoint
+                    }
+                )
+        ) {
+
             return false;
+
         }
+
+        if (
+            !nav.traffic
+                .hasArrivalGrant(
+                    waypoint.id,
+                    actor
+                )
+        ) {
+
+            nav.traffic
+                .setWaitReason(
+                    actor,
+                    waypoint.id,
+                    WaitReason.ENDPOINT_WAIT
+                );
+
+            return false;
+
+        }
+
+        if (
+            !nav.traffic
+                .canCrossNode(
+                    waypoint.id,
+                    actor
+                )
+        ) {
+
+            nav.traffic
+                .setWaitReason(
+                    actor,
+                    waypoint.id,
+                    WaitReason.NODE_OCCUPIED
+                );
+
+            return false;
+
+        }
+
+        nav.traffic
+            .clearWaitReason(
+                actor
+            );
 
         return true;
 
@@ -63,135 +124,350 @@ export class WaypointTraversalCoordinator {
 
     }
 
-    handleReached(context, waypoint, completedConnection) {
+    handleReached(
+        context,
+        waypoint,
+        completedConnection
+    ) {
 
-        const nav = this.navigation;
-        const { actor } = context;
-        const interactionResult = nav.interactions.handleWaypoint(
-            context,
-            waypoint
-        );
+        const nav =
+            this.navigation;
 
-        if (interactionResult === "waiting") return false;
-        if (interactionResult) return;
-        if (!waypoint.id) return;
+        const {
+            actor
+        } = context;
 
-        if (context.traversal.interactionPoint) {
-            nav.leaveInteractionPoint(context);
+        const interactionResult =
+            nav.interactions
+                .handleWaypoint(
+                    context,
+                    waypoint
+                );
+
+        if (
+            interactionResult ===
+            "waiting"
+        ) {
+
+            return false;
+
+        }
+
+        if (interactionResult) {
+
+            return;
+
+        }
+
+        if (!waypoint.id) {
+
+            return;
+
         }
 
         const isFinalRouteWaypoint =
-            actor.navigation.getNextWaypoint() === null;
+            actor.navigation
+                .getNextWaypoint() ===
+            null;
+
         const reachedDestination =
-            waypoint.id === context.intent.destinationId ||
+            waypoint.id ===
+            context.intent
+                .destinationId ||
             (
-                actor.navigationIntentPolicy !== "persistent" &&
+                actor.navigationIntentPolicy !==
+                "persistent" &&
                 isFinalRouteWaypoint &&
-                context.intent.position !== null &&
-                context.intent.interaction === null
+                context.intent.position !==
+                null &&
+                context.intent.interaction ===
+                null
             );
 
-        if (reachedDestination && waypoint.id !== context.intent.destinationId) {
+        if (
+            reachedDestination &&
+            waypoint.id !==
+            context.intent
+                .destinationId
+        ) {
+
             console.log(
                 `[NavigationRecovery] ${actor.name} treats final waypoint ` +
                 `"${waypoint.id}" as its destination after intent ` +
                 `synchronization was lost.`
             );
+
         }
 
-        if (completedConnection) {
+        const crossing =
+            !reachedDestination &&
+            actor.navigation
+                .getNextWaypoint() !==
+            null;
 
-            context.traversal.laneCurve = false;
-            nav.routeGeometry.clearActiveLaneCurve(actor);
-            context.traversal.arrivalFromNodeId = completedConnection.fromId;
-            context.traversal.kind = "flat";
-            actor.traversalType = "flat";
-            nav.trafficState.releaseConnection(
-                completedConnection.fromId,
-                completedConnection.toId,
-                actor
-            );
+        /*
+         * O ator continua ocupando a lane até o
+         * nó aceitar fisicamente seu corpo.
+         */
+        if (
+            !nav.traffic
+                .occupyGrantedNode(
+                    waypoint.id,
+                    actor,
+                    {
+                        crossing
+                    }
+                )
+        ) {
 
-            if (reachedDestination &&
-                actor.visual &&
-                Math.abs(actor.visual.position.x) > 0.001) {
-                AnimationPresets.to(actor, {
-                    object: actor.visual.position,
-                    property: "x",
-                    to: 0,
-                    duration: 0.25,
-                    easing: Tween.easeInOutQuad
-                });
+            /*
+             * Character.updateMovement() chama
+             * reachNode() antes deste handler.
+             *
+             * Se a transferência falhar, restaura
+             * currentConnection para que tráfego,
+             * collision failsafe e stale-claim
+             * continuem reconhecendo que o ator
+             * está no endpoint da lane.
+             */
+            if (completedConnection) {
+
+                actor.navigation
+                    .beginConnection(
+                        completedConnection
+                            .fromId,
+
+                        completedConnection
+                            .toId
+                    );
+
+                nav.trafficState
+                    .ensureConnectionOccupancy(
+                        completedConnection
+                            .fromId,
+
+                        completedConnection
+                            .toId,
+
+                        actor,
+
+                        waypoint
+                            .authorizedLaneIndex ??
+                        null
+                    );
+
             }
 
-        }
-
-        const crossing = !reachedDestination &&
-            actor.navigation.getNextWaypoint() !== null;
-
-        if (!nav.trafficState.occupyNode(waypoint.id, actor, { crossing })) {
-
-            actor.setState(EntityState.WAITING);
-            console.log(
-                `[NavigationReservation] ${actor.name} reached ` +
-                `"${waypoint.id}" but waits for its reservation to become ` +
-                `occupiable.`
+            actor.setState(
+                EntityState.WAITING
             );
+
             nav.refresh();
+
             return false;
 
         }
 
-        nav.traffic.completeNodeArrival(waypoint.id, actor);
+        /*
+         * A transferência foi aceita.
+         * Só agora o ator deixa de ocupar a lane.
+         */
 
-        if (context.intent.closedLoop?.phase === "entering" &&
-            waypoint.id === context.intent.closedLoop.entryNodeId) {
-            context.intent.position = null;
-            context.intent.destinationId = null;
-            context.wait.retryElapsed = 0;
-            nav.startClosedLoopPriming(context);
-            nav.refresh();
-            return;
+        if (completedConnection) {
+
+            context.traversal
+                .laneCurve =
+                false;
+
+            nav.routeGeometry
+                .clearActiveLaneCurve(
+                    actor
+                );
+
+            context.traversal
+                .arrivalFromNodeId =
+                completedConnection
+                    .fromId;
+
+            context.traversal.kind =
+                "flat";
+
+            actor.traversalType =
+                "flat";
+
+            nav.trafficState
+                .releaseConnection(
+                    completedConnection
+                        .fromId,
+
+                    completedConnection
+                        .toId,
+
+                    actor
+                );
+
+            if (
+                reachedDestination &&
+                actor.visual &&
+                Math.abs(
+                    actor.visual.position.x
+                ) >
+                0.001
+            ) {
+
+                AnimationPresets.to(
+                    actor,
+                    {
+                        object:
+                            actor.visual
+                                .position,
+
+                        property:
+                            "x",
+
+                        to:
+                            0,
+
+                        duration:
+                            0.25,
+
+                        easing:
+                            Tween.easeInOutQuad
+                    }
+                );
+
+            }
+
         }
 
-        if (waypoint.closedLoopPrimingEnd &&
-            context.intent.closedLoop?.phase === "priming") {
+        if (
+            context.traversal
+                .interactionPoint
+        ) {
 
-            const loop = context.intent.closedLoop;
+            nav.leaveInteractionPoint(
+                context
+            );
+
+        }
+
+        nav.traffic
+            .completeNodeArrival(
+                waypoint.id,
+                actor
+            );
+
+        if (
+            context.intent.closedLoop
+                ?.phase ===
+            "entering" &&
+            waypoint.id ===
+            context.intent
+                .closedLoop
+                .entryNodeId
+        ) {
+
+            context.intent.position =
+                null;
+
+            context.intent.destinationId =
+                null;
+
+            context.wait.retryElapsed =
+                0;
+
+            nav.startClosedLoopPriming(
+                context
+            );
+
+            nav.refresh();
+
+            return;
+
+        }
+
+        if (
+            waypoint.closedLoopPrimingEnd &&
+            context.intent.closedLoop
+                ?.phase ===
+            "priming"
+        ) {
+
+            const loop =
+                context.intent
+                    .closedLoop;
+
             loop.nodeIds = [
                 ...loop.nodeIds.slice(1),
                 loop.nodeIds[0]
             ];
-            loop.entryNodeId = waypoint.id;
-            loop.primingTargetId = null;
-            nav.startClosedLoopLap(context);
+
+            loop.entryNodeId =
+                waypoint.id;
+
+            loop.primingTargetId =
+                null;
+
+            nav.startClosedLoopLap(
+                context
+            );
+
             nav.refresh();
+
             return;
 
         }
 
-        if (waypoint.closedLoopLapEnd && context.intent.closedLoop) {
-            nav.completeClosedLoopLap(context, waypoint);
+        if (
+            waypoint.closedLoopLapEnd &&
+            context.intent.closedLoop
+        ) {
+
+            nav.completeClosedLoopLap(
+                context,
+                waypoint
+            );
+
             nav.refresh();
+
             return;
+
         }
 
         if (reachedDestination) {
 
-            context.intent.position = null;
-            context.intent.destinationId = null;
-            actor.setState(EntityState.IDLE);
+            context.intent.position =
+                null;
+
+            context.intent.destinationId =
+                null;
+
+            actor.setState(
+                EntityState.IDLE
+            );
 
             console.warn(
                 `[Navigation] "${waypoint.id}" was used as a terminal ` +
                 `destination. Navigation nodes must only be used for transit.`
             );
 
-            nav.trafficState.releaseNode(waypoint.id, actor);
-            actor.navigation.setCurrentNode(waypoint.id);
+            nav.trafficState
+                .releaseNode(
+                    waypoint.id,
+                    actor
+                );
+
+            actor.navigation
+                .setCurrentNode(
+                    waypoint.id
+                );
 
         } else {
-            actor.setState(EntityState.WALKING);
+
+            actor.setState(
+                EntityState.WALKING
+            );
+
         }
 
         nav.refresh();

@@ -11,50 +11,138 @@ export class NavigationDepartureQueue {
     enqueue(originId, actor, {
         rank = 0,
         priority = 0,
-        kind = "request"
+        kind = "request",
+        payload = null,
+        enqueuedAt = null
     } = {}) {
 
-        const queue = this.queues.get(originId) ?? [];
-        let request = this._getRequest(actor, originId);
+        const queue =
+            this.queues.get(
+                originId
+            ) ??
+            [];
+
+        let request =
+            this._getRequest(
+                actor,
+                originId
+            );
 
         if (!request) {
 
             request = {
                 actor,
                 originId,
-                order: this.sequence++,
+
+                order:
+                    this.sequence++,
+
                 rank,
                 priority,
-                kind
+                kind,
+                payload,
+                enqueuedAt,
+
+                granted:
+                    false,
+
+                grantedAt:
+                    null
             };
-            queue.push(request);
-            this.sort(queue);
-            this.queues.set(originId, queue);
 
-            let actorEntries = this.actorIndex.get(actor);
-            if (!actorEntries) {
-                actorEntries = new Map();
-                this.actorIndex.set(actor, actorEntries);
-            }
-            actorEntries.set(originId, request);
-
-            const position = queue.indexOf(request) + 1;
-            /* console.log(
-                `[NavigationQueue] + ${actor.name} queued at "${originId}" ` +
-                `(position ${position}, ` +
-                `${priority > 0 ? "transit priority" : "local action"}).`
-            ); */
-
-        } else if (rank > request.rank || priority > request.priority) {
-
-            request.rank = Math.max(request.rank, rank);
-            request.priority = priority;
-            request.kind = kind;
-            this.sort(queue);
-            console.log(
-                `[NavigationQueue] ↑ ${actor.name} promoted at ` +
-                `"${originId}" (position ${queue.indexOf(request) + 1}).`
+            queue.push(
+                request
             );
+
+            this.sort(
+                queue
+            );
+
+            this.queues.set(
+                originId,
+                queue
+            );
+
+            let actorEntries =
+                this.actorIndex.get(
+                    actor
+                );
+
+            if (!actorEntries) {
+
+                actorEntries =
+                    new Map();
+
+                this.actorIndex.set(
+                    actor,
+                    actorEntries
+                );
+
+            }
+
+            actorEntries.set(
+                originId,
+                request
+            );
+
+        } else {
+
+            if (
+                payload !== null
+            ) {
+
+                const previousMovementId =
+                    request.payload
+                        ?.movement
+                        ?.id ??
+                    null;
+
+                const nextMovementId =
+                    payload
+                        ?.movement
+                        ?.id ??
+                    null;
+
+                request.payload =
+                    payload;
+
+                if (
+                    previousMovementId !==
+                    nextMovementId
+                ) {
+
+                    request.granted =
+                        false;
+
+                    request.grantedAt =
+                        null;
+
+                }
+
+            }
+
+            if (
+                rank > request.rank ||
+                priority > request.priority
+            ) {
+
+                request.rank =
+                    Math.max(
+                        request.rank,
+                        rank
+                    );
+
+                request.priority =
+                    priority;
+
+                request.kind =
+                    kind;
+
+                this.sort(
+                    queue
+                );
+
+            }
 
         }
 
@@ -75,6 +163,87 @@ export class NavigationDepartureQueue {
             second.priority - first.priority ||
             first.order - second.order
         );
+
+    }
+
+    getRequest(
+        originId,
+        actor
+    ) {
+
+        return this._getRequest(
+            actor,
+            originId
+        );
+
+    }
+
+    getRequests(
+        originId
+    ) {
+
+        return [
+            ...(
+                this.queues.get(
+                    originId
+                ) ??
+                []
+            )
+        ];
+
+    }
+
+    setGranted(
+        originId,
+        actor,
+        granted,
+        grantedAt = null
+    ) {
+
+        const request =
+            this._getRequest(
+                actor,
+                originId
+            );
+
+        if (!request) {
+
+            return false;
+
+        }
+
+        request.granted =
+            granted;
+
+        request.grantedAt =
+            granted
+
+                ? grantedAt
+                : null;
+
+        return true;
+
+    }
+
+    clearGrants(
+        originId
+    ) {
+
+        for (
+            const request of
+            this.queues.get(
+                originId
+            ) ??
+            []
+        ) {
+
+            request.granted =
+                false;
+
+            request.grantedAt =
+                null;
+
+        }
 
     }
 

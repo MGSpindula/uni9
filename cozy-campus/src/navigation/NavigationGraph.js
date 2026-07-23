@@ -125,7 +125,7 @@ export class NavigationGraph {
         bidirectional = true,
         metadata = {},
         laneWidth = 1.0,
-        laneCapacity = 1
+        laneCapacity = 2
     } = {}) {
 
         const from =

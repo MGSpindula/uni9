@@ -6,16 +6,811 @@ import { WaitReason, WaitReasonLabel } from "./WaitReason";
 // and never applies displacement to an actor.
 export class NavigationTrafficSystem {
 
-    constructor(owner, { waitTimeout = 2.5 } = {}) {
+    constructor(owner, {
+        waitTimeout = 2.5,
+        movementFairnessTimeout = 2
+    } = {}) {
 
-        this.owner = owner;
-        this.graph = owner.graph;
-        this.state = owner.trafficState;
-        this.geometry = owner.routeGeometry;
-        this.departures = new NavigationDepartureQueue();
-        this.arrivals = new NavigationDepartureQueue();
-        this.waitReasons = new Map();
-        this.waitTimeout = waitTimeout;
+        this.owner =
+            owner;
+
+        this.graph =
+            owner.graph;
+
+        this.state =
+            owner.trafficState;
+
+        this.geometry =
+            owner.routeGeometry;
+
+        this.nodeMovements =
+            owner.nodeMovements;
+
+        this.departures =
+            new NavigationDepartureQueue();
+
+        this.arrivals =
+            new NavigationDepartureQueue();
+
+        this.waitReasons =
+            new Map();
+
+        this.waitTimeout =
+            waitTimeout;
+
+        this.movementFairnessTimeout =
+            movementFairnessTimeout;
+
+    }
+
+    getMovementClearance(
+        firstActor,
+        secondActor
+    ) {
+
+        const firstRadius =
+            firstActor
+                ?.collisionRadius ??
+            0.36;
+
+        const secondRadius =
+            secondActor
+                ?.collisionRadius ??
+            0.36;
+
+        /*
+         * As duas tolerâncias cobrem o erro
+         * máximo de aproximação das duas curvas.
+         */
+        return (
+            firstRadius +
+            secondRadius +
+            0.12 +
+            this.nodeMovements
+                .curveTolerance * 2
+        );
+
+    }
+
+    movementsConflict(
+        firstMovement,
+        secondMovement,
+        firstActor,
+        secondActor
+    ) {
+
+        return this.nodeMovements
+            .movementsConflict(
+                firstMovement,
+                secondMovement,
+
+                this.getMovementClearance(
+                    firstActor,
+                    secondActor
+                )
+            );
+
+    }
+
+    getPlanningConflictNodeIds(
+        nodeIds,
+        actor
+    ) {
+
+        const conflicts =
+            new Set();
+
+        /*
+         * O primeiro nó pertence ao ator.
+         * O último pode entregar a rota a um
+         * InteractionPoint, então avaliamos os
+         * movimentos topologicamente certos dos
+         * nós intermediários.
+         */
+        for (
+            let index = 1;
+            index <
+            nodeIds.length - 1;
+            index++
+        ) {
+
+            const previousId =
+                nodeIds[index - 1];
+
+            const nodeId =
+                nodeIds[index];
+
+            const nextId =
+                nodeIds[index + 1];
+
+            const state =
+                this.state.getNodeState(
+                    nodeId
+                );
+
+            if (
+                this.state
+                    .isCollisionBlockedFor(
+                        state,
+                        actor
+                    )
+            ) {
+
+                conflicts.add(
+                    nodeId
+                );
+
+                continue;
+
+            }
+
+            const entryLaneIndex =
+                this.nodeMovements
+                    .getDefaultLaneIndex(
+                        previousId,
+                        nodeId
+                    );
+
+            const exitLaneIndex =
+                this.nodeMovements
+                    .getDefaultLaneIndex(
+                        nodeId,
+                        nextId
+                    );
+
+            const movement =
+                this.nodeMovements
+                    .getOrCreateMovement({
+                        nodeId,
+
+                        entry:
+                            this.nodeMovements
+                                .createConnectionEndpoint({
+                                    nodeId,
+                                    fromId:
+                                        previousId,
+
+                                    toId:
+                                        nodeId,
+
+                                    laneIndex:
+                                        entryLaneIndex,
+
+                                    role:
+                                        "entry"
+                                }),
+
+                        exit:
+                            this.nodeMovements
+                                .createConnectionEndpoint({
+                                    nodeId,
+                                    fromId:
+                                        nodeId,
+
+                                    toId:
+                                        nextId,
+
+                                    laneIndex:
+                                        exitLaneIndex,
+
+                                    role:
+                                        "exit"
+                                })
+                    });
+
+            /*
+             * Reservas não retiram o nó da rota.
+             * Somente movimentos físicos ativos.
+             */
+            for (
+                const [
+                    other,
+                    activeMovement
+                ] of state.activeMovements
+            ) {
+
+                if (
+                    other === actor
+                ) {
+
+                    continue;
+
+                }
+
+                if (
+                    this.movementsConflict(
+                        movement,
+                        activeMovement,
+                        actor,
+                        other
+                    )
+                ) {
+
+                    conflicts.add(
+                        nodeId
+                    );
+
+                    break;
+
+                }
+
+            }
+
+        }
+
+        return conflicts;
+
+    }
+
+    createArrivalMovement(
+        nodeId,
+        actor,
+        {
+            completedConnection = null,
+            waypoint = null,
+            entry = null
+        } = {}
+    ) {
+
+        let entryEndpoint =
+            null;
+
+        if (completedConnection) {
+
+            const incomingLaneIndex =
+                this.state
+                    .getConnectionLaneIndex(
+                        completedConnection.fromId,
+                        completedConnection.toId,
+                        actor
+                    );
+
+            if (
+                !Number.isInteger(
+                    incomingLaneIndex
+                )
+            ) {
+
+                return {
+                    ok:
+                        false,
+
+                    reason:
+                        WaitReason.LANE_FULL,
+
+                    connection:
+                        completedConnection
+                };
+
+            }
+
+            entryEndpoint =
+                this.nodeMovements
+                    .createConnectionEndpoint({
+                        nodeId,
+
+                        fromId:
+                            completedConnection
+                                .fromId,
+
+                        toId:
+                            completedConnection
+                                .toId,
+
+                        laneIndex:
+                            incomingLaneIndex,
+
+                        role:
+                            "entry"
+                    });
+
+        } else {
+
+            const entryPosition =
+                entry
+                    ?.entryPosition
+                    ?.clone() ??
+                actor.object3D
+                    .position
+                    .clone();
+
+            const entryKey =
+                entry?.entryKey ??
+                (
+                    `position:` +
+                    `${entryPosition.x.toFixed(3)}:` +
+                    `${entryPosition.z.toFixed(3)}`
+                );
+
+            entryEndpoint =
+                this.nodeMovements
+                    .createVirtualEndpoint({
+                        nodeId,
+                        key:
+                            entryKey,
+
+                        position:
+                            entryPosition,
+
+                        direction:
+                            entry
+                                ?.entryDirection ??
+                            null,
+
+                        role:
+                            "entry"
+                    });
+
+        }
+
+        const nextWaypoint =
+            actor.navigation
+                .getNextWaypoint();
+
+        const nextNodeId =
+            entry?.nextNodeId ??
+            (
+                nextWaypoint?.id &&
+                    this.graph.hasNode(
+                        nextWaypoint.id
+                    ) &&
+                    this.graph.areConnected(
+                        nodeId,
+                        nextWaypoint.id
+                    )
+
+                    ? nextWaypoint.id
+                    : null
+            );
+
+        let exitEndpoint =
+            null;
+
+        let outgoingConnection =
+            null;
+
+        if (nextNodeId) {
+
+            const preferredLaneIndex =
+                entry
+                    ?.preferredLaneIndex ??
+                nextWaypoint
+                    ?.preferredLaneIndex ??
+                this.nodeMovements
+                    .getDefaultLaneIndex(
+                        nodeId,
+                        nextNodeId
+                    );
+
+            let outgoingLaneIndex =
+                this.state
+                    .getConnectionLaneIndex(
+                        nodeId,
+                        nextNodeId,
+                        actor
+                    );
+
+            /*
+             * Escolha não mutável.
+             *
+             * A lane só será reservada em canCrossNode().
+             */
+            if (
+                !Number.isInteger(
+                    outgoingLaneIndex
+                )
+            ) {
+
+                outgoingLaneIndex =
+                    this.state
+                        .findAvailableLaneIndex(
+                            nodeId,
+                            nextNodeId,
+                            actor
+                        );
+
+            }
+
+            if (
+                !Number.isInteger(
+                    outgoingLaneIndex
+                )
+            ) {
+
+                return {
+                    ok:
+                        false,
+
+                    reason:
+                        WaitReason.LANE_FULL,
+
+                    connection: {
+                        fromId:
+                            nodeId,
+
+                        toId:
+                            nextNodeId
+                    }
+                };
+
+            }
+
+            outgoingConnection = {
+                fromId:
+                    nodeId,
+
+                toId:
+                    nextNodeId,
+
+                laneIndex:
+                    outgoingLaneIndex
+            };
+
+            if (nextWaypoint) {
+
+                nextWaypoint.preferredLaneIndex =
+                    outgoingLaneIndex;
+
+                actor.navigation
+                    .touchGeometry();
+
+            }
+
+            exitEndpoint =
+                this.nodeMovements
+                    .createConnectionEndpoint({
+                        nodeId,
+
+                        fromId:
+                            nodeId,
+
+                        toId:
+                            nextNodeId,
+
+                        laneIndex:
+                            outgoingLaneIndex,
+
+                        role:
+                            "exit"
+                    });
+
+        } else if (
+            nextWaypoint?.position ||
+            entry?.exitPosition
+        ) {
+
+            const position =
+                entry
+                    ?.exitPosition
+                    ?.clone() ??
+                nextWaypoint
+                    .position
+                    .clone();
+
+            const key =
+                entry?.exitKey ??
+                nextWaypoint
+                    ?.interactionPoint
+                    ?.id ??
+                nextWaypoint
+                    ?.departureRequest
+                    ?.originId ??
+                (
+                    `position:` +
+                    `${position.x.toFixed(3)}:` +
+                    `${position.z.toFixed(3)}`
+                );
+
+            exitEndpoint =
+                this.nodeMovements
+                    .createVirtualEndpoint({
+                        nodeId,
+                        key,
+                        position,
+
+                        direction:
+                            entry
+                                ?.exitDirection ??
+                            null,
+
+                        role:
+                            "exit"
+                    });
+
+        } else {
+
+            exitEndpoint =
+                this.nodeMovements
+                    .createStopEndpoint(
+                        nodeId
+                    );
+
+        }
+
+        const movement =
+            this.nodeMovements
+                .getOrCreateMovement({
+                    nodeId,
+
+                    entry:
+                        entryEndpoint,
+
+                    exit:
+                        exitEndpoint,
+
+                    exclusive:
+                        exitEndpoint.type ===
+                        "stop"
+                });
+
+        return {
+            ok:
+                Boolean(movement),
+
+            movement,
+            outgoingConnection
+        };
+
+    }
+
+    recomputeArrivalGrants(
+        nodeId
+    ) {
+
+        const requests =
+            this.arrivals
+                .getRequests(
+                    nodeId
+                );
+
+        const state =
+            this.state
+                .getNodeState(
+                    nodeId
+                );
+
+        if (
+            requests.length === 0
+        ) {
+
+            return;
+
+        }
+
+        if (
+            this.graph.isNodeBlocked(
+                nodeId
+            ) ||
+            state.collisionBlocks.size > 0
+        ) {
+
+            this.arrivals
+                .clearGrants(
+                    nodeId
+                );
+
+            return;
+
+        }
+
+        const selected =
+            [];
+
+        let ordinaryOccupant =
+            false;
+
+        for (
+            const occupant of
+            state.occupants
+        ) {
+
+            const movement =
+                state.activeMovements
+                    .get(occupant);
+
+            if (!movement) {
+
+                ordinaryOccupant =
+                    true;
+
+                break;
+
+            }
+
+            selected.push({
+                actor:
+                    occupant,
+
+                movement
+            });
+
+        }
+
+        for (
+            const [
+                actor,
+                movement
+            ] of state.reservedMovements
+        ) {
+
+            if (
+                !selected.some(
+                    entry =>
+                        entry.actor === actor
+                )
+            ) {
+
+                selected.push({
+                    actor,
+                    movement
+                });
+
+            }
+
+        }
+
+        /*
+         * Grants já concedidos permanecem válidos
+         * enquanto ainda forem compatíveis.
+         */
+        for (
+            const request of
+            requests
+        ) {
+
+            if (
+                !request.granted
+            ) {
+
+                continue;
+
+            }
+
+            const movement =
+                request.payload
+                    ?.movement;
+
+            const compatible =
+                movement &&
+                !ordinaryOccupant &&
+                selected.every(entry =>
+                    entry.actor ===
+                    request.actor ||
+                    !this.movementsConflict(
+                        movement,
+                        entry.movement,
+                        request.actor,
+                        entry.actor
+                    )
+                );
+
+            if (!compatible) {
+
+                request.granted =
+                    false;
+
+                request.grantedAt =
+                    null;
+
+                continue;
+
+            }
+
+            if (
+                !selected.some(
+                    entry =>
+                        entry.actor ===
+                        request.actor
+                )
+            ) {
+
+                selected.push({
+                    actor:
+                        request.actor,
+
+                    movement
+                });
+
+            }
+
+        }
+
+        /*
+         * Depois de dois segundos, um pedido
+         * antigo vira uma barreira de fairness.
+         * Novos movimentos conflitantes deixam
+         * de ultrapassá-lo.
+         */
+        const fairnessBarrier =
+            requests.find(request =>
+                !request.granted &&
+                Number.isFinite(
+                    request.enqueuedAt
+                ) &&
+                (
+                    this.owner.navigationTime -
+                    request.enqueuedAt
+                ) >=
+                this.movementFairnessTimeout
+            ) ??
+            null;
+
+        const fairnessMovement =
+            fairnessBarrier
+                ?.payload
+                ?.movement ??
+            null;
+
+        for (
+            const request of
+            requests
+        ) {
+
+            if (
+                request.granted
+            ) {
+
+                continue;
+
+            }
+
+            const movement =
+                request.payload
+                    ?.movement;
+
+            const respectsFairnessBarrier =
+                !fairnessMovement ||
+                request ===
+                fairnessBarrier ||
+                !this.movementsConflict(
+                    movement,
+                    fairnessMovement,
+                    request.actor,
+                    fairnessBarrier.actor
+                );
+
+            if (
+                !respectsFairnessBarrier
+            ) {
+
+                continue;
+
+            }
+
+            const compatible =
+                movement &&
+                !ordinaryOccupant &&
+                selected.every(entry =>
+                    entry.actor ===
+                    request.actor ||
+                    !this.movementsConflict(
+                        movement,
+                        entry.movement,
+                        request.actor,
+                        entry.actor
+                    )
+                );
+
+            if (!compatible) {
+
+                continue;
+
+            }
+
+            request.granted =
+                true;
+
+            request.grantedAt =
+                this.owner.navigationTime;
+
+            selected.push({
+                actor:
+                    request.actor,
+
+                movement
+            });
+
+        }
 
     }
 
@@ -80,11 +875,13 @@ export class NavigationTrafficSystem {
 
     preflightDirectNodeEntry(
         actor,
-        {
+        entry
+    ) {
+
+        const {
             nodeId,
             originKey
-        }
-    ) {
+        } = entry;
 
         if (
             !nodeId ||
@@ -113,11 +910,6 @@ export class NavigationTrafficSystem {
 
         }
 
-        /*
-         * A fila do InteractionPoint impede que
-         * dois atores abandonem o mesmo ponto ou
-         * staging area simultaneamente.
-         */
         this.departures.enqueue(
             originKey,
             actor,
@@ -152,15 +944,19 @@ export class NavigationTrafficSystem {
 
         }
 
-        /*
-         * O ator está imediatamente ao lado do nó.
-         * Diferentemente de uma lane longa, reservar
-         * agora não é uma reserva remota.
-         */
-        this.claimPhysicalArrival(
-            nodeId,
-            actor
-        );
+        if (
+            !this.claimPhysicalArrival(
+                nodeId,
+                actor,
+                {
+                    entry
+                }
+            )
+        ) {
+
+            return false;
+
+        }
 
         if (
             !this.hasArrivalGrant(
@@ -179,22 +975,11 @@ export class NavigationTrafficSystem {
 
         }
 
-        const compatibleCrossing =
-            other =>
-                !this.geometry
-                    .plannedNodePathsConflict(
-                        actor,
-                        other,
-                        nodeId
-                    );
-
         if (
-            !this.state
-                .reserveNodeForTransit(
-                    nodeId,
-                    actor,
-                    compatibleCrossing
-                )
+            !this.canCrossNode(
+                nodeId,
+                actor
+            )
         ) {
 
             this.setWaitReason(
@@ -1304,171 +2089,206 @@ export class NavigationTrafficSystem {
 
     claimPhysicalArrival(
         nodeId,
-        actor
+        actor,
+        options = {}
     ) {
 
-        this.arrivals.enqueue(
-            nodeId,
-            actor,
-            {
-                rank: 5,
+        const existing =
+            this.arrivals.getRequest(
+                nodeId,
+                actor
+            );
 
-                priority:
-                    this.getActorPriority(
-                        actor
-                    ),
+        const built =
+            this.createArrivalMovement(
+                nodeId,
+                actor,
+                options
+            );
 
-                kind:
-                    "physical-arrival"
-            }
-        );
+        if (!built.ok) {
 
-        if (
-            actor.navigationPassagePolicy ===
-            "absolute"
-        ) {
+            const previousOutgoing =
+                existing
+                    ?.payload
+                    ?.outgoingConnection ??
+                null;
 
-            const displaced =
+            if (previousOutgoing) {
+
                 this.state
-                    .yieldNodeReservationsToPriority(
-                        nodeId,
+                    .releaseConnectionReservation(
+                        previousOutgoing.fromId,
+                        previousOutgoing.toId,
                         actor
                     );
-
-            for (
-                const displacedActor of
-                displaced
-            ) {
-
-                displacedActor
-                    .onTrafficReservationYielded?.({
-                        by:
-                            actor,
-
-                        resourceType:
-                            "node",
-
-                        nodeId
-                    });
 
             }
 
-            const node =
-                this.state
-                    .getNodeState(
-                        nodeId
-                    );
+            this.state
+                .releaseNodeTransitReservation(
+                    nodeId,
+                    actor
+                );
 
-            const blockers =
-                [...node.occupants]
-                    .filter(candidate =>
-                        candidate !== actor &&
-                        !node.crossingAgents
-                            .has(candidate)
-                    );
-
-            this.owner
-                .requestPriorityPassage(
+            /*
+             * Preserva a posição na fila, mas não
+             * preserva uma autorização inválida.
+             */
+            const request =
+                existing ??
+                this.arrivals.enqueue(
+                    nodeId,
                     actor,
-                    blockers,
                     {
-                        resourceType:
-                            "node",
+                        rank:
+                            5,
 
-                        nodeId
+                        priority:
+                            this.getActorPriority(
+                                actor
+                            ),
+
+                        kind:
+                            "physical-arrival",
+
+                        payload:
+                            null,
+
+                        enqueuedAt:
+                            this.owner.navigationTime
                     }
+                );
+
+            request.payload =
+                null;
+
+            request.granted =
+                false;
+
+            request.grantedAt =
+                null;
+
+            this.setWaitReason(
+                actor,
+                nodeId,
+
+                built.reason ??
+                WaitReason.NODE_OCCUPIED,
+
+                {
+                    connection:
+                        built.connection ??
+                        null
+                }
+            );
+
+            this.recomputeArrivalGrants(
+                nodeId
+            );
+
+            return false;
+
+        }
+
+        const previousOutgoing =
+            existing
+                ?.payload
+                ?.outgoingConnection ??
+            null;
+
+        const outgoingChanged =
+            previousOutgoing &&
+            (
+                !built.outgoingConnection ||
+                previousOutgoing.fromId !==
+                built.outgoingConnection.fromId ||
+                previousOutgoing.toId !==
+                built.outgoingConnection.toId ||
+                previousOutgoing.laneIndex !==
+                built.outgoingConnection.laneIndex
+            );
+
+        if (outgoingChanged) {
+
+            this.state
+                .releaseConnectionReservation(
+                    previousOutgoing.fromId,
+                    previousOutgoing.toId,
+                    actor
+                );
+
+            this.state
+                .releaseNodeTransitReservation(
+                    nodeId,
+                    actor
                 );
 
         }
 
-    }
+        const request =
+            this.arrivals.enqueue(
+                nodeId,
+                actor,
+                {
+                    rank:
+                        5,
 
-    /* hasArrivalGrant(nodeId, actor) {
+                    priority:
+                        this.getActorPriority(
+                            actor
+                        ),
 
-        if (this.arrivals.isFirst(nodeId, actor)) return true;
+                    kind:
+                        "physical-arrival",
 
-        const actorsAhead = this.arrivals.getActorsBefore(nodeId, actor);
+                    payload:
+                        built,
 
-        // This is the junction handshake. Queue order decides intersecting
-        // maneuvers; independent planned splines may cross concurrently.
-        return actorsAhead.length > 0 && actorsAhead.every(other =>
-            !this.geometry.plannedNodePathsConflict(actor, other, nodeId)
+                    enqueuedAt:
+                        this.owner.navigationTime
+                }
+            );
+
+        if (
+            existing
+                ?.payload
+                ?.movement
+                ?.id !==
+            built.movement.id
+        ) {
+
+            request.granted =
+                false;
+
+            request.grantedAt =
+                null;
+
+        }
+
+        this.recomputeArrivalGrants(
+            nodeId
         );
 
-    } */
+        return true;
+
+    }
 
     hasArrivalGrant(
         nodeId,
         actor
     ) {
 
-        /*
-         * Um ator só pode receber autorização
-         * se realmente estiver na fila física
-         * de chegada deste nó.
-         */
-        if (
-            !this.arrivals.hasAt(
-                nodeId,
-                actor
-            )
-        ) {
-
-            return false;
-
-        }
-
-        /*
-         * A cabeça da fila sempre pode tentar
-         * reservar e atravessar o nó.
-         */
-        if (
-            this.arrivals.isFirst(
-                nodeId,
-                actor
-            )
-        ) {
-
-            return true;
-
-        }
-
-        const actorsAhead =
-            this.arrivals
-                .getActorsBefore(
-                    nodeId,
-                    actor
-                );
-
-        /*
-         * Se o ator está na fila, não é o
-         * primeiro e não existem atores antes
-         * dele, o estado da queue é incoerente.
-         */
-        if (
-            actorsAhead.length === 0
-        ) {
-
-            return false;
-
-        }
-
-        /*
-         * Atores fora da cabeça podem receber
-         * passagem simultânea somente quando
-         * sua trajetória é independente de
-         * todos os atores posicionados antes
-         * deles na fila.
-         */
-        return actorsAhead.every(
-            other =>
-                !this.geometry
-                    .plannedNodePathsConflict(
-                        actor,
-                        other,
-                        nodeId
-                    )
+        this.recomputeArrivalGrants(
+            nodeId
         );
+
+        return this.arrivals
+            .getRequest(
+                nodeId,
+                actor
+            )
+            ?.granted === true;
 
     }
 
@@ -1488,104 +2308,123 @@ export class NavigationTrafficSystem {
 
         }
 
-        /*
-         * A compatibilidade é determinada pela
-         * geometria planejada.
-         *
-         * Um conflito físico ou um ator preso no
-         * nó deve produzir collisionBlocks no
-         * TrafficState. Não inferimos bloqueio a
-         * partir de currentNodeId ou hasPath().
-         */
-        const compatibleCrossing =
-            other =>
-                !this.geometry
-                    .plannedNodePathsConflict(
-                        actor,
-                        other,
-                        nodeId
-                    );
+        const request =
+            this.arrivals.getRequest(
+                nodeId,
+                actor
+            );
+
+        const movement =
+            request
+                ?.payload
+                ?.movement ??
+            null;
+
+        if (!movement) {
+
+            return false;
+
+        }
+
+        const conflicts = (
+            firstMovement,
+            secondMovement,
+            firstActor,
+            secondActor
+        ) =>
+            this.movementsConflict(
+                firstMovement,
+                secondMovement,
+                firstActor,
+                secondActor
+            );
 
         const reserved =
             this.state
                 .reserveNodeForTransit(
                     nodeId,
                     actor,
-                    compatibleCrossing
+                    movement,
+                    conflicts
                 );
 
         if (!reserved) {
-
-            if (
-                actor.navigationPassagePolicy ===
-                "absolute"
-            ) {
-
-                const nodeState =
-                    this.state
-                        .getNodeState(
-                            nodeId
-                        );
-
-                this.owner
-                    .requestPriorityPassage(
-                        actor,
-                        nodeState.occupants,
-                        {
-                            resourceType:
-                                "node",
-
-                            nodeId
-                        }
-                    );
-
-            }
 
             return false;
 
         }
 
-        const mayCross =
-            this.state.canCrossNode(
+        return this.state
+            .canCrossNode(
                 nodeId,
                 actor,
-                compatibleCrossing
+                movement,
+                conflicts
             );
-
-        if (
-            !mayCross &&
-            actor.navigationPassagePolicy ===
-            "absolute"
-        ) {
-
-            const nodeState =
-                this.state
-                    .getNodeState(
-                        nodeId
-                    );
-
-            this.owner
-                .requestPriorityPassage(
-                    actor,
-                    nodeState.occupants,
-                    {
-                        resourceType:
-                            "node",
-
-                        nodeId
-                    }
-                );
-
-        }
-
-        return mayCross;
 
     }
 
-    isQueuedAtNode(nodeId, actor) {
+    occupyGrantedNode(
+        nodeId,
+        actor,
+        {
+            crossing = false
+        } = {}
+    ) {
 
-        return this.departures.hasAt(nodeId, actor) ||
-            this.arrivals.hasAt(nodeId, actor);
+        const request =
+            this.arrivals.getRequest(
+                nodeId,
+                actor
+            );
+
+        const movement =
+            request
+                ?.payload
+                ?.movement ??
+            null;
+
+        if (
+            !request?.granted ||
+            !movement
+        ) {
+
+            return false;
+
+        }
+
+        const occupied =
+            this.state.occupyNode(
+                nodeId,
+                actor,
+                {
+                    crossing,
+                    movement,
+
+                    movementsConflict: (
+                        firstMovement,
+                        secondMovement,
+                        firstActor,
+                        secondActor
+                    ) =>
+                        this.movementsConflict(
+                            firstMovement,
+                            secondMovement,
+                            firstActor,
+                            secondActor
+                        )
+                }
+            );
+
+        if (occupied) {
+
+            this.recomputeArrivalGrants(
+                nodeId
+            );
+
+        }
+
+        return occupied;
 
     }
 
@@ -1598,6 +2437,17 @@ export class NavigationTrafficSystem {
             nodeId,
             actor
         );
+
+        this.recomputeArrivalGrants(
+            nodeId
+        );
+
+    }
+
+    isQueuedAtNode(nodeId, actor) {
+
+        return this.departures.hasAt(nodeId, actor) ||
+            this.arrivals.hasAt(nodeId, actor);
 
     }
 

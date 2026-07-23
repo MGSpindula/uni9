@@ -14,6 +14,7 @@ import { NavigationTrafficState } from "./NavigationTrafficState";
 import { Pathfinder } from "./Pathfinder";
 import { RouteGeometryService } from "./RouteGeometryService";
 import { NavigationMetrics } from "./NavigationMetrics";
+import { NodeMovementCatalog } from "./NodeMovementCatalog";
 import { InteractionTrafficState } from "./InteractionTrafficState";
 import { TurnaroundCoordinator } from "./TurnaroundCoordinator";
 import { ClosedLoopCoordinator } from "./ClosedLoopCoordinator";
@@ -41,22 +42,54 @@ export class CharacterNavigationSystem {
         this.trafficState = new NavigationTrafficState(graph);
         this.interactionTraffic = new InteractionTrafficState(connector, this);
         this.connector.traffic = this.interactionTraffic;
-        this.pathfinder = new Pathfinder(
-            graph,
-            this.trafficState,
-            this.metrics
-        );
-        this.routeGeometry = new RouteGeometryService(graph);
-        this.connector.pathfinder = this.pathfinder;
-        this.connector.routeGeometry = this.routeGeometry;
-        this.traffic = new NavigationTrafficSystem(this);
+        this.routeGeometry =
+            new RouteGeometryService(
+                graph
+            );
+        this.pathfinder =
+            new Pathfinder(
+                graph,
+                this.trafficState,
+                this.metrics
+            );
+        this.connector.pathfinder =
+            this.pathfinder;
+
+        this.connector.routeGeometry =
+            this.routeGeometry;
+
+        /*
+         * RouteGeometryBuilder precisa existir antes
+         * do catálogo para os dois produzirem a
+         * mesma curva de junction.
+         */
+        this.geometryBuilder =
+            new RouteGeometryBuilder(
+                this
+            );
+
+        this.nodeMovements =
+            new NodeMovementCatalog(
+                graph,
+                this.routeGeometry,
+                {
+                    geometryBuilder:
+                        this.geometryBuilder
+                }
+            );
+
+        this.traffic =
+            new NavigationTrafficSystem(
+                this
+            );
+
+        this.pathfinder.setMovementAdvisor(this.traffic);
         this.interactions = new InteractionNavigation(this);
         this.collisionFailsafe = new CharacterCollisionFailsafe(this);
         this.collisionSolver = new CharacterCollisionSolver(this);
         this.physics = new PhysicsWorld(this);
         this.grounding = null;
         this.routePlanner = new RoutePlanner(this);
-        this.geometryBuilder = new RouteGeometryBuilder(this);
         this.interactionTraversal =
             new InteractionTraversalCoordinator(this);
         this.recoveryPolicy = new NavigationRecoveryPolicy(this);
@@ -118,9 +151,8 @@ export class CharacterNavigationSystem {
 
             this.cancelClosedLoop(context, "navigation-cancelled");
             this.trafficState.releaseReservations(actor);
-                this.interactionTraffic.releaseReservations(actor);
+            this.interactionTraffic.releaseReservations(actor);
             this.traffic.cancel(actor);
-            this.collisionFailsafe.cancel(actor);
             this.routeGeometry.clearPlannedLaneCurve(actor);
             context.route.previewSignature = null;
             this.refresh();
@@ -352,107 +384,444 @@ export class CharacterNavigationSystem {
 
     }
 
-    evacuateStaleNode(nodeId) {
+    resolveStaleCollision(
+        encounter
+    ) {
 
-        const node = this.graph.getNode(nodeId);
-        if (!node || node.blocked) return false;
+        if (!encounter) {
 
-        const previous = this.staleNodeEvacuations.get(nodeId) ?? -Infinity;
-        if (this.navigationTime - previous < 2) return true;
-
-        const state = this.trafficState.getNodeState(nodeId);
-        const actors = new Set([
-            ...state.occupants,
-            ...state.reservations,
-            ...state.transitReservations,
-            ...this.traffic.departures.getActors(nodeId),
-            ...this.traffic.arrivals.getActors(nodeId)
-        ]);
-
-        for (const encounter of state.collisionBlocks) {
-            actors.add(encounter.winner);
-            actors.add(encounter.yielder);
-        }
-
-        const evacuationRadius = (node.metadata.laneRadius ?? 1.75) + 1.5;
-        const activeActors = [...actors].filter(actor => {
-            if (!actor?.isActive?.() || !this.agents.has(actor)) return false;
-            const traversal = actor.navigation.getTraversalState();
-            return traversal.currentNodeId === nodeId ||
-                Math.hypot(
-                    actor.object3D.position.x - node.position.x,
-                    actor.object3D.position.z - node.position.z
-                ) <= evacuationRadius;
-        });
-        if (activeActors.length < 2 && state.collisionBlocks.size === 0) {
             return false;
+
         }
 
-        const exits = [...node.connections.entries()]
-            .filter(([neighborId, connection]) =>
-                !connection.blocked &&
-                !this.graph.isNodeBlocked(neighborId)
-            )
-            .map(([neighborId]) => this.graph.requireNode(neighborId));
-        if (exits.length === 0) return false;
+        if (encounter.nodeId) {
 
-        this.staleNodeEvacuations.set(nodeId, this.navigationTime);
-        console.warn(
-            `[NavigationRecovery] Stale node "${nodeId}" releases ` +
-            `${activeActors.length} actor(s); all current routes are ` +
-            `replaced by local exits.`
+            return this.evacuateStaleNode(
+                encounter.nodeId
+            );
+
+        }
+
+        const yielder =
+            encounter.yielder;
+
+        if (
+            !yielder?.isActive?.() ||
+            !this.agents.has(
+                yielder
+            )
+        ) {
+
+            return false;
+
+        }
+
+        const context =
+            this.requireContext(
+                yielder
+            );
+
+        /*
+         * Preserva route, currentConnection,
+         * lane occupancy e intent.
+         */
+        const requested =
+            this.collisionSolver
+                .forceRetreat(
+                    encounter
+                );
+
+        if (!requested) {
+
+            return false;
+
+        }
+
+        context.wait.collisionElapsed =
+            0;
+
+        context.recovery.elapsed =
+            0;
+
+        yielder.setState(
+            EntityState.WAITING
         );
 
-        for (const actor of activeActors) {
+        this.refresh();
 
-            const context = this.requireContext(actor);
+        return true;
 
-            // Interaction points are external to nodes. Never tear down a
-            // transactional enter/exit merely because its access node stalled.
-            if (context.interaction.entering || context.interaction.leaving ||
-                context.interaction.exitCommitted) continue;
+    }
 
-            this.cancelClosedLoop(context, "stale-node-evacuation");
-            this.traffic.cancel(actor);
-            this.interactionTraffic.releaseReservations(actor);
-            this.trafficState.releaseAgent(actor);
-            this.routeGeometry.clearActiveLaneCurve(actor);
-            this.collisionFailsafe.cancel(actor);
-            actor.navigation.cancel();
-            actor.navigation.setCurrentNode(nodeId);
-            actor.locomotion.resetCurve();
-            this.trafficState.occupyNode(nodeId, actor, { crossing: true });
+    evacuateStaleNode(
+        nodeId
+    ) {
 
-            context.intent.position = null;
-            context.intent.destinationId = null;
-            context.intent.interaction = null;
-            context.intent.deferredCommand = null;
-            context.traversal.laneCurve = false;
-            context.traversal.interactionCurve = false;
-            context.traversal.transitTangent = null;
-            context.wait.retryElapsed = 0;
-            context.wait.collisionElapsed = 0;
-            context.recovery.elapsed = 0;
+        const node =
+            this.graph.getNode(
+                nodeId
+            );
+
+        if (
+            !node ||
+            node.blocked
+        ) {
+
+            return false;
 
         }
 
-        const evacuees = activeActors.filter(actor => {
-            const context = this.requireContext(actor);
-            return !context.interaction.entering &&
-                !context.interaction.leaving &&
-                !context.interaction.exitCommitted;
-        });
+        const previous =
+            this.staleNodeEvacuations
+                .get(nodeId) ??
+            -Infinity;
 
-        evacuees.forEach((actor, index) => {
-            const destination = exits[index % exits.length];
-            this.moveToClosestNode(actor, destination.position, {
-                replaceIntent: true,
-                skipTurnaround: true,
-                maxDetourFactor: 1.5
-            });
-        });
+        if (
+            this.navigationTime -
+            previous <
+            2
+        ) {
+
+            return true;
+
+        }
+
+        const state =
+            this.trafficState
+                .getNodeState(
+                    nodeId
+                );
+
+        const encounters =
+            [...state.collisionBlocks]
+                .filter(encounter =>
+                    encounter.winner
+                        ?.isActive?.() &&
+                    encounter.yielder
+                        ?.isActive?.()
+                );
+
+        const actors =
+            new Set(
+                state.occupants
+            );
+
+        for (
+            const encounter of
+            encounters
+        ) {
+
+            actors.add(
+                encounter.winner
+            );
+
+            actors.add(
+                encounter.yielder
+            );
+
+        }
+
+        const candidates =
+            [...actors]
+                .filter(actor => {
+
+                    if (
+                        !actor?.isActive?.() ||
+                        !this.agents.has(actor)
+                    ) {
+
+                        return false;
+
+                    }
+
+                    const context =
+                        this.requireContext(
+                            actor
+                        );
+
+                    if (
+                        context.interaction.entering ||
+                        context.interaction.leaving ||
+                        context.interaction.exitCommitted
+                    ) {
+
+                        return false;
+
+                    }
+
+                    return (
+                        actor.navigation
+                            .getTraversalState()
+                            .currentNodeId ===
+                        nodeId ||
+                        state.occupants.has(
+                            actor
+                        )
+                    );
+
+                });
+
+        if (
+            candidates.length === 0
+        ) {
+
+            return false;
+
+        }
+
+        const encounter =
+            encounters[0] ??
+            null;
+
+        const evacuee =
+            encounter &&
+                candidates.includes(
+                    encounter.yielder
+                )
+
+                ? encounter.yielder
+
+                : [...candidates]
+                    .sort(
+                        (
+                            first,
+                            second
+                        ) =>
+                            this.collisionFailsafe
+                                .getCommitmentPriority(
+                                    first
+                                ) -
+                            this.collisionFailsafe
+                                .getCommitmentPriority(
+                                    second
+                                )
+                    )[0];
+
+        const context =
+            this.requireContext(
+                evacuee
+            );
+
+        const preferredExitId =
+            context.traversal
+                .arrivalFromNodeId;
+
+        const exits =
+            [...node.connections.entries()]
+                .filter(
+                    (
+                        [
+                            neighborId,
+                            connection
+                        ]
+                    ) =>
+                        !connection.blocked &&
+                        !this.graph
+                            .isNodeBlocked(
+                                neighborId
+                            ) &&
+                        !this.trafficState
+                            .isNodeOccupiedByOther(
+                                neighborId,
+                                evacuee
+                            )
+                )
+                .sort(
+                    (
+                        [firstId],
+                        [secondId]
+                    ) => {
+
+                        if (
+                            firstId ===
+                            preferredExitId
+                        ) {
+
+                            return -1;
+
+                        }
+
+                        if (
+                            secondId ===
+                            preferredExitId
+                        ) {
+
+                            return 1;
+
+                        }
+
+                        return (
+                            Number(
+                                this.trafficState
+                                    .isConnectionAvailable(
+                                        nodeId,
+                                        secondId,
+                                        evacuee
+                                    )
+                            ) -
+                            Number(
+                                this.trafficState
+                                    .isConnectionAvailable(
+                                        nodeId,
+                                        firstId,
+                                        evacuee
+                                    )
+                            )
+                        );
+
+                    }
+                );
+
+        const destinationId =
+            exits[0]?.[0] ??
+            null;
+
+        if (!destinationId) {
+
+            return false;
+
+        }
+
+        this.staleNodeEvacuations.set(
+            nodeId,
+            this.navigationTime
+        );
+
+        if (encounter) {
+
+            encounter.recoveryActor =
+                evacuee;
+
+            encounter.recoveryStartedAt =
+                this.navigationTime;
+
+            encounter.stalledElapsed =
+                0;
+
+        }
+
+        this.cancelClosedLoop(
+            context,
+            "stale-node-evacuation"
+        );
+
+        /*
+         * Apenas claims futuros são liberados.
+         * A ocupação física do nó permanece até
+         * o ator realmente entrar na lane.
+         */
+        this.traffic.cancel(
+            evacuee
+        );
+
+        this.interactionTraffic
+            .releaseReservations(
+                evacuee
+            );
+
+        this.routeGeometry
+            .clearActiveLaneCurve(
+                evacuee
+            );
+
+        this.collisionSolver.cancel(
+            evacuee
+        );
+
+        /*
+         * clearRoute não dispara o callback que
+         * apagaria prematuramente collisionBlocks.
+         */
+        evacuee.navigation
+            .clearRoute();
+
+        evacuee.navigation
+            .setCurrentNode(
+                nodeId
+            );
+
+        evacuee.locomotion
+            .resetCurve();
+
+        context.intent.position =
+            null;
+
+        context.intent.destinationId =
+            null;
+
+        context.intent.interaction =
+            null;
+
+        context.intent.deferredCommand =
+            null;
+
+        context.traversal.laneCurve =
+            false;
+
+        context.traversal.interactionCurve =
+            false;
+
+        context.traversal.transitTangent =
+            null;
+
+        context.wait.retryElapsed =
+            0;
+
+        context.wait.collisionElapsed =
+            0;
+
+        context.recovery.elapsed =
+            0;
+
+        const destination =
+            this.graph.requireNode(
+                destinationId
+            );
+
+        const started =
+            this.moveToClosestNode(
+                evacuee,
+                destination.position,
+                {
+                    replaceIntent:
+                        true,
+
+                    skipTurnaround:
+                        true,
+
+                    maxDetourFactor:
+                        6
+                }
+            );
+
+        if (!started) {
+
+            if (encounter) {
+
+                encounter.recoveryActor =
+                    null;
+
+            }
+
+            this.collisionSolver
+                .forceRetreat(
+                    encounter
+                );
+
+            evacuee.setState(
+                EntityState.WAITING
+            );
+
+            this.refresh();
+
+            return true;
+
+        }
+
+        evacuee.resume();
 
         this.refresh();
+
         return true;
 
     }
@@ -462,8 +831,34 @@ export class CharacterNavigationSystem {
         const agent = this.requireContext(actor);
         this.metrics.increment("cancellations");
 
-        this.cancelClosedLoop(agent, "facade-cancel");
-        this.finishActiveInteraction(agent);
+        this.cancelClosedLoop(
+            agent,
+            "facade-cancel"
+        );
+
+        /*
+         * Libera a ocupação autoral antes de apagar
+         * as referências do NavigationAgent.
+         */
+        this.interactionTraversal
+            .leaveInteractionPoint(
+                agent
+            );
+
+        this.interactionTraversal
+            .releaseInteractionExitPoint(
+                agent
+            );
+
+        /*
+         * Limpeza defensiva contra qualquer claim
+         * antigo que não esteja mais representado
+         * no agente.
+         */
+        this.interactionTraffic
+            .releaseAgent(
+                actor
+            );
 
         agent.intent.position = null;
         agent.intent.destinationId = null;
@@ -1529,8 +1924,8 @@ export class CharacterNavigationSystem {
         const signature = !currentWaypoint
             ? null
             : `${actor.navigation.getRouteRevision()}:` +
-                `${actor.navigation.currentIndex}:` +
-                `${actor.navigation.getGeometryRevision()}`;
+            `${actor.navigation.currentIndex}:` +
+            `${actor.navigation.getGeometryRevision()}`;
 
         if (!force && signature === context.route.previewSignature) return;
 
@@ -1881,14 +2276,14 @@ export class CharacterNavigationSystem {
             context.interaction.leaving && "interaction-exit",
             context.interaction.exitCommitted && "exit-committed",
             context.traversal.interactionExitPoint &&
-                `exit-point:${context.traversal.interactionExitPoint.id}`,
+            `exit-point:${context.traversal.interactionExitPoint.id}`,
             context.intent.closedLoop?.phase === "entering"
                 ? `closed-loop-entry:${context.intent.closedLoop.entryNodeId}`
                 : context.intent.closedLoop &&
-                    `closed-loop:${context.intent.closedLoop.lapsCompleted}/` +
-                    `${context.intent.closedLoop.lapsTotal}`,
+                `closed-loop:${context.intent.closedLoop.lapsCompleted}/` +
+                `${context.intent.closedLoop.lapsTotal}`,
             this.collisionFailsafe.isWaiting(actor) &&
-                `collision-wait:${context.wait.collisionElapsed.toFixed(1)}s`,
+            `collision-wait:${context.wait.collisionElapsed.toFixed(1)}s`,
             waypoint?.routeGeometry && "route-segments",
             context.traversal.laneCurve && "lane-curve",
             context.traversal.interactionCurve && "interaction-curve"
@@ -1914,16 +2309,16 @@ export class CharacterNavigationSystem {
                 (waypoint ? "curve → local target" : "—"),
             progress: waypoint?.routeCurve
                 ? `${actor.locomotion.curveDistance.toFixed(2)} / ` +
-                    `${waypoint.curveStopDistance?.toFixed(2) ?? "?"}`
+                `${waypoint.curveStopDistance?.toFixed(2) ?? "?"}`
                 : "—",
             intent: interaction?.id ??
                 (context.intent.closedLoop
                     ? `${context.intent.closedLoop.id} ` +
-                        (context.intent.closedLoop.phase === "entering"
-                            ? `→ ${context.intent.closedLoop.entryNodeId} `
-                            : "") +
-                        `(${context.intent.closedLoop.lapsCompleted}/` +
-                        `${context.intent.closedLoop.lapsTotal})`
+                    (context.intent.closedLoop.phase === "entering"
+                        ? `→ ${context.intent.closedLoop.entryNodeId} `
+                        : "") +
+                    `(${context.intent.closedLoop.lapsCompleted}/` +
+                    `${context.intent.closedLoop.lapsTotal})`
                     : null) ??
                 (context.intent.position
                     ? context.intent.destinationId ??
@@ -1939,30 +2334,30 @@ export class CharacterNavigationSystem {
                         : "—",
             queue: [
                 traffic.departure &&
-                    `D:${traffic.departure.originId} ` +
-                    `${traffic.departure.position}/${traffic.departure.length} ` +
-                    `[${traffic.departure.kind}, r${traffic.departure.rank}]`,
+                `D:${traffic.departure.originId} ` +
+                `${traffic.departure.position}/${traffic.departure.length} ` +
+                `[${traffic.departure.kind}, r${traffic.departure.rank}]`,
                 traffic.arrival &&
-                    `A:${traffic.arrival.originId} ` +
-                    `${traffic.arrival.position}/${traffic.arrival.length} ` +
-                    `[${traffic.arrival.kind}, r${traffic.arrival.rank}]`
+                `A:${traffic.arrival.originId} ` +
+                `${traffic.arrival.position}/${traffic.arrival.length} ` +
+                `[${traffic.arrival.kind}, r${traffic.arrival.rank}]`
             ].filter(Boolean).join(" | ") || "—",
             wait: traffic.waitReason ?? (actor.navigation.isPaused()
                 ? "navigation paused"
                 : "—"),
             collision: collision
                 ? `${collision.kind}: ${collision.blocker.name} ` +
-                    `(${collision.clearance.toFixed(2)}m, ` +
-                    `${context.wait.collisionElapsed.toFixed(1)}s)`
+                `(${collision.clearance.toFixed(2)}m, ` +
+                `${context.wait.collisionElapsed.toFixed(1)}s)`
                 : "clear",
             collisionActive: Boolean(collision),
             recovery: context.recovery.pending
                 ? `navigation ${context.recovery.elapsed.toFixed(1)}s / ` +
-                    `${context.recovery.timeout.toFixed(1)}s`
+                `${context.recovery.timeout.toFixed(1)}s`
                 : collision && actor.navigationIntentPolicy !== "persistent"
                     ? `collision timeout ` +
-                        `${context.wait.collisionElapsed.toFixed(1)}s / ` +
-                        `${context.wait.collisionTimeout.toFixed(1)}s`
+                    `${context.wait.collisionElapsed.toFixed(1)}s / ` +
+                    `${context.wait.collisionTimeout.toFixed(1)}s`
                     : collision
                         ? "persistent intent preserved"
                         : "—",

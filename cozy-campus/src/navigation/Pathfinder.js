@@ -3,11 +3,46 @@
 // reachability without actors, reservations or a running world.
 export class Pathfinder {
 
-    constructor(graph, traffic = null, metrics = null) {
+    constructor(
+        graph,
+        traffic = null,
+        metrics = null
+    ) {
 
-        this.graph = graph;
-        this.traffic = traffic;
-        this.metrics = metrics;
+        if (!graph) {
+
+            throw new TypeError(
+                "Pathfinder requires a NavigationGraph."
+            );
+
+        }
+
+        this.graph =
+            graph;
+
+        this.traffic =
+            traffic;
+
+        this.metrics =
+            metrics;
+
+        /*
+         * NavigationTrafficSystem é atribuído depois de sua construção.
+         *
+         * Ele determina se o movimento concreto pretendido por uma rota
+         * conflita com movimentos fisicamente ativos num junction.
+         */
+        this.movementAdvisor =
+            null;
+
+    }
+
+    setMovementAdvisor(
+        advisor
+    ) {
+
+        this.movementAdvisor =
+            advisor;
 
     }
 
@@ -41,6 +76,12 @@ export class Pathfinder {
 
         }
 
+        /*
+         * directPlan é propositalmente estrutural.
+         *
+         * Ele representa o caminho geometricamente mais curto antes de
+         * considerar lanes cheias, ocupação física e movimentos ativos.
+         */
         const directPlan =
             this.findShortestPath(
                 startId,
@@ -67,8 +108,16 @@ export class Pathfinder {
 
         }
 
+        /*
+         * availablePlan considera:
+         *
+         * - lanes sem capacidade;
+         * - nós com ocupação física comum;
+         * - collisionBlocks;
+         * - movimentos de junction incompatíveis.
+         */
         const availablePlan =
-            this.findShortestPath(
+            this.findMovementAwarePath(
                 startId,
                 destination.id,
                 {
@@ -82,22 +131,30 @@ export class Pathfinder {
             );
 
         const directContainsOccupiedNode =
-            directPlan.nodeIds
-                .slice(1)
-                .some(nodeId =>
-                    this.traffic
-                        ?.isNodeOccupiedByOther(
-                            nodeId,
-                            agent
-                        )
-                );
+            this.pathContainsOccupiedNode(
+                directPlan.nodeIds,
+                agent
+            );
+
+        const movementConflictNodeIds =
+            this.getMovementConflictNodeIds(
+                directPlan.nodeIds,
+                agent
+            );
+
+        const directContainsMovementConflict =
+            movementConflictNodeIds.size > 0;
 
         /*
-         * Um nó ocupado nunca pode permanecer
-         * no path criado.
+         * Ocupação física comum e movimentos ativos incompatíveis são
+         * restrições fortes.
+         *
+         * Nesses casos, a rota direta nunca retorna como fallback somente
+         * porque o desvio disponível é mais longo.
          */
         if (
-            directContainsOccupiedNode
+            directContainsOccupiedNode ||
+            directContainsMovementConflict
         ) {
 
             if (availablePlan) {
@@ -118,14 +175,6 @@ export class Pathfinder {
 
             }
 
-            /*
-             * Não cria uma rota parcial em direção
-             * ao nó ocupado.
-             *
-             * O controller preserva a intenção e
-             * tentará planejar novamente quando o
-             * estado do tráfego mudar.
-             */
             return {
                 status:
                     "unreachable",
@@ -137,7 +186,15 @@ export class Pathfinder {
                     destination.id,
 
                 blockedByOccupiedNode:
-                    true
+                    directContainsOccupiedNode,
+
+                blockedByMovement:
+                    directContainsMovementConflict,
+
+                blockedNodeIds:
+                    [
+                        ...movementConflictNodeIds
+                    ]
             };
 
         }
@@ -196,11 +253,13 @@ export class Pathfinder {
         }
 
         /*
-         * O trecho ativo termina ANTES do recurso
-         * indisponível.
+         * O trecho ativo termina antes do recurso indisponível.
          *
-         * A implementação anterior usava
-         * index + 2, incluindo o nó bloqueado.
+         * Para:
+         *
+         * A -> B -> C
+         *
+         * com B indisponível, o resultado é [A], nunca [A, B].
          */
         const safeNodeIds =
             directPlan.nodeIds.slice(
@@ -230,51 +289,254 @@ export class Pathfinder {
 
     }
 
-    findClosestNode(position) {
+    findClosestNode(
+        position
+    ) {
 
-        const nodes = [...this.graph.nodes.values()];
-        if (nodes.length === 0) return null;
+        const nodes =
+            [
+                ...this.graph.nodes.values()
+            ];
 
-        const closest = nodes.reduce((closestNode, node) =>
-            node.position.distanceToSquared(position) <
-                closestNode.position.distanceToSquared(position)
-                ? node
-                : closestNode
-        );
-        const radius = this.graph.selectionRadius;
+        if (
+            nodes.length === 0
+        ) {
 
-        return closest.position.distanceToSquared(position) <= radius * radius
+            return null;
+
+        }
+
+        const closest =
+            nodes.reduce(
+                (
+                    closestNode,
+                    node
+                ) =>
+                    node.position
+                        .distanceToSquared(
+                            position
+                        ) <
+                        closestNode.position
+                            .distanceToSquared(
+                                position
+                            )
+
+                        ? node
+                        : closestNode
+            );
+
+        const radius =
+            this.graph.selectionRadius;
+
+        return closest.position
+            .distanceToSquared(
+                position
+            ) <=
+            radius * radius
+
             ? closest
             : null;
 
     }
 
-    findShortestPath(startId, destinationId, {
-        agent = null,
-        avoidOccupied = true,
-        avoidFirstStepTo = null
-    } = {}) {
+    findShortestPath(
+        startId,
+        destinationId,
+        {
+            agent = null,
+            avoidOccupied = true,
+            avoidFirstStepTo = null,
+            avoidNodeIds = null
+        } = {}
+    ) {
 
-        const result = this.findAllShortestPaths(startId, {
-            agent,
-            avoidOccupied,
-            avoidFirstStepTo
-        });
+        const result =
+            this.findAllShortestPaths(
+                startId,
+                {
+                    agent,
+                    avoidOccupied,
+                    avoidFirstStepTo,
+                    avoidNodeIds
+                }
+            );
 
-        if (!result.distances.has(destinationId)) return null;
+        if (
+            !result.distances.has(
+                destinationId
+            )
+        ) {
 
-        const nodeIds = [];
-        let currentId = destinationId;
+            return null;
 
-        while (currentId !== null) {
-            nodeIds.push(currentId);
-            currentId = result.parents.get(currentId) ?? null;
+        }
+
+        const nodeIds =
+            [];
+
+        let currentId =
+            destinationId;
+
+        while (
+            currentId !== null
+        ) {
+
+            nodeIds.push(
+                currentId
+            );
+
+            currentId =
+                result.parents.get(
+                    currentId
+                ) ??
+                null;
+
         }
 
         return {
-            nodeIds: nodeIds.reverse(),
-            cost: result.distances.get(destinationId)
+            nodeIds:
+                nodeIds.reverse(),
+
+            cost:
+                result.distances.get(
+                    destinationId
+                )
         };
+
+    }
+
+    findMovementAwarePath(
+        startId,
+        destinationId,
+        {
+            agent = null,
+            avoidOccupied = true,
+            avoidFirstStepTo = null,
+
+            avoidNodeIds:
+            initialAvoidNodeIds =
+            null
+        } = {}
+    ) {
+
+        const avoidNodeIds =
+            new Set(
+                initialAvoidNodeIds ??
+                []
+            );
+
+        /*
+         * O algoritmo:
+         *
+         * 1. encontra um caminho topológico;
+         * 2. constrói os movimentos pretendidos nos junctions;
+         * 3. identifica movimentos ativos incompatíveis;
+         * 4. exclui os junctions conflitantes;
+         * 5. procura novamente.
+         *
+         * A cada repetição ao menos um novo nó precisa ser excluído.
+         * Portanto, graph.nodes.size é um limite seguro.
+         */
+        const maximumAttempts =
+            Math.max(
+                1,
+                this.graph.nodes.size
+            );
+
+        for (
+            let attempt = 0;
+            attempt < maximumAttempts;
+            attempt++
+        ) {
+
+            const path =
+                this.findShortestPath(
+                    startId,
+                    destinationId,
+                    {
+                        agent,
+                        avoidOccupied,
+                        avoidFirstStepTo,
+                        avoidNodeIds
+                    }
+                );
+
+            if (
+                !path ||
+                !this.movementAdvisor ||
+                !agent
+            ) {
+
+                return path;
+
+            }
+
+            const conflicts =
+                this.getMovementConflictNodeIds(
+                    path.nodeIds,
+                    agent
+                );
+
+            if (
+                conflicts.size === 0
+            ) {
+
+                return path;
+
+            }
+
+            let changed =
+                false;
+
+            for (
+                const nodeId of
+                conflicts
+            ) {
+
+                /*
+                 * O ator pode já ocupar o nó inicial.
+                 *
+                 * O ponto inicial não pode ser retirado de sua própria
+                 * pesquisa de rota.
+                 */
+                if (
+                    nodeId === startId
+                ) {
+
+                    continue;
+
+                }
+
+                if (
+                    !avoidNodeIds.has(
+                        nodeId
+                    )
+                ) {
+
+                    avoidNodeIds.add(
+                        nodeId
+                    );
+
+                    changed =
+                        true;
+
+                }
+
+            }
+
+            /*
+             * Evita loop caso o advisor retorne apenas o próprio startId ou
+             * repita exatamente os mesmos conflitos.
+             */
+            if (!changed) {
+
+                return null;
+
+            }
+
+        }
+
+        return null;
 
     }
 
@@ -294,6 +556,7 @@ export class Pathfinder {
                 destinationId,
                 {
                     agent,
+
                     avoidOccupied:
                         false,
 
@@ -308,11 +571,12 @@ export class Pathfinder {
         }
 
         const available =
-            this.findShortestPath(
+            this.findMovementAwarePath(
                 startId,
                 destinationId,
                 {
                     agent,
+
                     avoidOccupied:
                         true,
 
@@ -320,36 +584,27 @@ export class Pathfinder {
                 }
             );
 
-        /*
-         * Verifica se a rota direta contém
-         * algum nó fisicamente ocupado.
-         *
-         * O primeiro nó é ignorado, pois ele
-         * pode ser o nó atualmente ocupado pelo
-         * próprio actor.
-         */
         const directContainsOccupiedNode =
-            direct.nodeIds
-                .slice(1)
-                .some(nodeId =>
-                    this.traffic
-                        ?.isNodeOccupiedByOther(
-                            nodeId,
-                            agent
-                        )
-                );
+            this.pathContainsOccupiedNode(
+                direct.nodeIds,
+                agent
+            );
+
+        const directContainsMovementConflict =
+            this.getMovementConflictNodeIds(
+                direct.nodeIds,
+                agent
+            ).size > 0;
 
         /*
-         * Se a rota direta atravessa um nó
-         * ocupado, ela nunca é usada como
-         * fallback.
+         * Um corpo comum dentro do nó e um movement ativo incompatível são
+         * restrições físicas.
          *
-         * Se houver outra rota, ela será usada
-         * mesmo que seja significativamente
-         * mais longa.
+         * A rota direta não pode ser restaurada por maxDetourFactor.
          */
         if (
-            directContainsOccupiedNode
+            directContainsOccupiedNode ||
+            directContainsMovementConflict
         ) {
 
             return available ??
@@ -358,12 +613,10 @@ export class Pathfinder {
         }
 
         /*
-         * Se nenhum nó está fisicamente ocupado,
-         * mantém-se a política normal de desvio.
+         * Reserva de nó ou lane temporariamente cheia são restrições suaves.
          *
-         * Isso permite que uma reserva temporária
-         * ou uma lane cheia ainda resulte em espera
-         * quando o desvio seria desproporcional.
+         * Se não existir um desvio razoável, preservamos a rota direta para
+         * que a camada de execução aguarde no endpoint.
          */
         if (!available) {
 
@@ -386,31 +639,91 @@ export class Pathfinder {
 
     }
 
-    findNearestAvailablePath(startId, agent = null) {
+    findNearestAvailablePath(
+        startId,
+        agent = null
+    ) {
 
-        const result = this.findAllShortestPaths(startId, {
-            agent,
-            avoidOccupied: true
-        });
-        const candidates = [...result.distances.keys()]
-            .map(id => this.graph.requireNode(id))
-            .filter(node =>
-                !node.blocked &&
-                (!this.traffic || this.traffic.isNodeAvailable(node.id, agent))
+        /*
+         * O primeiro levantamento serve para ordenar os destinos potenciais
+         * pela distância topológica.
+         */
+        const result =
+            this.findAllShortestPaths(
+                startId,
+                {
+                    agent,
+
+                    avoidOccupied:
+                        true
+                }
             );
 
-        if (candidates.length === 0) return null;
+        const candidates =
+            [
+                ...result.distances.keys()
+            ]
+                .map(id =>
+                    this.graph.requireNode(
+                        id
+                    )
+                )
+                .filter(node =>
+                    !node.blocked &&
+                    (
+                        !this.traffic ||
+                        this.traffic
+                            .isNodeAvailable(
+                                node.id,
+                                agent
+                            )
+                    )
+                )
+                .sort(
+                    (
+                        first,
+                        second
+                    ) =>
+                        result.distances.get(
+                            first.id
+                        ) -
+                        result.distances.get(
+                            second.id
+                        )
+                );
 
-        const destination = candidates.reduce((nearest, node) =>
-            result.distances.get(node.id) < result.distances.get(nearest.id)
-                ? node
-                : nearest
-        );
+        /*
+         * Recovery também precisa respeitar movements incompatíveis.
+         *
+         * Sem isso, findNearestAvailablePath poderia reconstruir uma rota
+         * através do mesmo junction que produziu a colisão.
+         */
+        for (
+            const destination of
+            candidates
+        ) {
 
-        return this.findShortestPath(startId, destination.id, {
-            agent,
-            avoidOccupied: true
-        });
+            const path =
+                this.findMovementAwarePath(
+                    startId,
+                    destination.id,
+                    {
+                        agent,
+
+                        avoidOccupied:
+                            true
+                    }
+                );
+
+            if (path) {
+
+                return path;
+
+            }
+
+        }
+
+        return null;
 
     }
 
@@ -419,7 +732,8 @@ export class Pathfinder {
         {
             agent = null,
             avoidOccupied = true,
-            avoidFirstStepTo = null
+            avoidFirstStepTo = null,
+            avoidNodeIds = null
         } = {}
     ) {
 
@@ -430,6 +744,15 @@ export class Pathfinder {
         this.graph.requireNode(
             startId
         );
+
+        const excludedNodeIds =
+            avoidNodeIds instanceof Set
+
+                ? avoidNodeIds
+                : new Set(
+                    avoidNodeIds ??
+                    []
+                );
 
         const distances =
             new Map([
@@ -457,20 +780,21 @@ export class Pathfinder {
         ) {
 
             const currentId =
-                [...unvisited]
-                    .reduce(
-                        (
-                            closestId,
-                            id
-                        ) =>
-                            distances.get(id) <
-                                distances.get(
-                                    closestId
-                                )
+                [
+                    ...unvisited
+                ].reduce(
+                    (
+                        closestId,
+                        id
+                    ) =>
+                        distances.get(id) <
+                            distances.get(
+                                closestId
+                            )
 
-                                ? id
-                                : closestId
-                    );
+                            ? id
+                            : closestId
+                );
 
             unvisited.delete(
                 currentId
@@ -504,6 +828,17 @@ export class Pathfinder {
                 }
 
                 if (
+                    excludedNodeIds.has(
+                        neighborId
+                    ) &&
+                    neighborId !== startId
+                ) {
+
+                    continue;
+
+                }
+
+                if (
                     connection.blocked ||
                     neighbor.blocked
                 ) {
@@ -529,8 +864,10 @@ export class Pathfinder {
                 ) {
 
                     /*
-                     * Lane cheia retira esta
-                     * conexão da rota disponível.
+                     * Uma lane cheia remove a conexão da rota disponível.
+                     *
+                     * Reservations de lane já contam para laneCapacity dentro
+                     * de NavigationTrafficState.
                      */
                     if (
                         !this.traffic
@@ -546,12 +883,17 @@ export class Pathfinder {
                     }
 
                     /*
-                     * Uma reserva de nó não
-                     * remove o nó do traçado.
+                     * Reservas de nó continuam traçáveis.
                      *
-                     * Apenas bloqueios
-                     * topológicos ou físicos
-                     * excepcionais fazem isso.
+                     * Neste ponto são eliminados apenas:
+                     *
+                     * - bloqueios topológicos;
+                     * - collisionBlocks;
+                     * - ocupantes sem movementId;
+                     * - outras indisponibilidades físicas excepcionais.
+                     *
+                     * Crossings com movementId são analisados somente depois
+                     * que a rota inteira é conhecida.
                      */
                     if (
                         !this.traffic
@@ -615,6 +957,71 @@ export class Pathfinder {
 
     }
 
+    pathContainsOccupiedNode(
+        nodeIds,
+        agent
+    ) {
+
+        if (!this.traffic) {
+
+            return false;
+
+        }
+
+        /*
+         * O primeiro nó pode pertencer ao próprio agente.
+         *
+         * Occupants que possuem activeMovement não devem aparecer como uma
+         * ocupação comum. Eles são analisados pelo movementAdvisor.
+         */
+        return nodeIds
+            .slice(1)
+            .some(nodeId =>
+                this.traffic
+                    .isNodeOccupiedByOther(
+                        nodeId,
+                        agent
+                    )
+            );
+
+    }
+
+    getMovementConflictNodeIds(
+        nodeIds,
+        agent
+    ) {
+
+        if (
+            !this.movementAdvisor ||
+            !agent ||
+            nodeIds.length < 3
+        ) {
+
+            return new Set();
+
+        }
+
+        const conflicts =
+            this.movementAdvisor
+                .getPlanningConflictNodeIds(
+                    nodeIds,
+                    agent
+                );
+
+        /*
+         * Exige um Set como contrato externo, mas aceita iteráveis para tornar
+         * o Pathfinder mais resistente durante a migração.
+         */
+        return conflicts instanceof Set
+
+            ? conflicts
+            : new Set(
+                conflicts ??
+                []
+            );
+
+    }
+
     findFirstUnavailableResource(
         nodeIds,
         agent
@@ -625,6 +1032,12 @@ export class Pathfinder {
             return null;
 
         }
+
+        const movementConflictNodeIds =
+            this.getMovementConflictNodeIds(
+                nodeIds,
+                agent
+            );
 
         for (
             let index = 0;
@@ -663,12 +1076,33 @@ export class Pathfinder {
             }
 
             /*
-             * Aqui usamos isNodeAvailable().
+             * Para a rota:
              *
-             * Uma reserva não impede planejar,
-             * mas impede executar a entrada
-             * naquele momento.
+             * A -> B -> C
+             *
+             * um conflito de movement em B pertence ao índice da transição
+             * A -> B. Assim, o caminho seguro termina em A.
              */
+            if (
+                movementConflictNodeIds.has(
+                    toId
+                )
+            ) {
+
+                return {
+                    index,
+
+                    resource: {
+                        type:
+                            "node-movement",
+
+                        id:
+                            toId
+                    }
+                };
+
+            }
+
             if (
                 this.traffic
                     .isNodeOccupiedByOther(
@@ -692,11 +1126,10 @@ export class Pathfinder {
             }
 
             /*
-             * Reservas continuam sendo recursos
-             * temporariamente indisponíveis.
+             * Reservas continuam sendo restrições temporárias de execução.
              *
-             * Elas não removem o nó da topologia, mas
-             * impedem que o ator prossiga até a entrada.
+             * Elas não retiram o nó da pesquisa topológica, mas fazem o ator
+             * aguardar antes de sua entrada.
              */
             if (
                 !this.traffic
@@ -726,20 +1159,46 @@ export class Pathfinder {
 
     }
 
-    canAgentTraverseConnection(connection, agent = null) {
+    canAgentTraverseConnection(
+        connection,
+        agent = null
+    ) {
 
-        if (!agent) return true;
+        if (!agent) {
 
-        const capabilities = agent.navigationCapabilities ?? {};
-        const traversal = connection.metadata.traversal ?? "flat";
+            return true;
 
-        if (traversal === "stairs" && capabilities.stairs === false) {
-            return false;
         }
-        if (traversal === "slope" &&
-            Number.isFinite(capabilities.maxSlope) &&
-            connection.metadata.slopeAngle > capabilities.maxSlope) {
+
+        const capabilities =
+            agent.navigationCapabilities ??
+            {};
+
+        const traversal =
+            connection.metadata
+                .traversal ??
+            "flat";
+
+        if (
+            traversal === "stairs" &&
+            capabilities.stairs === false
+        ) {
+
             return false;
+
+        }
+
+        if (
+            traversal === "slope" &&
+            Number.isFinite(
+                capabilities.maxSlope
+            ) &&
+            connection.metadata.slopeAngle >
+            capabilities.maxSlope
+        ) {
+
+            return false;
+
         }
 
         return true;

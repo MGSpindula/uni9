@@ -142,37 +142,43 @@ export class InteractionNavigation {
 
                 const nodeId = waypoint.graphEntryNodeId;
 
-                // Ambient points connect directly to one graph node. They do
-                // not have a lane callback, but their physical arrival still
-                // uses the same queue/handshake as every connection endpoint.
-                this.owner.traffic.claimPhysicalArrival(nodeId, actor);
-
                 const crossing = actor.navigation.getNextWaypoint() !== null;
 
-                if (!this.owner.traffic.hasArrivalGrant(nodeId, actor)) {
+                if (
+                    !this.owner.traffic
+                        .claimPhysicalArrival(
+                            nodeId,
+                            actor,
+                            {
+                                waypoint,
 
-                    this.owner.traffic.setWaitReason(
-                        actor,
-                        nodeId,
-                        WaitReason.ENDPOINT_WAIT
-                    );
+                                entry:
+                                    waypoint.nodeEntry ??
+                                    null
+                            }
+                        )
+                ) {
+
                     return "waiting";
 
                 }
 
-                if (!this.owner.traffic.canCrossNode(nodeId, actor) ||
-                    !this.owner.trafficState.occupyNode(nodeId, actor, {
-                        crossing
-                    })) {
+                if (
+                    !this.owner.traffic
+                        .canCrossNode(
+                            nodeId,
+                            actor
+                        ) ||
+                    !this.owner.traffic
+                        .occupyGrantedNode(
+                            nodeId,
+                            actor,
+                            {
+                                crossing
+                            }
+                        )
+                ) {
 
-                    this.owner.traffic.setWaitReason(
-                        actor,
-                        nodeId,
-                        WaitReason.NODE_OCCUPIED
-                    );
-                    // Keep this waypoint current until the queue grants the
-                    // physical crossing. The InteractionPoint remains owned
-                    // until completeInteractionExit() commits this handoff.
                     return "waiting";
 
                 }
@@ -265,11 +271,33 @@ export class InteractionNavigation {
 
         }
 
-        if (context.traversal.interactionPoint !== waypoint.interactionPoint) {
+        if (
+            context.traversal
+                .interactionPoint !==
+            waypoint.interactionPoint
+        ) {
 
-            this.owner.leaveInteractionPoint(context);
-            this.interactionTraffic.occupyPoint(waypoint.interactionPoint, actor);
-            context.traversal.interactionPoint = waypoint.interactionPoint;
+            this.owner
+                .leaveInteractionPoint(
+                    context
+                );
+
+            const occupied =
+                this.interactionTraffic
+                    .occupyPoint(
+                        waypoint.interactionPoint,
+                        actor
+                    );
+
+            if (!occupied) {
+
+                return "waiting";
+
+            }
+
+            context.traversal
+                .interactionPoint =
+                waypoint.interactionPoint;
 
         }
 

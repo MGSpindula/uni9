@@ -897,7 +897,18 @@ export class NavigationConnector {
                         nodeId:
                             graphEntryNodeId,
 
-                        originKey
+                        originKey,
+
+                        entryKey:
+                            `interaction:${accessPoint.id}`,
+
+                        entryPosition:
+                            portalPosition.clone(),
+
+                        entryDirection:
+                            departureDirection.clone(),
+
+                        nextNodeId
                     }
 
                     : null,

@@ -30,12 +30,40 @@ export class NavigationTrafficState {
                 // A crossing actor is passing through the junction; it is not
                 // performing an action there. Compatible crossings may
                 // overlap while an ordinary occupant still blocks the node.
-                crossingAgents: new Set()
+                crossingAgents: new Set(),
+                reservedMovements: new Map(),
+                activeMovements: new Map()
             });
 
         }
 
         return this.nodeStates.get(id);
+
+    }
+
+    getReservedNodeMovement(
+        id,
+        agent
+    ) {
+
+        return this
+            .getNodeState(id)
+            .reservedMovements
+            .get(agent) ??
+            null;
+
+    }
+
+    getActiveNodeMovement(
+        id,
+        agent
+    ) {
+
+        return this
+            .getNodeState(id)
+            .activeMovements
+            .get(agent) ??
+            null;
 
     }
 
@@ -113,18 +141,46 @@ export class NavigationTrafficState {
 
     }
 
-    isNodePhysicallyAvailable(id, agent = null) {
+    isNodePhysicallyAvailable(
+        id,
+        agent = null
+    ) {
 
-        const node = this.graph.requireNode(id);
-        const state = this.getNodeState(id);
+        const node =
+            this.graph.requireNode(
+                id
+            );
 
-        if (node.blocked) return false;
+        const state =
+            this.getNodeState(
+                id
+            );
 
-        if (this.isCollisionBlockedFor(state, agent)) return false;
+        if (node.blocked) {
 
-        return ![...state.occupants].some(candidate =>
-            candidate !== agent &&
-            !state.crossingAgents.has(candidate)
+            return false;
+
+        }
+
+        if (
+            this.isCollisionBlockedFor(
+                state,
+                agent
+            )
+        ) {
+
+            return false;
+
+        }
+
+        /*
+         * Consulta estritamente física.
+         * CrossingAgent também possui corpo.
+         */
+        return ![
+            ...state.occupants
+        ].some(candidate =>
+            candidate !== agent
         );
 
     }
@@ -144,20 +200,12 @@ export class NavigationTrafficState {
                 id
             );
 
-        /*
-         * Bloqueio estrutural remove o nó
-         * completamente do grafo disponível.
-         */
         if (node.blocked) {
 
             return false;
 
         }
 
-        /*
-         * Uma colisão física ativa próxima ao nó
-         * também impede que novas rotas o escolham.
-         */
         if (
             this.isCollisionBlockedFor(
                 state,
@@ -170,13 +218,10 @@ export class NavigationTrafficState {
         }
 
         /*
-         * Qualquer ocupação física por outro ator
-         * remove o nó de um NOVO planejamento.
-         *
-         * crossingAgents não são exceção aqui.
-         * Eles podem ter sido autorizados antes,
-         * mas enquanto seus corpos estiverem no nó,
-         * nenhum novo path deve atravessá-lo.
+         * Um ocupante sem movementId é um bloqueio
+         * total. Um crossing com movementId será
+         * avaliado posteriormente pelo Pathfinder
+         * em relação ao movimento pretendido.
          */
         for (
             const occupant of
@@ -184,7 +229,17 @@ export class NavigationTrafficState {
         ) {
 
             if (
-                occupant !== agent
+                occupant === agent
+            ) {
+
+                continue;
+
+            }
+
+            if (
+                !state.activeMovements.has(
+                    occupant
+                )
             ) {
 
                 return false;
@@ -193,12 +248,6 @@ export class NavigationTrafficState {
 
         }
 
-        /*
-         * Reservas não removem o nó do traçado.
-         *
-         * Elas apenas impedem a admissão quando
-         * o ator chegar ao endpoint.
-         */
         return true;
 
     }
@@ -213,22 +262,14 @@ export class NavigationTrafficState {
                 id
             );
 
-        for (
-            const occupant of
-            state.occupants
-        ) {
-
-            if (
-                occupant !== agent
-            ) {
-
-                return true;
-
-            }
-
-        }
-
-        return false;
+        return [
+            ...state.occupants
+        ].some(occupant =>
+            occupant !== agent &&
+            !state.activeMovements.has(
+                occupant
+            )
+        );
 
     }
 
@@ -294,29 +335,20 @@ export class NavigationTrafficState {
 
     }
 
-    reserveNode(id, agent) {
-
-        if (!this.isNodeAvailable(id, agent)) return false;
-
-        const node = this.graph.requireNode(id);
-        const state = this.getNodeState(id);
-
-        return this.reserveResource(node, state, agent);
-
-    }
-
-    reserveNodeForTransit(
+    reserveNode(
         id,
-        agent,
-        isCompatibleReservation =
-            () => false
+        agent
     ) {
 
         const node =
-            this.graph.requireNode(id);
+            this.graph.requireNode(
+                id
+            );
 
         const state =
-            this.getNodeState(id);
+            this.getNodeState(
+                id
+            );
 
         if (node.blocked) {
 
@@ -335,25 +367,122 @@ export class NavigationTrafficState {
 
         }
 
-        /*
-         * O próprio ator já possui admissão.
-         */
-        if (
-            state.reservations.has(agent) ||
-            state.transitReservations.has(agent) ||
-            state.occupants.has(agent)
+        for (
+            const candidate of
+            state.occupants
         ) {
 
-            return true;
+            if (
+                candidate !== agent
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        for (
+            const candidate of
+            state.reservations
+        ) {
+
+            if (
+                candidate !== agent
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        for (
+            const candidate of
+            state.transitReservations
+        ) {
+
+            if (
+                candidate !== agent
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        state.reservations.add(
+            agent
+        );
+
+        return true;
+
+    }
+
+    reserveNodeForTransit(
+        id,
+        agent,
+        movement,
+        movementsConflict =
+            () => true
+    ) {
+
+        const node =
+            this.graph.requireNode(
+                id
+            );
+
+        const state =
+            this.getNodeState(
+                id
+            );
+
+        if (
+            node.blocked ||
+            !movement ||
+            movement.nodeId !== id
+        ) {
+
+            return false;
+
+        }
+
+        if (
+            this.isCollisionBlockedFor(
+                state,
+                agent
+            )
+        ) {
+
+            return false;
+
+        }
+
+        const activeMovement =
+            state.activeMovements.get(
+                agent
+            );
+
+        const reservedMovement =
+            state.reservedMovements.get(
+                agent
+            );
+
+        if (
+            activeMovement ||
+            reservedMovement
+        ) {
+
+            return (
+                activeMovement ??
+                reservedMovement
+            ).id === movement.id;
 
         }
 
         /*
-         * Reservas comuns representam posse
-         * exclusiva do nó.
-         *
-         * Elas não participam do sistema de
-         * travessias compatíveis.
+         * Reservas comuns são exclusivas.
          */
         for (
             const candidate of
@@ -371,11 +500,8 @@ export class NavigationTrafficState {
         }
 
         /*
-         * Um ator parado ou apenas ocupando o nó
-         * impede nova entrada.
-         *
-         * Um crossingAgent pode coexistir quando
-         * seu caminho não conflita com o novo.
+         * Movimentos ativos podem coexistir
+         * somente quando não conflitam.
          */
         for (
             const candidate of
@@ -390,18 +516,17 @@ export class NavigationTrafficState {
 
             }
 
-            if (
-                !state.crossingAgents.has(
+            const candidateMovement =
+                state.activeMovements.get(
                     candidate
-                )
-            ) {
-
-                return false;
-
-            }
+                );
 
             if (
-                !isCompatibleReservation(
+                !candidateMovement ||
+                movementsConflict(
+                    movement,
+                    candidateMovement,
+                    agent,
                     candidate
                 )
             ) {
@@ -413,11 +538,8 @@ export class NavigationTrafficState {
         }
 
         /*
-         * Reservas de trânsito não consomem uma
-         * capacidade numérica arbitrária.
-         *
-         * Elas podem coexistir quando os caminhos
-         * planejados são independentes.
+         * O mesmo vale para movimentos já
+         * reservados, mas ainda não ocupados.
          */
         for (
             const candidate of
@@ -432,8 +554,17 @@ export class NavigationTrafficState {
 
             }
 
+            const candidateMovement =
+                state.reservedMovements.get(
+                    candidate
+                );
+
             if (
-                !isCompatibleReservation(
+                !candidateMovement ||
+                movementsConflict(
+                    movement,
+                    candidateMovement,
+                    agent,
                     candidate
                 )
             ) {
@@ -444,32 +575,26 @@ export class NavigationTrafficState {
 
         }
 
-        /*
-         * Nós exclusivos continuam aceitando
-         * apenas uma admissão por vez.
-         */
-        if (node.exclusive) {
-
-            if (
+        if (
+            node.exclusive &&
+            (
+                state.occupants.size > 0 ||
                 state.reservations.size > 0 ||
-                state.transitReservations.size > 0 ||
-                state.occupants.size > 0
-            ) {
+                state.transitReservations.size > 0
+            )
+        ) {
 
-                return false;
-
-            }
-
-            state.reservations.add(
-                agent
-            );
-
-            return true;
+            return false;
 
         }
 
         state.transitReservations.add(
             agent
+        );
+
+        state.reservedMovements.set(
+            agent,
+            movement
         );
 
         return true;
@@ -1164,8 +1289,138 @@ export class NavigationTrafficState {
     canCrossNode(
         id,
         agent,
-        isCompatibleCrossing =
-            () => false
+        movement,
+        movementsConflict =
+            () => true
+    ) {
+
+        const node =
+            this.graph.requireNode(
+                id
+            );
+
+        const state =
+            this.getNodeState(
+                id
+            );
+
+        if (
+            node.blocked ||
+            !movement ||
+            movement.nodeId !== id
+        ) {
+
+            return false;
+
+        }
+
+        if (
+            this.isCollisionBlockedFor(
+                state,
+                agent
+            )
+        ) {
+
+            return false;
+
+        }
+
+        for (
+            const candidate of
+            state.reservations
+        ) {
+
+            if (
+                candidate !== agent
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        for (
+            const candidate of
+            state.transitReservations
+        ) {
+
+            if (
+                candidate === agent
+            ) {
+
+                continue;
+
+            }
+
+            const candidateMovement =
+                state.reservedMovements.get(
+                    candidate
+                );
+
+            if (
+                !candidateMovement ||
+                movementsConflict(
+                    movement,
+                    candidateMovement,
+                    agent,
+                    candidate
+                )
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        for (
+            const candidate of
+            state.occupants
+        ) {
+
+            if (
+                candidate === agent
+            ) {
+
+                continue;
+
+            }
+
+            const candidateMovement =
+                state.activeMovements.get(
+                    candidate
+                );
+
+            if (
+                !candidateMovement ||
+                movementsConflict(
+                    movement,
+                    candidateMovement,
+                    agent,
+                    candidate
+                )
+            ) {
+
+                return false;
+
+            }
+
+        }
+
+        return true;
+
+    }
+
+    occupyNode(
+        id,
+        agent,
+        {
+            crossing = false,
+            movement = null,
+            movementsConflict =
+            () => true
+        } = {}
     ) {
 
         const node =
@@ -1184,10 +1439,116 @@ export class NavigationTrafficState {
 
         }
 
-        if (
-            this.isCollisionBlockedFor(
-                state,
+        /*
+         * Uma ocupação que não é crossing é
+         * exclusiva, independentemente de
+         * node.capacity.
+         */
+        if (!crossing) {
+
+            if (
+                this.isCollisionBlockedFor(
+                    state,
+                    agent
+                )
+            ) {
+
+                return false;
+
+            }
+
+            for (
+                const candidate of
+                state.occupants
+            ) {
+
+                if (
+                    candidate !== agent
+                ) {
+
+                    return false;
+
+                }
+
+            }
+
+            for (
+                const candidate of
+                state.reservations
+            ) {
+
+                if (
+                    candidate !== agent
+                ) {
+
+                    return false;
+
+                }
+
+            }
+
+            for (
+                const candidate of
+                state.transitReservations
+            ) {
+
+                if (
+                    candidate !== agent
+                ) {
+
+                    return false;
+
+                }
+
+            }
+
+            state.reservations.delete(
                 agent
+            );
+
+            state.transitReservations.delete(
+                agent
+            );
+
+            state.reservedMovements.delete(
+                agent
+            );
+
+            state.activeMovements.delete(
+                agent
+            );
+
+            state.crossingAgents.delete(
+                agent
+            );
+
+            state.occupants.add(
+                agent
+            );
+
+            return true;
+
+        }
+
+        const resolvedMovement =
+            movement ??
+            state.reservedMovements.get(
+                agent
+            ) ??
+            null;
+
+        if (!resolvedMovement) {
+
+            return false;
+
+        }
+
+        if (
+            !this.canCrossNode(
+                id,
+                agent,
+                resolvedMovement,
+                movementsConflict
             )
         ) {
 
@@ -1195,124 +1556,32 @@ export class NavigationTrafficState {
 
         }
 
-        /*
-         * Reservas comuns são exclusivas.
-         *
-         * Uma reserva comum de outro ator impede
-         * a travessia. A própria reserva do agent
-         * não é um bloqueio.
-         */
-        for (
-            const candidate of
-            state.reservations
-        ) {
+        state.reservations.delete(
+            agent
+        );
 
-            if (
-                candidate !== agent
-            ) {
+        state.transitReservations.delete(
+            agent
+        );
 
-                return false;
+        state.reservedMovements.delete(
+            agent
+        );
 
-            }
+        state.occupants.add(
+            agent
+        );
 
-        }
+        state.crossingAgents.add(
+            agent
+        );
 
-        /*
-         * Reservas de trânsito podem coexistir
-         * quando as trajetórias são compatíveis.
-         */
-        for (
-            const candidate of
-            state.transitReservations
-        ) {
-
-            if (
-                candidate === agent
-            ) {
-
-                continue;
-
-            }
-
-            if (
-                !isCompatibleCrossing(
-                    candidate
-                )
-            ) {
-
-                return false;
-
-            }
-
-        }
-
-        /*
-         * Um ocupante comum bloqueia o nó.
-         *
-         * Um ator que já está atravessando pode
-         * coexistir com o novo ator quando seus
-         * caminhos são compatíveis.
-         */
-        for (
-            const candidate of
-            state.occupants
-        ) {
-
-            if (
-                candidate === agent
-            ) {
-
-                continue;
-
-            }
-
-            if (
-                !state.crossingAgents.has(
-                    candidate
-                )
-            ) {
-
-                return false;
-
-            }
-
-            if (
-                !isCompatibleCrossing(
-                    candidate
-                )
-            ) {
-
-                return false;
-
-            }
-
-        }
+        state.activeMovements.set(
+            agent,
+            resolvedMovement
+        );
 
         return true;
-
-    }
-
-    occupyNode(id, agent, { crossing = false } = {}) {
-
-        const node = this.graph.requireNode(id);
-        const state = this.getNodeState(id);
-
-        // canCrossNode() already performed the junction handshake. A transit
-        // node is semantic traffic space, not an action capacity: compatible
-        // crossings must not be rejected a second time by generic capacity.
-        const occupied = crossing && !node.exclusive
-            ? !node.blocked
-            : this.occupyResource(node, state, agent);
-
-        if (occupied) {
-            state.reservations.delete(agent);
-            state.occupants.add(agent);
-            state.transitReservations.delete(agent);
-            if (crossing) state.crossingAgents.add(agent);
-            else state.crossingAgents.delete(agent);
-        }
-
-        return occupied;
 
     }
 
@@ -1404,48 +1673,169 @@ export class NavigationTrafficState {
 
     }
 
-    yieldTransitReservationsToArrival(id, agent) {
+    yieldTransitReservationsToArrival(
+        id,
+        agent
+    ) {
 
-        const state = this.getNodeState(id);
-        const displaced = [...state.transitReservations]
-            .filter(candidate => candidate !== agent);
+        const state =
+            this.getNodeState(
+                id
+            );
 
-        for (const candidate of displaced) {
-            state.transitReservations.delete(candidate);
+        const displaced =
+            [...state.transitReservations]
+                .filter(candidate =>
+                    candidate !== agent
+                );
+
+        for (
+            const candidate of displaced
+        ) {
+
+            state.transitReservations
+                .delete(candidate);
+
+            state.reservedMovements
+                .delete(candidate);
+
         }
 
         return displaced;
 
     }
 
-    yieldNodeReservationsToPriority(id, agent) {
+    yieldNodeReservationsToPriority(
+        id,
+        agent
+    ) {
 
-        const state = this.getNodeState(id);
-        const displaced = new Set();
+        const state =
+            this.getNodeState(
+                id
+            );
 
-        for (const collection of [
-            state.reservations,
-            state.transitReservations
-        ]) {
-            for (const candidate of [...collection]) {
-                if (candidate === agent ||
-                    candidate.navigationPassagePolicy === "absolute") continue;
-                collection.delete(candidate);
-                displaced.add(candidate);
+        const displaced =
+            new Set();
+
+        /*
+         * Reservas comuns de nó.
+         */
+        for (
+            const candidate of
+            [...state.reservations]
+        ) {
+
+            if (
+                candidate === agent ||
+                candidate
+                    .navigationPassagePolicy ===
+                "absolute"
+            ) {
+
+                continue;
+
             }
+
+            state.reservations
+                .delete(candidate);
+
+            /*
+             * Normalmente uma reserva comum não
+             * possui movement, mas a limpeza deixa
+             * o estado resistente a inconsistências.
+             */
+            state.reservedMovements
+                .delete(candidate);
+
+            displaced.add(
+                candidate
+            );
+
         }
 
-        return [...displaced];
+        /*
+         * Reservas transitórias sempre precisam
+         * perder também o movement correspondente.
+         */
+        for (
+            const candidate of
+            [...state.transitReservations]
+        ) {
+
+            if (
+                candidate === agent ||
+                candidate
+                    .navigationPassagePolicy ===
+                "absolute"
+            ) {
+
+                continue;
+
+            }
+
+            state.transitReservations
+                .delete(candidate);
+
+            state.reservedMovements
+                .delete(candidate);
+
+            displaced.add(
+                candidate
+            );
+
+        }
+
+        return [
+            ...displaced
+        ];
 
     }
 
-    releaseNode(id, agent) {
+    releaseNode(
+        id,
+        agent
+    ) {
 
-        const state = this.getNodeState(id);
+        const state =
+            this.getNodeState(
+                id
+            );
 
-        state.crossingAgents.delete(agent);
-        state.transitReservations.delete(agent);
-        this.releaseResource(state, agent);
+        state.crossingAgents
+            .delete(agent);
+
+        state.transitReservations
+            .delete(agent);
+
+        state.reservedMovements
+            .delete(agent);
+
+        state.activeMovements
+            .delete(agent);
+
+        this.releaseResource(
+            state,
+            agent
+        );
+
+    }
+
+    releaseNodeTransitReservation(
+        id,
+        agent
+    ) {
+
+        const state =
+            this.getNodeState(
+                id
+            );
+
+        state.transitReservations
+            .delete(agent);
+
+        state.reservedMovements
+            .delete(agent);
 
     }
 
@@ -1540,52 +1930,133 @@ export class NavigationTrafficState {
 
     }
 
-    releaseReservations(agent) {
+    releaseReservations(
+        agent
+    ) {
 
-        for (const state of this.nodeStates.values()) {
-            state.reservations.delete(agent);
-            state.transitReservations.delete(agent);
+        for (
+            const state of
+            this.nodeStates.values()
+        ) {
+
+            state.reservations
+                .delete(agent);
+
+            state.transitReservations
+                .delete(agent);
+
+            state.reservedMovements
+                .delete(agent);
+
         }
 
-        for (const state of this.connectionStates.values()) {
-            state.reservations.delete(agent);
+        for (
+            const state of
+            this.connectionStates.values()
+        ) {
 
-            for (const lane of state.lanes) {
-                lane.reservations.delete(agent);
+            state.reservations
+                .delete(agent);
 
-                // A topology change may invalidate future reservations while
-                // the actor is still physically traversing this lane. Its
-                // direction belongs to that occupancy and must survive until
-                // releaseConnection() finalizes the segment.
-                if (!lane.occupants.has(agent)) {
-                    lane.directions.delete(agent);
+            for (
+                const lane of state.lanes
+            ) {
+
+                lane.reservations
+                    .delete(agent);
+
+                /*
+                 * Uma mudança topológica pode
+                 * invalidar claims futuros enquanto
+                 * o ator continua fisicamente na lane.
+                 */
+                if (
+                    !lane.occupants.has(
+                        agent
+                    )
+                ) {
+
+                    lane.directions
+                        .delete(agent);
+
                 }
+
             }
+
         }
 
     }
 
-    releaseAgent(agent) {
+    releaseAgent(
+        agent
+    ) {
 
-        for (const state of this.nodeStates.values()) {
-            for (const encounter of [...state.collisionBlocks]) {
-                if (encounter.winner === agent || encounter.yielder === agent) {
-                    state.collisionBlocks.delete(encounter);
+        for (
+            const state of
+            this.nodeStates.values()
+        ) {
+
+            for (
+                const encounter of
+                [...state.collisionBlocks]
+            ) {
+
+                if (
+                    encounter.winner === agent ||
+                    encounter.yielder === agent
+                ) {
+
+                    state.collisionBlocks
+                        .delete(encounter);
+
                 }
+
             }
-            state.crossingAgents.delete(agent);
-            state.transitReservations.delete(agent);
-            this.releaseResource(state, agent);
+
+            state.crossingAgents
+                .delete(agent);
+
+            state.transitReservations
+                .delete(agent);
+
+            state.reservedMovements
+                .delete(agent);
+
+            state.activeMovements
+                .delete(agent);
+
+            this.releaseResource(
+                state,
+                agent
+            );
+
         }
 
-        for (const state of this.connectionStates.values()) {
-            for (const lane of state.lanes) {
-                lane.occupants.delete(agent);
-                lane.reservations.delete(agent);
-                lane.directions.delete(agent);
+        for (
+            const state of
+            this.connectionStates.values()
+        ) {
+
+            for (
+                const lane of state.lanes
+            ) {
+
+                lane.occupants
+                    .delete(agent);
+
+                lane.reservations
+                    .delete(agent);
+
+                lane.directions
+                    .delete(agent);
+
             }
 
-            this.releaseResource(state, agent);
+            this.releaseResource(
+                state,
+                agent
+            );
+
         }
 
     }

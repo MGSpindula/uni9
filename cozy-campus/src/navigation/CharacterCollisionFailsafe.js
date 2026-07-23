@@ -64,7 +64,13 @@ export class CharacterCollisionFailsafe {
             const required =
                 (encounter.winner.collisionRadius ?? 0.36) +
                 (encounter.yielder.collisionRadius ?? 0.36) +
-                this.safetyPadding + 0.65;
+                this.safetyPadding +
+                (
+                    this.owner
+                        .collisionSolver
+                        ?.releaseMargin ??
+                    0.35
+                );
             const separated = this.getPlanarDistance(
                 encounter.winner,
                 encounter.yielder
@@ -219,9 +225,25 @@ export class CharacterCollisionFailsafe {
 
             if (predictedClearance >= requiredClearance) continue;
 
-            const encounter = this.getOrCreateEncounter(actor, other);
-            this.owner.collisionSolver?.requestClearance(encounter);
-            if (encounter.winner === actor) continue;
+            const encounter =
+                this.getOrCreateEncounter(
+                    actor,
+                    other
+                );
+
+            /*
+             * A previsão apenas escolhe um yielder estável.
+             *
+             * O solver só deve criar deslocamento depois
+             * de uma sobreposição física real.
+             */
+            if (
+                encounter.winner === actor
+            ) {
+
+                continue;
+
+            }
 
             if (predictedClearance < closestClearance) {
 
@@ -304,9 +326,11 @@ export class CharacterCollisionFailsafe {
 
         const state = this.owner.trafficState.getNodeState(connection.toId);
 
-        return [...state.occupants].find(candidate =>
-            candidate !== actor && !state.crossingAgents.has(candidate)
-        ) ?? null;
+        return [...state.occupants]
+            .find(candidate =>
+                candidate !== actor
+            ) ??
+            null;
 
     }
 
@@ -392,7 +416,7 @@ export class CharacterCollisionFailsafe {
         const closestTime = speedSquared > 0.0001
             ? THREE.MathUtils.clamp(
                 -this.relativePosition.dot(this.relativeVelocity) /
-                    speedSquared,
+                speedSquared,
                 0,
                 this.predictionTime
             )
@@ -434,34 +458,96 @@ export class CharacterCollisionFailsafe {
 
     }
 
-    getOrCreateEncounter(first, second) {
+    getOrCreateEncounter(
+        first,
+        second
+    ) {
 
-        const existing = this.encounters.find(encounter =>
-            (encounter.winner === first && encounter.yielder === second) ||
-            (encounter.winner === second && encounter.yielder === first)
-        );
+        const existing =
+            this.encounters.find(
+                encounter =>
+                    (
+                        encounter.winner === first &&
+                        encounter.yielder === second
+                    ) ||
+                    (
+                        encounter.winner === second &&
+                        encounter.yielder === first
+                    )
+            );
 
-        if (existing) return existing;
+        if (existing) {
 
-        const followingOrder = this.getFollowingOrder(first, second);
-        const firstYields = followingOrder
-            ? followingOrder.follower === first
-            : this.shouldYield(first, second);
+            return existing;
+
+        }
+
+        const followingOrder =
+            this.getFollowingOrder(
+                first,
+                second
+            );
+
+        const firstYields =
+            followingOrder
+
+                ? followingOrder.follower ===
+                first
+
+                : this.shouldYield(
+                    first,
+                    second
+                );
+
         const encounter = {
-            winner: firstYields ? second : first,
-            yielder: firstYields ? first : second,
-            nodeId: null,
-            kind: followingOrder ? "same-lane-following" : "crossing"
+            winner:
+                firstYields
+                    ? second
+                    : first,
+
+            yielder:
+                firstYields
+                    ? first
+                    : second,
+
+            nodeId:
+                null,
+
+            kind:
+                followingOrder
+                    ? "same-lane-following"
+                    : "crossing",
+
+            stalledElapsed:
+                0,
+
+            recoveryActor:
+                null,
+
+            recoveryStartedAt:
+                null
         };
 
-        this.encounters.push(encounter);
-        encounter.winner.onCollisionPassStarted?.({
-            yieldingActor: encounter.yielder
-        });
-        encounter.yielder.onCollisionYieldStarted?.({
-            blocker: encounter.winner,
-            strategy: followingOrder ? "follow-wait" : "right-of-way"
-        });
+        this.encounters.push(
+            encounter
+        );
+
+        encounter.winner
+            .onCollisionPassStarted?.({
+                yieldingActor:
+                    encounter.yielder
+            });
+
+        encounter.yielder
+            .onCollisionYieldStarted?.({
+                blocker:
+                    encounter.winner,
+
+                strategy:
+                    followingOrder
+                        ? "follow-wait"
+                        : "right-of-way"
+            });
 
         return encounter;
 
@@ -522,76 +608,356 @@ export class CharacterCollisionFailsafe {
 
     }
 
-    markEncounterCollision(encounter, first, second) {
+    markEncounterCollision(
+        encounter,
+        first,
+        second
+    ) {
 
-        if (encounter.nodeId) return encounter.nodeId;
+        const nextNodeId =
+            this.findCollisionNode(
+                first,
+                second
+            );
 
-        encounter.nodeId = this.findCollisionNode(first, second);
-        if (!encounter.nodeId) return null;
+        if (
+            encounter.nodeId ===
+            nextNodeId
+        ) {
 
-        this.owner.trafficState.addCollisionBlock(
-            encounter.nodeId,
-            encounter
-        );
+            return nextNodeId;
+
+        }
+
+        const previousNodeId =
+            encounter.nodeId;
+
+        if (previousNodeId) {
+
+            this.owner
+                .trafficState
+                .releaseCollisionBlock(
+                    previousNodeId,
+                    encounter
+                );
+
+            this.owner
+                .traffic
+                ?.handleNodeCollisionReleased?.(
+                    previousNodeId,
+                    encounter
+                );
+
+        }
+
+        encounter.nodeId =
+            nextNodeId;
+
+        if (nextNodeId) {
+
+            this.owner
+                .trafficState
+                .addCollisionBlock(
+                    nextNodeId,
+                    encounter
+                );
+
+            this.owner
+                .traffic
+                ?.handleNodeCollisionBlock?.(
+                    nextNodeId,
+                    encounter
+                );
+
+        }
+
         this.owner.refresh();
-        return encounter.nodeId;
+
+        return nextNodeId;
 
     }
 
-    releaseEncounter(encounter) {
+    releaseEncounter(
+        encounter
+    ) {
 
-        const index = this.encounters.indexOf(encounter);
-        if (index < 0) return;
-
-        this.encounters.splice(index, 1);
-        if (encounter.nodeId) {
-            this.owner.trafficState.releaseCollisionBlock(
-                encounter.nodeId,
+        const index =
+            this.encounters.indexOf(
                 encounter
             );
-            this.owner.refresh();
+
+        if (index < 0) {
+
+            return;
+
         }
-        encounter.winner.onCollisionPassEnded?.({
-            yieldingActor: encounter.yielder
-        });
-        encounter.yielder.onCollisionYieldEnded?.({
-            blocker: encounter.winner
-        });
+
+        this.encounters.splice(
+            index,
+            1
+        );
+
+        if (encounter.nodeId) {
+
+            const nodeId =
+                encounter.nodeId;
+
+            this.owner
+                .trafficState
+                .releaseCollisionBlock(
+                    nodeId,
+                    encounter
+                );
+
+            this.owner
+                .traffic
+                ?.handleNodeCollisionReleased?.(
+                    nodeId,
+                    encounter
+                );
+
+        }
+
+        if (
+            this.waitingFor.get(
+                encounter.winner
+            ) === encounter.yielder
+        ) {
+
+            this.waitingFor.delete(
+                encounter.winner
+            );
+
+            this.waitDetails.delete(
+                encounter.winner
+            );
+
+        }
+
+        if (
+            this.waitingFor.get(
+                encounter.yielder
+            ) === encounter.winner
+        ) {
+
+            this.waitingFor.delete(
+                encounter.yielder
+            );
+
+            this.waitDetails.delete(
+                encounter.yielder
+            );
+
+        }
+
+        encounter.recoveryActor =
+            null;
+
+        encounter.winner
+            .onCollisionPassEnded?.({
+                yieldingActor:
+                    encounter.yielder
+            });
+
+        encounter.yielder
+            .onCollisionYieldEnded?.({
+                blocker:
+                    encounter.winner
+            });
+
+        this.owner.refresh();
 
     }
 
-    findCollisionNode(first, second) {
+    findCollisionNode(
+        first,
+        second
+    ) {
 
-        const midpoint = this.relativePosition.copy(first.object3D.position)
-            .add(second.object3D.position)
-            .multiplyScalar(0.5);
-        const candidateIds = new Set();
+        const midpoint =
+            this.relativePosition
+                .copy(
+                    first.object3D.position
+                )
+                .add(
+                    second.object3D.position
+                )
+                .multiplyScalar(
+                    0.5
+                );
 
-        for (const actor of [first, second]) {
-            const traversal = actor.navigation.getTraversalState();
-            if (traversal.currentNodeId) {
-                candidateIds.add(traversal.currentNodeId);
+        const candidateIds =
+            new Set();
+
+        const firstTraversal =
+            first.navigation
+                .getTraversalState();
+
+        const secondTraversal =
+            second.navigation
+                .getTraversalState();
+
+        for (
+            const traversal of [
+                firstTraversal,
+                secondTraversal
+            ]
+        ) {
+
+            if (
+                traversal.currentNodeId
+            ) {
+
+                candidateIds.add(
+                    traversal.currentNodeId
+                );
+
             }
-            if (traversal.currentConnection) {
-                candidateIds.add(traversal.currentConnection.fromId);
-                candidateIds.add(traversal.currentConnection.toId);
+
+            if (
+                traversal.currentConnection
+            ) {
+
+                candidateIds.add(
+                    traversal
+                        .currentConnection
+                        .fromId
+                );
+
+                candidateIds.add(
+                    traversal
+                        .currentConnection
+                        .toId
+                );
+
             }
+
         }
 
-        let closest = null;
-        let closestDistance = Infinity;
+        /*
+         * Duas conexões de saída podem compartilhar
+         * o mesmo junction. O endpoint comum precisa
+         * ser considerado mesmo depois do handoff
+         * para as conexões.
+         */
+        if (
+            firstTraversal.currentConnection &&
+            secondTraversal.currentConnection
+        ) {
 
-        for (const nodeId of candidateIds) {
-            const node = this.owner.graph.getNode(nodeId);
-            if (!node) continue;
-            const distance = Math.hypot(
-                midpoint.x - node.position.x,
-                midpoint.z - node.position.z
+            const firstIds =
+                new Set([
+                    firstTraversal
+                        .currentConnection
+                        .fromId,
+
+                    firstTraversal
+                        .currentConnection
+                        .toId
+                ]);
+
+            for (
+                const nodeId of [
+                    secondTraversal
+                        .currentConnection
+                        .fromId,
+
+                    secondTraversal
+                        .currentConnection
+                        .toId
+                ]
+            ) {
+
+                if (
+                    firstIds.has(
+                        nodeId
+                    )
+                ) {
+
+                    candidateIds.add(
+                        nodeId
+                    );
+
+                }
+
+            }
+
+        }
+
+        let closest =
+            null;
+
+        let closestDistance =
+            Infinity;
+
+        const maximumRadius =
+            Math.max(
+                first.collisionRadius ??
+                0.36,
+
+                second.collisionRadius ??
+                0.36
             );
-            const radius = (node.metadata.laneRadius ?? 1.75) + 0.65;
-            if (distance > radius || distance >= closestDistance) continue;
-            closest = nodeId;
-            closestDistance = distance;
+
+        for (
+            const nodeId of
+            candidateIds
+        ) {
+
+            const node =
+                this.owner.graph
+                    .getNode(
+                        nodeId
+                    );
+
+            if (!node) {
+
+                continue;
+
+            }
+
+            const distance =
+                Math.hypot(
+                    midpoint.x -
+                    node.position.x,
+
+                    midpoint.z -
+                    node.position.z
+                );
+
+            const authoredRadius =
+                Math.min(
+                    node.metadata
+                        .collisionRadius ??
+                    node.metadata
+                        .laneRadius ??
+                    1.4,
+
+                    2.5
+                );
+
+            const influenceRadius =
+                authoredRadius +
+                maximumRadius +
+                0.25;
+
+            if (
+                distance >
+                influenceRadius ||
+                distance >=
+                closestDistance
+            ) {
+
+                continue;
+
+            }
+
+            closest =
+                nodeId;
+
+            closestDistance =
+                distance;
+
         }
 
         return closest;
