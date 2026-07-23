@@ -17,6 +17,7 @@ export class AnimationController {
         this.speedResponse = 10;
         this.baseY = visual?.position.y ?? 0;
         this.baseRotationZ = visual?.rotation.z ?? 0;
+        this.requiresContinuousUpdate = false;
 
     }
 
@@ -37,6 +38,18 @@ export class AnimationController {
     isPlaying(state) {
 
         return this.state === state;
+
+    }
+
+    setContinuousUpdate(required) {
+
+        this.requiresContinuousUpdate = Boolean(required);
+
+    }
+
+    isVisuallyActive() {
+
+        return this.requiresContinuousUpdate || this.visualSpeed > 0.001;
 
     }
 

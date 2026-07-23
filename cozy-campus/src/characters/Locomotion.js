@@ -13,6 +13,10 @@ export class Locomotion {
         this.arrivalDistance = arrivalDistance;
 
         this.direction = new THREE.Vector3();
+        this.curvePoint = new THREE.Vector3();
+        this.curveTangent = new THREE.Vector3();
+        this.rotationTarget = new THREE.Vector3();
+        this.samplePoint = new THREE.Vector3();
         this.lookTarget = new THREE.Object3D();
         this.activeCurve = null;
         this.curveDistance = 0;
@@ -24,7 +28,11 @@ export class Locomotion {
             speed: 0,
             normalizedSpeed: 0,
             moving: false,
-            turning: false
+            turning: false,
+            // An intentional response along this actor's own route. It is
+            // movement, but it is not forward traffic progress.
+            retreating: false,
+            avoiding: false
         };
 
     }
@@ -43,6 +51,8 @@ export class Locomotion {
         this.motion.normalizedSpeed = 0;
         this.motion.moving = false;
         this.motion.turning = false;
+        this.motion.retreating = false;
+        this.motion.avoiding = false;
 
     }
 
@@ -129,8 +139,8 @@ export class Locomotion {
             targetDistance
         );
         const progress = nextDistance / length;
-        const target = curve.getPointAt(progress);
-        const tangent = curve.getTangentAt(progress);
+        const target = curve.getPointAt(progress, this.curvePoint);
+        const tangent = curve.getTangentAt(progress, this.curveTangent);
         const distanceMoved = nextDistance - this.curveDistance;
 
         if (followSurface) {
@@ -147,7 +157,7 @@ export class Locomotion {
         if (rotate && tangent.lengthSq() > 0.0001) {
 
             this.motion.turning = this.rotateTowards(
-                this.object3D.position.clone().add(tangent),
+                this.rotationTarget.copy(this.object3D.position).add(tangent),
                 delta
             );
 
@@ -158,11 +168,94 @@ export class Locomotion {
 
         if (nextDistance < targetDistance) return false;
 
-        // Every authorized segment owns a small local curve. Reset at its end;
-        // the next segment will start at this exact portal with a matching
-        // tangent, without retaining geometry for the rest of the route.
-        if (finishCurve || targetDistance >= length) this.resetCurve();
+        // Keep the completed curve until Character confirms traffic accepted
+        // the arrival. Resetting here made an actor waiting at an endpoint
+        // project itself onto the same curve (64+ samples) on every frame.
+        // Character resets after advancing to a genuinely different segment.
+        void finishCurve;
         return true;
+
+    }
+
+    retreatAlongCurve(delta, maximumDistance = Infinity, {
+        followSurface = true
+    } = {}) {
+
+        const curve = this.activeCurve;
+        if (!curve || this.curveDistance <= Number.EPSILON) return 0;
+
+        // This is an actor decision, not an external positional correction:
+        // it walks backward over its own spline and keeps route progress
+        // synchronized with the rendered position.
+        const distance = Math.min(
+            this.speed * delta,
+            maximumDistance,
+            this.curveDistance
+        );
+        const nextDistance = this.curveDistance - distance;
+        const length = curve.getLength();
+        const target = curve.getPointAt(
+            length > Number.EPSILON ? nextDistance / length : 0,
+            this.curvePoint
+        );
+
+        if (followSurface) {
+            this.object3D.position.x = target.x;
+            this.object3D.position.z = target.z;
+        } else {
+            this.object3D.position.copy(target);
+        }
+
+        this.curveDistance = nextDistance;
+        this.recordMovement(distance, delta);
+        this.motion.retreating = distance > 0;
+        return distance;
+
+    }
+
+    moveSideways(direction, delta, maximumDistance) {
+
+        const distance = Math.min(this.speed * delta, maximumDistance);
+        if (distance <= 0 || direction.lengthSq() <= 0.0001) return 0;
+
+        this.object3D.position.addScaledVector(direction, distance);
+        this.recordMovement(distance, delta);
+        this.motion.avoiding = true;
+        return distance;
+
+    }
+
+    rejoinActiveCurve(delta) {
+
+        const curve = this.activeCurve;
+        if (!curve) return true;
+
+        const length = curve.getLength();
+        if (length <= Number.EPSILON) return true;
+
+        const progress = THREE.MathUtils.clamp(
+            this.curveDistance / length,
+            0,
+            1
+        );
+        const target = curve.getPointAt(progress, this.curvePoint);
+        this.direction.subVectors(target, this.object3D.position).setY(0);
+        const distance = this.direction.length();
+
+        if (distance <= this.arrivalDistance) {
+            this.object3D.position.x = target.x;
+            this.object3D.position.z = target.z;
+            return true;
+        }
+
+        const step = Math.min(this.speed * delta, distance);
+        this.object3D.position.addScaledVector(
+            this.direction.normalize(),
+            step
+        );
+        this.recordMovement(step, delta);
+        this.motion.avoiding = true;
+        return step === distance;
 
     }
 
@@ -206,7 +299,7 @@ export class Locomotion {
                 maximumProgress,
                 index / samples
             );
-            const point = curve.getPointAt(progress);
+            const point = curve.getPointAt(progress, this.samplePoint);
             const distance = point.distanceToSquared(this.object3D.position);
 
             if (distance >= bestDistance) continue;
@@ -232,9 +325,9 @@ export class Locomotion {
 
             const first = lower + (upper - lower) / 3;
             const second = upper - (upper - lower) / 3;
-            const firstDistance = curve.getPointAt(first)
+            const firstDistance = curve.getPointAt(first, this.samplePoint)
                 .distanceToSquared(this.object3D.position);
-            const secondDistance = curve.getPointAt(second)
+            const secondDistance = curve.getPointAt(second, this.samplePoint)
                 .distanceToSquared(this.object3D.position);
 
             if (firstDistance <= secondDistance) upper = second;

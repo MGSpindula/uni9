@@ -10,6 +10,7 @@ export class NavigationRecoveryPolicy {
         this.navigation = navigation;
         this.graph = navigation.graph;
         this.connector = navigation.connector;
+        this.interactionTraffic = navigation.interactionTraffic;
         this.traffic = navigation.traffic;
         this.collisionFailsafe = navigation.collisionFailsafe;
 
@@ -19,65 +20,60 @@ export class NavigationRecoveryPolicy {
 
         const { actor } = context;
         const traversal = actor.navigation.getTraversalState();
-        const hasGraphOwnership = Boolean(
-            traversal.currentNodeId || traversal.currentConnection
-        );
         const hasIntent = Boolean(
-            context.pendingInteraction || context.pendingPosition
+            context.intent.interaction || context.intent.position
         );
 
-        // A predictive collision stop is expected lack of progress. It must
-        // not trigger generic recovery immediately. Autonomous actors still
-        // need an escape from intermittent stop/go oscillation, though: the
-        // timer decays slowly instead of resetting on every single free frame.
+        // Collision negotiation owns this lack of progress. Never cancel and
+        // rebuild the route here: doing so merely recreates the same physical
+        // encounter, loses reservations and can turn two nearby actors into a
+        // permanent replan loop. CollisionFailsafe chooses a stable winner;
+        // CollisionSolver creates space and rejoins the SAME route.
         if (this.collisionFailsafe.isWaiting(actor)) {
 
-            context.collisionWaitElapsed += delta;
+            context.wait.collisionElapsed += delta;
+            context.recovery.elapsed = 0;
+            context.recovery.position.copy(actor.object3D.position);
 
-            if (actor.navigationIntentPolicy !== "persistent" &&
-                !context.preparingInteraction &&
-                !context.preparingInteractionExit &&
-                !context.interactionExitCommitted &&
-                context.collisionWaitElapsed >= 4) {
+            const encounter = this.collisionFailsafe.getEncounter(actor);
 
-                context.collisionWaitElapsed = 0;
-                this.collisionFailsafe.cancel(actor);
+            // A collision physically occupying a node is a group deadlock,
+            // not an individual route failure. Reset all local competitors
+            // together so another actor cannot immediately inherit the same
+            // stale queue and recreate the collision.
+            if (encounter?.nodeId &&
+                context.wait.collisionElapsed >=
+                    context.wait.collisionTimeout) {
 
-                if (hasGraphOwnership) {
+                return this.navigation.evacuateStaleNode(encounter.nodeId);
 
-                    console.warn(
-                        `[NavigationRecovery] ${actor.name} abandons a route ` +
-                        `after prolonged collision avoidance.`
-                    );
-                    this.abandonReplaceableRoute(context);
+            }
 
-                } else {
+            const collisionMayExpire =
+                actor.navigationIntentPolicy !== "persistent" &&
+                !context.interaction.leaving &&
+                !context.interaction.exitCommitted;
 
-                    // Portal -> approach/action is intentionally off-graph.
-                    // Clearing that local route leaves no topological origin
-                    // from which an autonomous controller can plan again.
-                    console.warn(
-                        `[NavigationRecovery] ${actor.name} rebuilds an ` +
-                        `off-graph interaction route after prolonged ` +
-                        `collision avoidance.`
-                    );
-                    this.restartIntentFromNearestAccess(context);
+            if (collisionMayExpire &&
+                context.wait.collisionElapsed >=
+                    context.wait.collisionTimeout) {
 
-                }
+                console.warn(
+                    `[NavigationRecovery] ${actor.name} abandons a stale ` +
+                    `collision route after ` +
+                    `${context.wait.collisionElapsed.toFixed(1)}s.`
+                );
+                this.navigation.metrics.increment("routeRecoveries");
+                this.abandonReplaceableRoute(context);
                 return true;
 
             }
 
-            context.recoveryElapsed = 0;
-            context.recoveryPosition.copy(actor.object3D.position);
             return false;
 
         }
 
-        context.collisionWaitElapsed = Math.max(
-            0,
-            context.collisionWaitElapsed - delta * 0.25
-        );
+        context.wait.collisionElapsed = 0;
 
         // No movement is expected while DepartureQueue owns the actor. Running
         // recovery here would cancel a valid request and enqueue it again at
@@ -87,17 +83,17 @@ export class NavigationRecoveryPolicy {
             if (!actor.navigation.hasPath()) {
 
                 const interactionExitOwnsQueue =
-                    context.activeInteraction &&
-                    (context.preparingInteractionExit ||
-                        context.deferredCommand);
+                    context.interaction.active &&
+                    (context.interaction.leaving ||
+                        context.intent.deferredCommand);
 
                 if (interactionExitOwnsQueue) {
 
                     // Interaction exit intentionally reserves traffic before
                     // the stand-up/release animation creates a navigation
                     // path. This is a committed exit, not a stale queue row.
-                    context.recoveryElapsed = 0;
-                    context.recoveryPosition.copy(actor.object3D.position);
+                    context.recovery.elapsed = 0;
+                    context.recovery.position.copy(actor.object3D.position);
                     return false;
 
                 }
@@ -120,49 +116,49 @@ export class NavigationRecoveryPolicy {
             // actual stopped queue, never this useful look-ahead period.
             if (!actor.isState(EntityState.WAITING)) {
 
-                context.recoveryElapsed = 0;
-                context.recoveryPosition.copy(actor.object3D.position);
+                context.recovery.elapsed = 0;
+                context.recovery.position.copy(actor.object3D.position);
                 return false;
 
             }
 
-            context.recoveryElapsed = 0;
-            context.recoveryPosition.copy(actor.object3D.position);
+            context.recovery.elapsed = 0;
+            context.recovery.position.copy(actor.object3D.position);
             return false;
 
         }
 
         const mayRecover = hasIntent &&
-            !context.preparingInteraction &&
-            !context.preparingInteractionExit &&
-            !context.interactionExitCommitted;
+            !context.interaction.entering &&
+            !context.interaction.leaving &&
+            !context.interaction.exitCommitted;
 
         if (!mayRecover) {
 
-            context.recoveryElapsed = 0;
-            context.recoveryPosition.copy(actor.object3D.position);
+            context.recovery.elapsed = 0;
+            context.recovery.position.copy(actor.object3D.position);
             return false;
 
         }
 
-        const progress = context.recoveryPosition.distanceTo(
+        const progress = context.recovery.position.distanceTo(
             actor.object3D.position
         );
 
         if (progress >= 0.025) {
 
-            context.recoveryElapsed = 0;
-            context.recoveryPosition.copy(actor.object3D.position);
+            context.recovery.elapsed = 0;
+            context.recovery.position.copy(actor.object3D.position);
             return false;
 
         }
 
-        context.recoveryElapsed += delta;
+        context.recovery.elapsed += delta;
 
-        if (context.recoveryElapsed < context.recoveryTimeout) return false;
+        if (context.recovery.elapsed < context.recovery.timeout) return false;
 
-        context.recoveryElapsed = 0;
-        context.recoveryPosition.copy(actor.object3D.position);
+        context.recovery.elapsed = 0;
+        context.recovery.position.copy(actor.object3D.position);
         this.restartIntentFromNearestAccess(context);
         return true;
 
@@ -181,8 +177,12 @@ export class NavigationRecoveryPolicy {
             actor.navigationIntentPolicy === "persistent" &&
             wait.reason === WaitReason.LANE_FULL;
 
+        const requiredTimeouts = actor.navigationIntentPolicy === "persistent"
+            ? 2
+            : 1;
+
         if ((!replaceableWait && !persistentReplan) ||
-            wait.timeoutCount < 2) {
+            wait.timeoutCount < requiredTimeouts) {
 
             return false;
 
@@ -190,13 +190,13 @@ export class NavigationRecoveryPolicy {
 
         const context = this.navigation.requireContext(actor);
 
-        if (context.interactionExitCommitted) {
+        if (context.interaction.exitCommitted) {
 
             // The actor may already be between action, approach and graph.
             // Clearing its route here would strand it off-graph. Traffic keeps
             // the queue and the ordinary retry loop preserves the later goal.
-            context.collisionWaitElapsed = 0;
-            context.recoveryElapsed = 0;
+            context.wait.collisionElapsed = 0;
+            context.recovery.elapsed = 0;
             return true;
 
         }
@@ -206,15 +206,17 @@ export class NavigationRecoveryPolicy {
             `at "${wait.resourceId}" and releases its route.`
         );
 
+        actor.onTrafficRerouteRequested?.({ ...wait });
+
         this.traffic.cancel(actor);
-        this.connector.releaseReservations(actor);
+        this.interactionTraffic.releaseReservations(actor);
         this.navigation.trafficState.releaseReservations(actor);
         this.navigation.routeGeometry.clearActiveLaneCurve(actor);
         actor.navigation.clearRoute();
         actor.locomotion.resetCurve();
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.retryElapsed = 0;
+        context.traversal.laneCurve = false;
+        context.traversal.interactionCurve = false;
+        context.wait.retryElapsed = 0;
 
         if (actor.navigationIntentPolicy === "persistent") {
 
@@ -238,13 +240,13 @@ export class NavigationRecoveryPolicy {
 
         const { actor } = context;
 
-        if (context.interactionExitCommitted) {
+        if (context.interaction.exitCommitted) {
 
             // Losing this path would strand the actor between an interaction
             // and the graph. Preserve the committed exit; once clearance is
             // restored, the existing route or retry loop can continue it.
-            context.collisionWaitElapsed = 0;
-            context.recoveryElapsed = 0;
+            context.wait.collisionElapsed = 0;
+            context.recovery.elapsed = 0;
 
             if (actor.navigation.hasPath()) actor.resume();
             else actor.pause();
@@ -255,60 +257,60 @@ export class NavigationRecoveryPolicy {
 
         this.navigation.cancelClosedLoop(context, "navigation-recovery");
 
-        if (context.activeInteraction) {
+        if (context.interaction.active) {
 
             // The attempted next task may be replaceable, but the interaction
             // physically occupied right now is not. Cancel only the pending
             // departure and let the controller make another decision later.
             this.traffic.cancel(actor);
-            this.connector.releaseReservations(actor);
+        this.interactionTraffic.releaseReservations(actor);
             this.navigation.trafficState.releaseReservations(actor);
             this.navigation.routeGeometry.clearActiveLaneCurve(actor);
             this.collisionFailsafe.cancel(actor);
             actor.navigation.clearRoute();
             actor.locomotion.resetCurve();
 
-            context.pendingPosition = null;
-            context.pendingInteraction = null;
-            context.destinationId = null;
-            context.deferredCommand = null;
-            context.turningAround = false;
-            context.traversingLaneCurve = false;
-            context.traversingInteractionCurve = false;
-            context.retryElapsed = 0;
-            context.recoveryElapsed = 0;
-            context.collisionWaitElapsed = 0;
-            context.recoveryPosition.copy(actor.object3D.position);
+            context.intent.position = null;
+            context.intent.interaction = null;
+            context.intent.destinationId = null;
+            context.intent.deferredCommand = null;
+            context.turnaround.active = false;
+            context.traversal.laneCurve = false;
+            context.traversal.interactionCurve = false;
+            context.wait.retryElapsed = 0;
+            context.recovery.elapsed = 0;
+            context.wait.collisionElapsed = 0;
+            context.recovery.position.copy(actor.object3D.position);
             actor.setState(EntityState.IDLE);
             this.navigation.refresh();
             return true;
 
         }
 
-        const rejectedPoint = context.pendingInteraction?.point ?? null;
+        const rejectedPoint = context.intent.interaction?.point ?? null;
 
         actor.navigationAvoidInteractionPoint = rejectedPoint;
         actor.navigationAvoidInteractionPointId = rejectedPoint?.id ?? null;
 
         this.traffic.cancel(actor);
-        this.connector.releaseReservations(actor);
+        this.interactionTraffic.releaseReservations(actor);
         this.navigation.trafficState.releaseReservations(actor);
         this.navigation.routeGeometry.clearActiveLaneCurve(actor);
         this.collisionFailsafe.cancel(actor);
         actor.navigation.clearRoute();
         actor.locomotion.resetCurve();
 
-        context.pendingPosition = null;
-        context.pendingInteraction = null;
-        context.destinationId = null;
-        context.deferredCommand = null;
-        context.turningAround = false;
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.retryElapsed = 0;
-        context.recoveryElapsed = 0;
-        context.collisionWaitElapsed = 0;
-        context.recoveryPosition.copy(actor.object3D.position);
+        context.intent.position = null;
+        context.intent.interaction = null;
+        context.intent.destinationId = null;
+        context.intent.deferredCommand = null;
+        context.turnaround.active = false;
+        context.traversal.laneCurve = false;
+        context.traversal.interactionCurve = false;
+        context.wait.retryElapsed = 0;
+        context.recovery.elapsed = 0;
+        context.wait.collisionElapsed = 0;
+        context.recovery.position.copy(actor.object3D.position);
         actor.setState(EntityState.IDLE);
 
         return true;
@@ -320,29 +322,29 @@ export class NavigationRecoveryPolicy {
         const { actor } = context;
         const hasOwner = Boolean(
             actor.navigation.hasPath() ||
-            context.pendingPosition ||
-            context.pendingInteraction ||
-            context.deferredCommand ||
-            context.activeInteraction ||
-            context.closedLoop ||
+            context.intent.position ||
+            context.intent.interaction ||
+            context.intent.deferredCommand ||
+            context.interaction.active ||
+            context.intent.closedLoop ||
             this.traffic.isQueued(actor) ||
-            context.turningAround ||
-            context.preparingInteraction ||
-            context.preparingInteractionExit
+            context.turnaround.active ||
+            context.interaction.entering ||
+            context.interaction.leaving
         );
 
         if (!actor.isState(EntityState.WAITING) || hasOwner) {
 
-            context.orphanedElapsed = 0;
+            context.recovery.orphanedElapsed = 0;
             return false;
 
         }
 
-        context.orphanedElapsed += delta;
+        context.recovery.orphanedElapsed += delta;
 
-        if (context.orphanedElapsed < 0.5) return false;
+        if (context.recovery.orphanedElapsed < 0.5) return false;
 
-        context.orphanedElapsed = 0;
+        context.recovery.orphanedElapsed = 0;
         actor.setState(EntityState.IDLE);
         console.warn(
             `[NavigationRecovery] ${actor.name} had orphaned WAITING; ` +
@@ -362,25 +364,27 @@ export class NavigationRecoveryPolicy {
         // Remove obsolete geometry/claims, preserve the topological location
         // and leave pendingPosition/pendingInteraction available for retry.
         this.traffic.cancel(actor);
-        this.connector.releaseReservations(actor);
+        this.interactionTraffic.releaseReservations(actor);
         this.navigation.trafficState.releaseReservations(actor);
         this.navigation.routeGeometry.clearActiveLaneCurve(actor);
         actor.navigation.clearRoute();
         actor.setState(EntityState.WAITING);
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.retryElapsed = 0;
+        context.traversal.laneCurve = false;
+        context.traversal.interactionCurve = false;
+        context.wait.retryElapsed = 0;
         this.navigation.refresh();
 
     }
 
     restartIntentFromNearestAccess(context) {
 
+        this.navigation.metrics.increment("routeRecoveries");
+
         const { actor } = context;
-        const interactionIntent = context.pendingInteraction
-            ? { ...context.pendingInteraction }
+        const interactionIntent = context.intent.interaction
+            ? { ...context.intent.interaction }
             : null;
-        const positionIntent = context.pendingPosition?.clone() ?? null;
+        const positionIntent = context.intent.position?.clone() ?? null;
 
         if (interactionIntent && this.navigation.isActorAtInteractionPoint(
             actor,
@@ -407,20 +411,20 @@ export class NavigationRecoveryPolicy {
         // Abandon every old ownership claim and geometric sample. Only the
         // user/behavior target captured above survives this reset.
         this.navigation.trafficState.releaseAgent(actor);
-        this.connector.releaseAgent(actor);
+        this.interactionTraffic.releaseAgent(actor);
         this.traffic.cancel(actor);
         this.navigation.routeGeometry.clearActiveLaneCurve(actor);
         actor.navigation.cancel();
         actor.navigation.setCurrentNode(null);
 
-        context.pendingPosition = null;
-        context.destinationId = null;
-        context.pendingInteraction = null;
-        context.interactionPoint = null;
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.transitTangent = null;
-        context.arrivalFromNodeId = null
+        context.intent.position = null;
+        context.intent.destinationId = null;
+        context.intent.interaction = null;
+        context.traversal.interactionPoint = null;
+        context.traversal.laneCurve = false;
+        context.traversal.interactionCurve = false;
+        context.traversal.transitTangent = null;
+        context.traversal.arrivalFromNodeId = null
 
         const origin = [...this.graph.nodes.values()]
             .filter(node =>
@@ -482,10 +486,10 @@ export class NavigationRecoveryPolicy {
             // A failed recovery invalidates only the route. Keep the command
             // queued in the context so the ordinary WAITING retry and future
             // topology/occupancy changes can attempt it again.
-            context.pendingPosition = positionIntent;
-            context.pendingInteraction = interactionIntent;
-            context.destinationId = null;
-            context.retryElapsed = 0;
+            context.intent.position = positionIntent;
+            context.intent.interaction = interactionIntent;
+            context.intent.destinationId = null;
+            context.wait.retryElapsed = 0;
             actor.setState(EntityState.WAITING);
             console.log(
                 `[NavigationRecovery] ${actor.name} still intends to reach ` +
@@ -496,9 +500,9 @@ export class NavigationRecoveryPolicy {
         }
 
         // An autonomous controller may abandon the task and choose another.
-        context.pendingPosition = null;
-        context.pendingInteraction = null;
-        context.destinationId = null;
+        context.intent.position = null;
+        context.intent.interaction = null;
+        context.intent.destinationId = null;
         actor.cancel();
         console.log(
             `[NavigationRecovery] ${actor.name} could not recover; ` +
@@ -516,11 +520,11 @@ export class NavigationRecoveryPolicy {
             // pending instead of converting a navigation condition into a
             // silent input failure. Topology changes and the retry loop will
             // rebuild the route when it becomes possible again.
-            context.blockedElapsed = null;
-            context.retryElapsed = 0;
+            context.wait.blockedElapsed = null;
+            context.wait.retryElapsed = 0;
             context.actor.setState(EntityState.WAITING);
             this.navigation.trafficState.releaseReservations(context.actor);
-            this.connector.releaseReservations(context.actor);
+            this.interactionTraffic.releaseReservations(context.actor);
             console.log(
                 `[Navigation] ${context.actor.name} keeps its blocked intent ` +
                 `and will retry.`
@@ -529,13 +533,13 @@ export class NavigationRecoveryPolicy {
 
         }
 
-        context.pendingPosition = null;
-        context.destinationId = null;
-        context.pendingInteraction = null;
-        context.preparingInteraction = false;
-        context.recoveryPending = true;
+        context.intent.position = null;
+        context.intent.destinationId = null;
+        context.intent.interaction = null;
+        context.interaction.entering = false;
+        context.recovery.pending = true;
         this.navigation.trafficState.releaseReservations(context.actor);
-        this.connector.releaseReservations(context.actor);
+        this.interactionTraffic.releaseReservations(context.actor);
         console.log(
             `[Navigation] ${context.actor.name} abandoned a blocked intent.`
         );
@@ -544,6 +548,8 @@ export class NavigationRecoveryPolicy {
     }
 
     tryRecoverToNearestNode(context) {
+
+        this.navigation.metrics.increment("routeRecoveries");
 
         const { actor } = context;
         const traversal = actor.navigation.getTraversalState();
@@ -554,7 +560,7 @@ export class NavigationRecoveryPolicy {
 
             if (!current.blocked) {
 
-                context.recoveryPending = false;
+                context.recovery.pending = false;
                 actor.cancel();
                 this.navigation.helper?.highlightNode(current.id);
                 return true;
@@ -570,8 +576,8 @@ export class NavigationRecoveryPolicy {
 
             const destinationId = path.nodeIds.at(-1);
 
-            context.recoveryPending = false;
-            context.destinationId = destinationId;
+            context.recovery.pending = false;
+            context.intent.destinationId = destinationId;
             this.navigation.helper?.highlightNode(destinationId);
             actor.followWaypoints(
                 this.navigation.createTraversalWaypoints(context, path.nodeIds)
@@ -605,8 +611,8 @@ export class NavigationRecoveryPolicy {
 
         if (!endpoint) return false;
 
-        context.recoveryPending = false;
-        context.destinationId = endpoint.id;
+        context.recovery.pending = false;
+        context.intent.destinationId = endpoint.id;
         this.navigation.trafficState.reserveNode(endpoint.id, actor);
         this.navigation.helper?.highlightNode(endpoint.id);
         actor.followWaypoints(

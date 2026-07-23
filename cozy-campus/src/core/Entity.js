@@ -529,6 +529,19 @@ export class Entity {
     }
 
     // -----------------------------
+    // Rendering
+    // -----------------------------
+
+    requiresContinuousRender() {
+
+        // GameLoop may skip drawing a frame when the world is visually still.
+        // Override this method when an entity owns a continuous procedural
+        // animation that is not represented by a Tween or AnimationMixer.
+        return this.tweens.length > 0;
+
+    }
+
+    // -----------------------------
     // Lifecycle
     // -----------------------------
 

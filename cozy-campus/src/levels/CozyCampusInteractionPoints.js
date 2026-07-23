@@ -39,16 +39,45 @@ export class CozyCampusInteractionPoints
                     {
                         position:
                             new THREE.Vector3(
-                                -1.5,
-                                0,
-                                0
+                                -7, 
+                                0, 
+                                -7
                             ),
 
                         rotationY:
                             Math.PI * 1.45,
 
                         connectTo:
-                            "junction",
+                            "north-1",
+
+                        terminal:
+                            true,
+
+                        metadata: {
+                            pose: "lean",
+                            role: "action"
+                        }
+                    }
+                )
+            );
+
+        this.lookupPoint =
+            this.addInteractionPoint(
+                new InteractionPoint(
+                    "ambient:lookup",
+                    {
+                        position:
+                            new THREE.Vector3(
+                                8.5, 
+                                2, 
+                                -4
+                            ),
+
+                        rotationY:
+                            Math.PI * 1.45,
+
+                        connectTo:
+                            "upper-north-2",
 
                         terminal:
                             true,
@@ -68,9 +97,9 @@ export class CozyCampusInteractionPoints
                     {
                         position:
                             new THREE.Vector3(
-                                4.2,
+                                3.2,
                                 0,
-                                8.3
+                                9
                             ),
 
                         rotationY:

@@ -22,7 +22,8 @@ export class NavigationAgent {
         };
 
         this.route = {
-            departureContinuity: null
+            departureContinuity: null,
+            previewSignature: null
         };
 
         this.traversal = {
@@ -48,7 +49,8 @@ export class NavigationAgent {
             retryElapsed: 0,
             blockedElapsed: null,
             blockedTimeout: 3,
-            collisionElapsed: 0
+            collisionElapsed: 0,
+            collisionTimeout: 4
         };
 
         this.recovery = {
@@ -100,55 +102,5 @@ export class NavigationAgent {
         return this.phase;
 
     }
-
-}
-
-// Compatibilidade de migração. Cada nome antigo aponta para um campo canônico
-// do NavigationAgent, portanto não cria uma segunda cópia do estado.
-const aliases = {
-    pendingPosition: ["intent", "position"],
-    destinationId: ["intent", "destinationId"],
-    pendingInteraction: ["intent", "interaction"],
-    deferredCommand: ["intent", "deferredCommand"],
-    closedLoop: ["intent", "closedLoop"],
-    departureContinuity: ["route", "departureContinuity"],
-    interactionPoint: ["traversal", "interactionPoint"],
-    interactionExitPoint: ["traversal", "interactionExitPoint"],
-    traversingLaneCurve: ["traversal", "laneCurve"],
-    traversingInteractionCurve: ["traversal", "interactionCurve"],
-    transitTangent: ["traversal", "transitTangent"],
-    arrivalFromNodeId: ["traversal", "arrivalFromNodeId"],
-    currentTraversal: ["traversal", "kind"],
-    activeInteraction: ["interaction", "active"],
-    preparingInteraction: ["interaction", "entering"],
-    preparingInteractionExit: ["interaction", "leaving"],
-    interactionExitCommitted: ["interaction", "exitCommitted"],
-    interactionExitElapsed: ["interaction", "exitElapsed"],
-    retryElapsed: ["wait", "retryElapsed"],
-    blockedElapsed: ["wait", "blockedElapsed"],
-    blockedTimeout: ["wait", "blockedTimeout"],
-    collisionWaitElapsed: ["wait", "collisionElapsed"],
-    recoveryPending: ["recovery", "pending"],
-    recoveryElapsed: ["recovery", "elapsed"],
-    recoveryTimeout: ["recovery", "timeout"],
-    recoveryPosition: ["recovery", "position"],
-    orphanedElapsed: ["recovery", "orphanedElapsed"],
-    turningAround: ["turnaround", "active"],
-    turnaroundElapsed: ["turnaround", "elapsed"],
-    turnaroundDuration: ["turnaround", "duration"]
-};
-
-for (const [name, [domain, field]] of Object.entries(aliases)) {
-
-    Object.defineProperty(NavigationAgent.prototype, name, {
-        configurable: false,
-        enumerable: false,
-        get() {
-            return this[domain][field];
-        },
-        set(value) {
-            this[domain][field] = value;
-        }
-    });
 
 }

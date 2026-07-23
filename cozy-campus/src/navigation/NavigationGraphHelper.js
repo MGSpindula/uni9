@@ -13,7 +13,8 @@ export class NavigationGraphHelper extends THREE.Group {
         reservedColor = 0x33ccff,
         selectionRadiusColor = 0xffee66,
         nodeSize = 0.12,
-        height = 0.08
+        height = 0.08,
+        visible = true
     } = {}) {
 
         super();
@@ -36,10 +37,11 @@ export class NavigationGraphHelper extends THREE.Group {
         this.highlightedNodeId = null;
         this.interactionMarkers = new Map();
         this.highlightedInteractionPointId = null;
-        this.isVisible = true;
+        this.isVisible = visible;
+        this.visible = visible;
         this.activeLaneCurveRevision = -1;
 
-        this.refresh();
+        if (visible) this.refresh();
 
     }
 
@@ -408,6 +410,8 @@ export class NavigationGraphHelper extends THREE.Group {
         this.removeChildren(child =>
             child.name.endsWith(":NavigationSegments") ||
             child.name.endsWith(":NavigationSegmentsDirection") ||
+            child.name.endsWith(":NavigationPlan") ||
+            child.name.endsWith(":NavigationPlanDirection") ||
             // Remove debug objects left by projects/hot reloads created
             // before RouteGeometry replaced the global RouteSpline.
             child.name.endsWith(":NavigationSpline") ||
@@ -449,6 +453,37 @@ export class NavigationGraphHelper extends THREE.Group {
     }
 
     addActiveLaneCurves() {
+
+        for (const [actor, points] of
+            this.routeGeometry?.plannedLaneCurves ?? []) {
+
+            if (points.length < 2) continue;
+
+            const curveColor = this.getActorCurveColor(actor);
+            const curvePoints = points.map(point => {
+                const elevated = point.clone();
+                elevated.y += this.height + 0.015;
+                return elevated;
+            });
+            const plan = new THREE.Line(
+                new THREE.BufferGeometry().setFromPoints(curvePoints),
+                new THREE.LineDashedMaterial({
+                    color: curveColor,
+                    dashSize: 0.28,
+                    gapSize: 0.18,
+                    transparent: true,
+                    opacity: 0.55,
+                    depthTest: false
+                })
+            );
+
+            plan.name = `${actor.name}:NavigationPlan`;
+            plan.renderOrder = 1000;
+            plan.raycast = () => {};
+            plan.computeLineDistances();
+            this.add(plan);
+
+        }
 
         for (const [actor, points] of
             this.routeGeometry?.activeLaneCurves ?? []) {
@@ -755,7 +790,8 @@ export class NavigationGraphHelper extends THREE.Group {
         const state = this.getNodeTrafficState(node.id);
 
         if (node.blocked) return this.blockedColor;
-        if (state.occupants.size > 0 &&
+        if ((state.occupants.size > 0 ||
+            state.collisionBlocks.size > 0) &&
             !this.isNodePassable(node.id)) return this.occupiedColor;
         if (highlighted) return 0x33ff66;
         if (state.reservations.size > 0 ||
@@ -787,6 +823,7 @@ export class NavigationGraphHelper extends THREE.Group {
             state.occupants.size,
             state.reservations.size,
             state.transitReservations.size,
+            state.collisionBlocks.size,
             this.isNodePassable(node.id),
             node.id === this.highlightedNodeId
         ].join(":");
@@ -799,7 +836,8 @@ export class NavigationGraphHelper extends THREE.Group {
             occupants: new Set(),
             reservations: new Set(),
             transitReservations: new Set(),
-            restingAgents: new Set()
+            collisionBlocks: new Set(),
+            crossingAgents: new Set()
         };
 
     }
@@ -874,7 +912,8 @@ export class NavigationGraphHelper extends THREE.Group {
         const state = this.getNodeTrafficState(node.id);
         const labelColor = node.blocked
                 ? "#ff6675"
-                : state.occupants.size > 0
+                : state.occupants.size > 0 ||
+                    state.collisionBlocks.size > 0
                     ? !this.isNodePassable(node.id)
                         ? "#ffb366"
                         : highlighted
@@ -895,9 +934,11 @@ export class NavigationGraphHelper extends THREE.Group {
         context.textBaseline = "middle";
         const status = node.blocked
             ? "blocked"
-            : state.occupants.size > 0
+            : state.collisionBlocks.size > 0
+                ? "collision occupied"
+                : state.occupants.size > 0
                 ? this.isNodePassable(node.id)
-                    ? "resting, passable"
+                    ? "crossing, passable"
                     : "occupied, impassable"
                 : state.reservations.size > 0 ||
                     state.transitReservations.size > 0

@@ -6,7 +6,7 @@ export class InteractionPoint {
         position = new THREE.Vector3(),
         rotationY = 0,
         accessible = true,
-        maxConnectionDistance = 2,
+        maxConnectionDistance = 3,
         connectTo = null,
         via = null,
         capacity = 1,
@@ -27,14 +27,22 @@ export class InteractionPoint {
         this.maxConnectionDistance =
             maxConnectionDistance;
 
+        // Access authoring:
+        // - null: project automatically on the nearest graph segment;
+        // - "node-id": simple direct curve to/from that node, with no anchor;
+        // - ["a", "b"]: force a segment projection with lane portals.
+        // Explicit access is allowed at any distance; maxConnectionDistance is
+        // only a safety radius for automatic projection.
         this.connectTo = connectTo;
         this.via = via;
 
         this.capacity = capacity;
         this.terminal = terminal;
 
-        this.occupants = new Set();
-        this.reservations = new Set();
+        // Runtime ownership belongs to InteractionTrafficState. These getters
+        // below expose a read/write view for debug and authored callbacks while
+        // keeping operational data out of the point definition itself.
+        this.trafficState = null;
 
         this.metadata = {
             ...metadata
@@ -83,22 +91,18 @@ export class InteractionPoint {
 
     isAvailable(actor = null) {
 
-        const users = new Set([
-            ...this.occupants,
-            ...this.reservations
-        ]);
+        return this.trafficState
+            ? this.trafficState.isPointAvailable(this, actor)
+            : this.accessible;
 
-        if (actor) {
+    }
 
-            users.delete(actor);
+    get occupants() {
+        return this.trafficState?.getPointState(this).occupants ?? new Set();
+    }
 
-        }
-
-        return (
-            this.accessible &&
-            users.size < this.capacity
-        );
-
+    get reservations() {
+        return this.trafficState?.getPointState(this).reservations ?? new Set();
     }
 
     getWorldPosition(

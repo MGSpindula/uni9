@@ -37,7 +37,9 @@ export class CozyCampusLevel extends Level {
         this.grounding.validateGraph(services.navigationGraph);
         this.player = this.world.add(new Player());
         this.world.registerCharacter(this.player, { spawnId: "spawn", grounding: this.grounding });
-        this.world.add(new Cube()); this.world.add(new Sphere()); this.world.add(new Cylinder());
+        this.world.add(new Cube()); 
+        this.world.add(new Sphere()); 
+        this.world.add(new Cylinder());
         this.chair = this.world.add(new Chair());
         this.ambientInteractionPoints = this.world.add(new CozyCampusInteractionPoints());
         this.world.registerTarget(this.chair);
@@ -45,8 +47,11 @@ export class CozyCampusLevel extends Level {
 
         const configurations = [
             ["Orange NPC", 0xff8a2a, "east-exit", 0.75],
-            ["Green NPC", 0x58b86b, "west-2", 0.60],
-            ["Purple NPC", 0x9b6bd3, "north-1", 0.45]
+            ["Green NPC", 0x58b86b, "west-3", 0.60],
+            ["Purple NPC", 0x9b6bd3, "north-1", 0.45],
+            ["Yellow NPC", 0xfafa28, "slope-north-bottom", 0.45],
+            ["Pink NPC", 0xfc58f0, "west-exit", 0.45],
+            ["Cyan NPC", 0x00ffff, "junction", 0.45]
         ];
         this.npcs = configurations.map(([name, color, spawnId, chance]) => {
             const npc = this.world.add(new NPC(name, { color }));
@@ -68,7 +73,9 @@ export class CozyCampusLevel extends Level {
         this.sun = new THREE.DirectionalLight(0xffffff, 2);
         this.sun.castShadow = true; this.sun.position.set(10, 20, 10);
         Object.assign(this.sun.shadow.camera, { left: -13, right: 13, top: 13, bottom: -13, near: 0.5, far: 50 });
-        this.sun.shadow.camera.updateProjectionMatrix(); this.sun.shadow.mapSize.set(1024, 1024); this.sun.shadow.bias = -0.0001;
+        this.sun.shadow.camera.updateProjectionMatrix(); 
+        this.sun.shadow.mapSize.set(1024, 1024); 
+        this.sun.shadow.bias = -0.0001;
         scene.add(this.ambient, this.sun);
     }
     unload(game) {

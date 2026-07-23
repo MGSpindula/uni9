@@ -8,6 +8,7 @@
     "build": "vite build",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "benchmark:collision": "node tests/performance/collision-failsafe.benchmark.mjs",
+    "benchmark:navigation": "node tests/performance/navigation-frame.benchmark.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {

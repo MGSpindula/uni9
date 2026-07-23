@@ -5,15 +5,15 @@ import { SpatialHash } from "./SpatialHash.js";
 //
 // It deliberately does NOT create sidesteps, temporary waypoints or routes.
 // NavigationGraph chooses the route, NavigationTrafficSystem owns queues and
-// lane reservations, and PhysicsWorld separates the occasional residual
-// contact. Keeping local avoidance out of this class prevents two actors from
+// lane reservations, and CollisionSolver negotiates the occasional residual
+// contact without pushing. Keeping local avoidance out of this class prevents
 // repeatedly choosing opposite sides and oscillating around a node.
 export class CharacterCollisionFailsafe {
 
     constructor(owner, {
-        detectionRadius = 1.8,
-        predictionTime = 0.3,
-        safetyPadding = 0.05
+        detectionRadius = 1.5,
+        predictionTime = 0.33,
+        safetyPadding = 0.06
     } = {}) {
 
         this.owner = owner;
@@ -22,6 +22,10 @@ export class CharacterCollisionFailsafe {
         this.safetyPadding = safetyPadding;
         this.waitingFor = new Map();
         this.waitDetails = new Map();
+        // One stable right-of-way agreement per nearby pair. Keeping the
+        // winner/yielder fixed until separation prevents reciprocal waiting
+        // and the left/right oscillation caused by deciding every frame.
+        this.encounters = [];
         this.velocity = new THREE.Vector3();
         this.otherVelocity = new THREE.Vector3();
         this.relativePosition = new THREE.Vector3();
@@ -34,7 +38,8 @@ export class CharacterCollisionFailsafe {
         this.metrics = {
             actors: 0,
             queries: 0,
-            candidateChecks: 0
+            candidateChecks: 0,
+            residualCorrections: 0
         };
 
     }
@@ -52,13 +57,49 @@ export class CharacterCollisionFailsafe {
         activeActors.forEach((actor, index) => {
             this.actorOrder.set(actor, index);
         });
+        const activeSet = new Set(activeActors);
+
+        for (const encounter of [...this.encounters]) {
+
+            const required =
+                (encounter.winner.collisionRadius ?? 0.36) +
+                (encounter.yielder.collisionRadius ?? 0.36) +
+                this.safetyPadding + 0.65;
+            const separated = this.getPlanarDistance(
+                encounter.winner,
+                encounter.yielder
+            ) >= required;
+
+            if (!activeSet.has(encounter.winner) ||
+                !activeSet.has(encounter.yielder) ||
+                (separated &&
+                    !this.owner.collisionSolver?.isPairActive(encounter))) {
+                this.releaseEncounter(encounter);
+            }
+
+        }
         this.metrics.actors = activeActors.length;
         this.metrics.queries = 0;
         this.metrics.candidateChecks = 0;
+        this.metrics.residualCorrections = 0;
 
     }
 
     canMove(actor, target) {
+
+        const maneuver = this.owner.collisionSolver?.getManeuver(actor);
+
+        if (maneuver) {
+
+            this.waitingFor.set(actor, maneuver.blocker);
+            this.waitDetails.set(actor, {
+                blocker: maneuver.blocker,
+                kind: `negotiation:${maneuver.phase}`,
+                clearance: this.getPlanarDistance(actor, maneuver.blocker)
+            });
+            return false;
+
+        }
 
         // Traffic is authoritative near a connection endpoint. A local
         // collision maneuver must never bypass an arrival/departure queue.
@@ -88,6 +129,32 @@ export class CharacterCollisionFailsafe {
         }
 
         this.getIntendedVelocity(actor, target, this.velocity);
+
+        // Priority decides who will eventually pass, but the winner must wait
+        // until the yielding actor has physically opened the corridor. It may
+        // always move away from the encounter; it may never advance through
+        // the other body.
+        const yieldingManeuver = this.owner.collisionSolver
+            ?.getYieldingManeuverFor(actor);
+
+        if (yieldingManeuver && !this.isMovingAway(
+            actor,
+            yieldingManeuver.actor
+        )) {
+
+            this.waitingFor.set(actor, yieldingManeuver.actor);
+            this.waitDetails.set(actor, {
+                blocker: yieldingManeuver.actor,
+                kind: "clearance",
+                clearance: this.getPlanarDistance(
+                    actor,
+                    yieldingManeuver.actor
+                )
+            });
+            return false;
+
+        }
+
         let blocker = null;
         let closestClearance = Infinity;
         let collisionKind = "predicted";
@@ -112,11 +179,6 @@ export class CharacterCollisionFailsafe {
 
             if (currentDistance > this.detectionRadius) continue;
 
-            // Two actors already committed to different lanes have a valid
-            // topological solution. Let them continue instead of adding a
-            // second, lane-unaware avoidance rule.
-            if (this.useDifferentLanes(actor, other)) continue;
-
             const requiredClearance =
                 (actor.collisionRadius ?? 0.36) +
                 (other.collisionRadius ?? 0.36) +
@@ -124,15 +186,24 @@ export class CharacterCollisionFailsafe {
             const otherTarget = other.navigation
                 .getCurrentWaypoint()?.position;
 
-            this.getIntendedVelocity(other, otherTarget, this.otherVelocity);
+            this.getIntendedVelocity(
+                other,
+                otherTarget,
+                this.otherVelocity,
+                { respectAuthorization: true }
+            );
 
-            // Once bodies overlap, PhysicsWorld owns separation. Permit an
-            // actor that is moving away, or the deterministic priority actor,
-            // so the predictive brake cannot freeze both participants.
+            // PhysicsWorld is detection-only for characters. Right-of-way
+            // chooses who must backstep; it is never permission to walk
+            // through the yielding body. During real contact, either actor
+            // may move only when its intended movement increases clearance.
             if (currentDistance < requiredClearance) {
 
-                if (this.isMovingAway(actor, other) ||
-                    !this.shouldYield(actor, other)) continue;
+                if (this.isMovingAway(actor, other)) continue;
+
+                const encounter = this.getOrCreateEncounter(actor, other);
+                this.markEncounterCollision(encounter, actor, other);
+                this.owner.collisionSolver?.requestClearance(encounter);
 
                 blocker = other;
                 closestClearance = currentDistance;
@@ -146,8 +217,11 @@ export class CharacterCollisionFailsafe {
                 other
             );
 
-            if (predictedClearance >= requiredClearance ||
-                !this.shouldYield(actor, other)) continue;
+            if (predictedClearance >= requiredClearance) continue;
+
+            const encounter = this.getOrCreateEncounter(actor, other);
+            this.owner.collisionSolver?.requestClearance(encounter);
+            if (encounter.winner === actor) continue;
 
             if (predictedClearance < closestClearance) {
 
@@ -231,7 +305,7 @@ export class CharacterCollisionFailsafe {
         const state = this.owner.trafficState.getNodeState(connection.toId);
 
         return [...state.occupants].find(candidate =>
-            candidate !== actor && !state.restingAgents.has(candidate)
+            candidate !== actor && !state.crossingAgents.has(candidate)
         ) ?? null;
 
     }
@@ -261,11 +335,39 @@ export class CharacterCollisionFailsafe {
 
     }
 
-    getIntendedVelocity(actor, target, result) {
+    getIntendedVelocity(
+        actor,
+        target,
+        result,
+        { respectAuthorization = false } = {}
+    ) {
 
         result.set(0, 0, 0);
 
         if (!target || actor.navigation.isPaused()) return result;
+        if (respectAuthorization && actor.movementFrame &&
+            !actor.movementFrame.trafficAuthorized) return result;
+
+        const curve = actor.locomotion.activeCurve;
+
+        if (curve) {
+            const length = curve.getLength();
+
+            if (length > Number.EPSILON) {
+                const progress = THREE.MathUtils.clamp(
+                    actor.locomotion.curveDistance / length,
+                    0,
+                    1
+                );
+
+                curve.getTangentAt(progress, result).setY(0);
+                if (result.lengthSq() > 0.0001) {
+                    return result.normalize().multiplyScalar(
+                        actor.locomotion.speed
+                    );
+                }
+            }
+        }
 
         result.subVectors(target, actor.object3D.position).setY(0);
 
@@ -314,36 +416,6 @@ export class CharacterCollisionFailsafe {
 
     }
 
-    useDifferentLanes(actor, other) {
-
-        const first = actor.navigation.getTraversalState().currentConnection;
-        const second = other.navigation.getTraversalState().currentConnection;
-
-        if (!first || !second) return false;
-
-        const sameConnection =
-            (first.fromId === second.fromId && first.toId === second.toId) ||
-            (first.fromId === second.toId && first.toId === second.fromId);
-
-        if (!sameConnection) return false;
-
-        const firstLane = this.owner.trafficState.getConnectionLaneIndex(
-            first.fromId,
-            first.toId,
-            actor
-        );
-        const secondLane = this.owner.trafficState.getConnectionLaneIndex(
-            second.fromId,
-            second.toId,
-            other
-        );
-
-        return firstLane !== null &&
-            secondLane !== null &&
-            firstLane !== secondLane;
-
-    }
-
     shouldYield(actor, other) {
 
         const actorPriority = this.getCommitmentPriority(actor);
@@ -362,15 +434,182 @@ export class CharacterCollisionFailsafe {
 
     }
 
+    getOrCreateEncounter(first, second) {
+
+        const existing = this.encounters.find(encounter =>
+            (encounter.winner === first && encounter.yielder === second) ||
+            (encounter.winner === second && encounter.yielder === first)
+        );
+
+        if (existing) return existing;
+
+        const followingOrder = this.getFollowingOrder(first, second);
+        const firstYields = followingOrder
+            ? followingOrder.follower === first
+            : this.shouldYield(first, second);
+        const encounter = {
+            winner: firstYields ? second : first,
+            yielder: firstYields ? first : second,
+            nodeId: null,
+            kind: followingOrder ? "same-lane-following" : "crossing"
+        };
+
+        this.encounters.push(encounter);
+        encounter.winner.onCollisionPassStarted?.({
+            yieldingActor: encounter.yielder
+        });
+        encounter.yielder.onCollisionYieldStarted?.({
+            blocker: encounter.winner,
+            strategy: followingOrder ? "follow-wait" : "right-of-way"
+        });
+
+        return encounter;
+
+    }
+
+    getFollowingOrder(first, second) {
+
+        const firstTraversal = first.navigation.getTraversalState();
+        const secondTraversal = second.navigation.getTraversalState();
+        const firstConnection = firstTraversal.currentConnection;
+        const secondConnection = secondTraversal.currentConnection;
+
+        if (!firstConnection || !secondConnection ||
+            firstConnection.fromId !== secondConnection.fromId ||
+            firstConnection.toId !== secondConnection.toId) return null;
+
+        const firstLane = this.owner.trafficState.getConnectionLaneIndex(
+            firstConnection.fromId,
+            firstConnection.toId,
+            first
+        );
+        const secondLane = this.owner.trafficState.getConnectionLaneIndex(
+            secondConnection.fromId,
+            secondConnection.toId,
+            second
+        );
+
+        if (firstLane === null || firstLane !== secondLane) return null;
+
+        this.getIntendedVelocity(
+            first,
+            first.navigation.getCurrentWaypoint()?.position,
+            this.velocity
+        );
+
+        if (this.velocity.lengthSq() <= 0.0001) {
+            this.velocity.subVectors(
+                this.owner.graph.requireNode(firstConnection.toId).position,
+                this.owner.graph.requireNode(firstConnection.fromId).position
+            ).setY(0);
+        }
+
+        if (this.velocity.lengthSq() <= 0.0001) return null;
+
+        this.relativePosition.subVectors(
+            second.object3D.position,
+            first.object3D.position
+        ).setY(0);
+        const longitudinal = this.relativePosition.dot(
+            this.velocity.normalize()
+        );
+
+        if (Math.abs(longitudinal) <= 0.01) return null;
+
+        return longitudinal > 0
+            ? { leader: second, follower: first }
+            : { leader: first, follower: second };
+
+    }
+
+    markEncounterCollision(encounter, first, second) {
+
+        if (encounter.nodeId) return encounter.nodeId;
+
+        encounter.nodeId = this.findCollisionNode(first, second);
+        if (!encounter.nodeId) return null;
+
+        this.owner.trafficState.addCollisionBlock(
+            encounter.nodeId,
+            encounter
+        );
+        this.owner.refresh();
+        return encounter.nodeId;
+
+    }
+
+    releaseEncounter(encounter) {
+
+        const index = this.encounters.indexOf(encounter);
+        if (index < 0) return;
+
+        this.encounters.splice(index, 1);
+        if (encounter.nodeId) {
+            this.owner.trafficState.releaseCollisionBlock(
+                encounter.nodeId,
+                encounter
+            );
+            this.owner.refresh();
+        }
+        encounter.winner.onCollisionPassEnded?.({
+            yieldingActor: encounter.yielder
+        });
+        encounter.yielder.onCollisionYieldEnded?.({
+            blocker: encounter.winner
+        });
+
+    }
+
+    findCollisionNode(first, second) {
+
+        const midpoint = this.relativePosition.copy(first.object3D.position)
+            .add(second.object3D.position)
+            .multiplyScalar(0.5);
+        const candidateIds = new Set();
+
+        for (const actor of [first, second]) {
+            const traversal = actor.navigation.getTraversalState();
+            if (traversal.currentNodeId) {
+                candidateIds.add(traversal.currentNodeId);
+            }
+            if (traversal.currentConnection) {
+                candidateIds.add(traversal.currentConnection.fromId);
+                candidateIds.add(traversal.currentConnection.toId);
+            }
+        }
+
+        let closest = null;
+        let closestDistance = Infinity;
+
+        for (const nodeId of candidateIds) {
+            const node = this.owner.graph.getNode(nodeId);
+            if (!node) continue;
+            const distance = Math.hypot(
+                midpoint.x - node.position.x,
+                midpoint.z - node.position.z
+            );
+            const radius = (node.metadata.laneRadius ?? 1.75) + 0.65;
+            if (distance > radius || distance >= closestDistance) continue;
+            closest = nodeId;
+            closestDistance = distance;
+        }
+
+        return closest;
+
+    }
+
     getCommitmentPriority(actor) {
 
         const context = this.owner.agents.get(actor);
+        if (actor.navigationPassagePolicy === "absolute") {
+            return Number.MAX_SAFE_INTEGER;
+        }
         const base = actor.navigationPriority ?? 0;
 
         if (!context) return base;
-        if (context.activeInteraction) return base + 3;
+        if (context.interaction.active) return base + 3;
 
-        const interaction = context.pendingInteraction?.point;
+        const interaction = context.intent.interaction?.point;
         const approach = interaction?.via;
         const reserved = Boolean(
             interaction?.reservations.has(actor) ||
@@ -380,7 +619,7 @@ export class CharacterCollisionFailsafe {
         );
 
         if (reserved) return base + 2;
-        if (context.interactionPoint) return base + 1;
+        if (context.traversal.interactionPoint) return base + 1;
 
         return base;
 
@@ -413,7 +652,19 @@ export class CharacterCollisionFailsafe {
 
     }
 
+    getEncounter(actor) {
+
+        return this.encounters.find(encounter =>
+            encounter.winner === actor || encounter.yielder === actor
+        ) ?? null;
+
+    }
+
     cancel(actor) {
+
+        // Discard any frame-local collision snapshot together with the
+        // agreement so cancelled routes cannot retain stale collision state.
+        this.owner.collisionSolver?.cancel(actor);
 
         this.waitingFor.delete(actor);
         this.waitDetails.delete(actor);
@@ -425,6 +676,12 @@ export class CharacterCollisionFailsafe {
                 this.waitDetails.delete(candidate);
             }
 
+        }
+
+        for (const encounter of [...this.encounters]) {
+            if (encounter.winner === actor || encounter.yielder === actor) {
+                this.releaseEncounter(encounter);
+            }
         }
 
     }

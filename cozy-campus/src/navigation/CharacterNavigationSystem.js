@@ -1,9 +1,8 @@
 import { EntityState } from "../core/EntityState";
-import { AnimationPresets } from "../core/AnimationPresets";
-import { Tween } from "../core/Tween";
 import { NavigationTrafficSystem } from "./NavigationTrafficSystem";
 import { InteractionNavigation } from "./InteractionNavigation";
 import { CharacterCollisionFailsafe } from "./CharacterCollisionFailsafe";
+import { CharacterCollisionSolver } from "./CharacterCollisionSolver";
 import { PhysicsWorld } from "../physics/PhysicsWorld";
 import { WaitReason } from "./WaitReason";
 import { NavigationAgent } from "./NavigationAgent";
@@ -14,11 +13,12 @@ import { NavigationRecoveryPolicy } from "./NavigationRecoveryPolicy";
 import { NavigationTrafficState } from "./NavigationTrafficState";
 import { Pathfinder } from "./Pathfinder";
 import { RouteGeometryService } from "./RouteGeometryService";
+import { NavigationMetrics } from "./NavigationMetrics";
+import { InteractionTrafficState } from "./InteractionTrafficState";
+import { TurnaroundCoordinator } from "./TurnaroundCoordinator";
+import { ClosedLoopCoordinator } from "./ClosedLoopCoordinator";
+import { WaypointTraversalCoordinator } from "./WaypointTraversalCoordinator";
 import * as THREE from "three";
-
-// Short triangular circuits look like an NPC pacing nervously around one
-// corner. Increase this value if a level needs even broader ambient walks.
-const MIN_CLOSED_LOOP_NODES = 4;
 
 export class CharacterNavigationSystem {
 
@@ -34,17 +34,25 @@ export class CharacterNavigationSystem {
         this.helper = helper;
         this.onChanged = onChanged;
         this.agents = new Map();
-        // Alias temporário para consumidores antigos. Os valores agora são
-        // NavigationAgent; não existe mais um segundo "context object".
-        this.contexts = this.agents;
+        this.priorityPassageRequests = new WeakMap();
+        this.staleNodeEvacuations = new Map();
+        this.navigationTime = 0;
+        this.metrics = new NavigationMetrics();
         this.trafficState = new NavigationTrafficState(graph);
-        this.pathfinder = new Pathfinder(graph, this.trafficState);
+        this.interactionTraffic = new InteractionTrafficState(connector, this);
+        this.connector.traffic = this.interactionTraffic;
+        this.pathfinder = new Pathfinder(
+            graph,
+            this.trafficState,
+            this.metrics
+        );
         this.routeGeometry = new RouteGeometryService(graph);
         this.connector.pathfinder = this.pathfinder;
         this.connector.routeGeometry = this.routeGeometry;
         this.traffic = new NavigationTrafficSystem(this);
         this.interactions = new InteractionNavigation(this);
         this.collisionFailsafe = new CharacterCollisionFailsafe(this);
+        this.collisionSolver = new CharacterCollisionSolver(this);
         this.physics = new PhysicsWorld(this);
         this.grounding = null;
         this.routePlanner = new RoutePlanner(this);
@@ -52,6 +60,9 @@ export class CharacterNavigationSystem {
         this.interactionTraversal =
             new InteractionTraversalCoordinator(this);
         this.recoveryPolicy = new NavigationRecoveryPolicy(this);
+        this.turnaround = new TurnaroundCoordinator(this);
+        this.closedLoops = new ClosedLoopCoordinator(this);
+        this.waypointTraversal = new WaypointTraversalCoordinator(this);
 
     }
 
@@ -65,7 +76,7 @@ export class CharacterNavigationSystem {
         // calls moveToClosestNode() or InteractionSystem.request().
         const context = new NavigationAgent(actor);
 
-        this.contexts.set(actor, context);
+        this.agents.set(actor, context);
 
         actor.setWaypointReachedHandler((waypoint, completedConnection) =>
             this.handleWaypointReached(context, waypoint, completedConnection)
@@ -80,7 +91,7 @@ export class CharacterNavigationSystem {
 
             const context = this.requireContext(actor);
 
-            const reserved = this.connector.reservePoint(point, actor);
+            const reserved = this.interactionTraffic.reservePoint(point, actor);
 
             // Rejoin the graph axis while already moving toward the local
             // interaction path; returning to node center is not a separate step.
@@ -107,9 +118,11 @@ export class CharacterNavigationSystem {
 
             this.cancelClosedLoop(context, "navigation-cancelled");
             this.trafficState.releaseReservations(actor);
-            this.connector.releaseReservations(actor);
+                this.interactionTraffic.releaseReservations(actor);
             this.traffic.cancel(actor);
             this.collisionFailsafe.cancel(actor);
+            this.routeGeometry.clearPlannedLaneCurve(actor);
+            context.route.previewSignature = null;
             this.refresh();
 
         });
@@ -130,18 +143,20 @@ export class CharacterNavigationSystem {
 
     unregisterActor(actor) {
 
-        const context = this.contexts.get(actor);
+        const context = this.agents.get(actor);
         if (!context) return;
 
         this.trafficState.releaseAgent(actor);
         this.finishActiveInteraction(context);
-        this.connector.releaseAgent(actor);
+        this.interactionTraffic.releaseAgent(actor);
         this.traffic.unregister(actor);
         this.collisionFailsafe.unregister(actor);
+        this.collisionSolver.unregister(actor);
         this.physics.unregisterActor(actor);
+        this.routeGeometry.clearPlannedLaneCurve(actor);
         actor.setMovementGuard(null);
         actor.setWaypointArrivalGuard(null);
-        this.contexts.delete(actor);
+        this.agents.delete(actor);
         this.refresh();
 
     }
@@ -173,127 +188,9 @@ export class CharacterNavigationSystem {
     // Commands
     // -----------------------------
 
-    startClosedLoop(actor, nodeIds, {
-        laps = 1,
-        id = "closed-loop",
-        onLap = null,
-        onComplete = null,
-        onCancelled = null
-    } = {}) {
+    startClosedLoop(actor, nodeIds, options = {}) {
 
-        const context = this.requireContext(actor);
-        const traversal = actor.navigation.getTraversalState();
-        const cycle = [...nodeIds];
-
-        // Accept both [A, B, C] and the author-friendly [A, B, C, A]. The
-        // closing edge is implicit and must not duplicate the first anchor.
-        if (cycle.length > 1 && cycle[0] === cycle.at(-1)) cycle.pop();
-
-        const uniqueNodeIds = new Set(cycle);
-        const lapCount = THREE.MathUtils.clamp(
-            Math.floor(laps),
-            1,
-            2
-        );
-
-        // Three-node triangles are technically valid cycles, but they look
-        // like nervous circling rather than an ordinary walk through the
-        // environment. Closed-loop activities require at least four distinct
-        // circulation nodes; use a regular route for anything shorter.
-        if (cycle.length < MIN_CLOSED_LOOP_NODES ||
-            uniqueNodeIds.size !== cycle.length) return false;
-
-        for (let index = 0; index < cycle.length; index++) {
-
-            const fromId = cycle[index];
-            const toId = cycle[(index + 1) % cycle.length];
-
-            if (!this.graph.hasNode(fromId) ||
-                this.graph.isNodeBlocked(fromId) ||
-                !this.graph.areConnected(fromId, toId) ||
-                this.graph.isConnectionBlocked(fromId, toId)) return false;
-
-        }
-
-        const entry = this.findClosedLoopEntry(context, cycle);
-
-        if (!entry) return false;
-
-        const startIndex = cycle.indexOf(entry.nodeId);
-        let orderedCycle = [
-            ...cycle.slice(startIndex),
-            ...cycle.slice(0, startIndex)
-        ];
-
-        if (entry.arrivalFromId &&
-            orderedCycle[1] === entry.arrivalFromId) {
-
-            // Do not begin a stroll by immediately reversing over the segment
-            // used to reach its entry. Traverse the same closed circuit in the
-            // opposite order, so priming continues through the junction while
-            // still selecting the right-hand lane for every new direction.
-            orderedCycle = [
-                orderedCycle[0],
-                ...orderedCycle.slice(1).reverse()
-            ];
-
-        }
-
-        const startsImmediately = !context.activeInteraction &&
-            !traversal.currentConnection &&
-            traversal.currentNodeId === entry.nodeId;
-
-        context.closedLoop = {
-            id,
-            nodeIds: orderedCycle,
-            entryNodeId: entry.nodeId,
-            phase: startsImmediately ? "looping" : "entering",
-            lapsTotal: lapCount,
-            lapsRemaining: lapCount,
-            lapsCompleted: 0,
-            onLap,
-            onComplete,
-            onCancelled
-        };
-        context.departureContinuity = null;
-
-        console.log(
-            `[ClosedLoop] ${actor.name} chooses "${id}" for ` +
-            `${lapCount} lap${lapCount === 1 ? "" : "s"}.`
-        );
-
-        if (startsImmediately) {
-
-            this.traffic.cancel(actor);
-            this.connector.releaseReservations(actor);
-            this.trafficState.releaseReservations(actor);
-            this.routeGeometry.clearActiveLaneCurve(actor);
-            actor.locomotion.resetCurve();
-            context.pendingPosition = null;
-            context.pendingInteraction = null;
-            context.destinationId = null;
-            context.deferredCommand = null;
-            return this.startClosedLoopPriming(context);
-
-        }
-
-        console.log(
-            `[ClosedLoop] ${actor.name} heads to safe entry ` +
-            `"${entry.nodeId}" before starting the circuit.`
-        );
-        const accepted = this.moveToClosestNode(
-            actor,
-            this.graph.requireNode(entry.nodeId).position,
-            {
-                replaceIntent: false,
-                preparedCandidate: entry.candidate
-            }
-        );
-
-        if (accepted) return true;
-
-        this.cancelClosedLoop(context, "entry-unreachable");
-        return false;
+        return this.closedLoops.start(actor, nodeIds, options);
 
     }
 
@@ -322,9 +219,248 @@ export class CharacterNavigationSystem {
 
     }
 
+    leaveInteraction(actor) {
+
+        const context = this.requireContext(actor);
+        const interactionPoint = context.interaction.active?.point;
+
+        if (!interactionPoint) return false;
+
+        const accessPoint = interactionPoint.via ?? interactionPoint;
+        const connection = accessPoint.connection ??
+            this.connector.connect(accessPoint);
+
+        if (!connection) return false;
+
+        // Leaving an activity is a valid autonomous command by itself. An NPC
+        // must not occupy the point forever merely because no next activity
+        // could be reserved in the same decision tick.
+        const candidates = connection.nodeIds
+            .map(nodeId => {
+                const node = this.graph.getNode(nodeId);
+                if (!node || this.graph.isNodeBlocked(nodeId)) return null;
+
+                const plan = this.findBestPlan(context, node.position, 3);
+                return plan ? { node, plan } : null;
+            })
+            .filter(Boolean)
+            .sort((first, second) =>
+                first.plan.plan.cost - second.plan.plan.cost
+            );
+
+        const selected = candidates[0];
+        if (!selected) return false;
+
+        return this.moveToClosestNode(actor, selected.node.position, {
+            preparedCandidate: selected.plan
+        });
+
+    }
+
+    requestPriorityPassage(priorityActor, blockers, detail = {}) {
+
+        if (priorityActor.navigationPassagePolicy !== "absolute") return false;
+
+        let requested = false;
+
+        for (const blocker of new Set(blockers)) {
+
+            if (!blocker || blocker === priorityActor ||
+                blocker.navigationPassagePolicy === "absolute") continue;
+
+            const context = this.agents.get(blocker);
+            if (!context) continue;
+
+            const requestKey = [
+                detail.resourceType,
+                detail.nodeId,
+                detail.point?.id,
+                detail.fromId,
+                detail.toId
+            ].filter(Boolean).join(":");
+            const previousRequest = this.priorityPassageRequests.get(blocker);
+            const sameRequest = previousRequest?.by === priorityActor &&
+                previousRequest.key === requestKey;
+
+            if (!sameRequest) {
+                this.priorityPassageRequests.set(blocker, {
+                    by: priorityActor,
+                    key: requestKey,
+                    attemptedAt: this.navigationTime
+                });
+                blocker.onPriorityPassageRequested?.({
+                    by: priorityActor,
+                    ...detail
+                });
+            }
+            requested = true;
+
+            // A failed evacuation remains retryable, but route planning is
+            // never a per-frame operation. This was especially expensive
+            // while Player retained the lane that the blocker wanted to use.
+            if (sameRequest &&
+                this.navigationTime - previousRequest.attemptedAt < 0.75) {
+                continue;
+            }
+
+            if (sameRequest) previousRequest.attemptedAt = this.navigationTime;
+
+            // Leaving an InteractionPoint is transactional: its occupation is
+            // retained through the exit animation, then released. The Player
+            // waits for the physical exit but never loses its own intention.
+            if (context.interaction.active) {
+                if (!context.interaction.leaving &&
+                    !context.interaction.exitCommitted) {
+                    this.leaveInteraction(blocker);
+                }
+                continue;
+            }
+
+            // An idle ambient actor standing on a traffic node has no route
+            // that would naturally clear it. Give it a real neighboring node
+            // to evacuate toward; moving actors keep their current route and
+            // the collision negotiator gives the Player right-of-way.
+            const currentNodeId = blocker.navigation
+                .getTraversalState().currentNodeId;
+
+            if (!currentNodeId || blocker.navigation.hasPath()) continue;
+
+            const origin = this.graph.getNode(currentNodeId);
+            const candidates = [...origin.connections.entries()]
+                .filter(([nodeId, connection]) =>
+                    !connection.blocked &&
+                    !this.graph.isNodeBlocked(nodeId)
+                )
+                .sort(([firstId], [secondId]) =>
+                    Number(this.trafficState.isNodeAvailable(secondId, blocker)) -
+                    Number(this.trafficState.isNodeAvailable(firstId, blocker))
+                );
+            const destination = candidates[0]
+                ? this.graph.getNode(candidates[0][0])
+                : null;
+
+            if (destination) {
+                this.moveToClosestNode(blocker, destination.position, {
+                    replaceIntent: true,
+                    maxDetourFactor: 2
+                });
+            }
+
+        }
+
+        return requested;
+
+    }
+
+    evacuateStaleNode(nodeId) {
+
+        const node = this.graph.getNode(nodeId);
+        if (!node || node.blocked) return false;
+
+        const previous = this.staleNodeEvacuations.get(nodeId) ?? -Infinity;
+        if (this.navigationTime - previous < 2) return true;
+
+        const state = this.trafficState.getNodeState(nodeId);
+        const actors = new Set([
+            ...state.occupants,
+            ...state.reservations,
+            ...state.transitReservations,
+            ...this.traffic.departures.getActors(nodeId),
+            ...this.traffic.arrivals.getActors(nodeId)
+        ]);
+
+        for (const encounter of state.collisionBlocks) {
+            actors.add(encounter.winner);
+            actors.add(encounter.yielder);
+        }
+
+        const evacuationRadius = (node.metadata.laneRadius ?? 1.75) + 1.5;
+        const activeActors = [...actors].filter(actor => {
+            if (!actor?.isActive?.() || !this.agents.has(actor)) return false;
+            const traversal = actor.navigation.getTraversalState();
+            return traversal.currentNodeId === nodeId ||
+                Math.hypot(
+                    actor.object3D.position.x - node.position.x,
+                    actor.object3D.position.z - node.position.z
+                ) <= evacuationRadius;
+        });
+        if (activeActors.length < 2 && state.collisionBlocks.size === 0) {
+            return false;
+        }
+
+        const exits = [...node.connections.entries()]
+            .filter(([neighborId, connection]) =>
+                !connection.blocked &&
+                !this.graph.isNodeBlocked(neighborId)
+            )
+            .map(([neighborId]) => this.graph.requireNode(neighborId));
+        if (exits.length === 0) return false;
+
+        this.staleNodeEvacuations.set(nodeId, this.navigationTime);
+        console.warn(
+            `[NavigationRecovery] Stale node "${nodeId}" releases ` +
+            `${activeActors.length} actor(s); all current routes are ` +
+            `replaced by local exits.`
+        );
+
+        for (const actor of activeActors) {
+
+            const context = this.requireContext(actor);
+
+            // Interaction points are external to nodes. Never tear down a
+            // transactional enter/exit merely because its access node stalled.
+            if (context.interaction.entering || context.interaction.leaving ||
+                context.interaction.exitCommitted) continue;
+
+            this.cancelClosedLoop(context, "stale-node-evacuation");
+            this.traffic.cancel(actor);
+            this.interactionTraffic.releaseReservations(actor);
+            this.trafficState.releaseAgent(actor);
+            this.routeGeometry.clearActiveLaneCurve(actor);
+            this.collisionFailsafe.cancel(actor);
+            actor.navigation.cancel();
+            actor.navigation.setCurrentNode(nodeId);
+            actor.locomotion.resetCurve();
+            this.trafficState.occupyNode(nodeId, actor, { crossing: true });
+
+            context.intent.position = null;
+            context.intent.destinationId = null;
+            context.intent.interaction = null;
+            context.intent.deferredCommand = null;
+            context.traversal.laneCurve = false;
+            context.traversal.interactionCurve = false;
+            context.traversal.transitTangent = null;
+            context.wait.retryElapsed = 0;
+            context.wait.collisionElapsed = 0;
+            context.recovery.elapsed = 0;
+
+        }
+
+        const evacuees = activeActors.filter(actor => {
+            const context = this.requireContext(actor);
+            return !context.interaction.entering &&
+                !context.interaction.leaving &&
+                !context.interaction.exitCommitted;
+        });
+
+        evacuees.forEach((actor, index) => {
+            const destination = exits[index % exits.length];
+            this.moveToClosestNode(actor, destination.position, {
+                replaceIntent: true,
+                skipTurnaround: true,
+                maxDetourFactor: 1.5
+            });
+        });
+
+        this.refresh();
+        return true;
+
+    }
+
     cancel(actor) {
 
         const agent = this.requireContext(actor);
+        this.metrics.increment("cancellations");
 
         this.cancelClosedLoop(agent, "facade-cancel");
         this.finishActiveInteraction(agent);
@@ -347,6 +483,8 @@ export class CharacterNavigationSystem {
         agent.turnaround.active = false;
 
         actor.cancel();
+        this.routeGeometry.clearPlannedLaneCurve(actor);
+        agent.route.previewSignature = null;
         agent.syncPhase();
         return true;
 
@@ -354,151 +492,31 @@ export class CharacterNavigationSystem {
 
     startClosedLoopPriming(context) {
 
-        const loop = context.closedLoop;
-
-        if (!loop ||
-            loop.nodeIds.length < MIN_CLOSED_LOOP_NODES) return false;
-
-        const fromId = loop.nodeIds[0];
-        const toId = loop.nodeIds[1];
-        const actor = context.actor;
-        const connection = this.graph.requireConnection(fromId, toId);
-        const laneIndex = connection.fromId === fromId ? 0 : 1;
-        const laneEnd = this.routeGeometry.getConnectionLaneNodePosition(
-            toId,
-            fromId,
-            toId,
-            laneIndex
-        );
-        loop.phase = "priming";
-        loop.primingTargetId = toId;
-
-        // The priming edge establishes a point that belongs to the circuit's
-        // own right-hand lane. Without it, the first segment could inherit the
-        // opposite lane used by the unrelated route that reached its entry.
-        actor.followWaypoints([{
-            id: toId,
-            position: laneEnd,
-            // A closed walk requires the right-hand lane, but TrafficSystem
-            // still performs the actual reservation before geometry exists.
-            preferredLaneIndex: laneIndex,
-            closedLoopPrimingEnd: true
-        }]);
-        this.refresh();
-        return true;
+        return this.closedLoops.startPriming(context);
 
     }
 
     findClosedLoopEntry(context, nodeIds) {
 
-        const traversal = context.actor.navigation.getTraversalState();
-        const allowedNodeIds = nodeIds.filter(nodeId =>
-            !this.isNodeAttachedToActionPoint(nodeId)
-        );
-
-        if (allowedNodeIds.length === 0) return null;
-
-        if (!context.activeInteraction &&
-            !traversal.currentConnection &&
-            allowedNodeIds.includes(traversal.currentNodeId)) {
-
-            return {
-                nodeId: traversal.currentNodeId,
-                candidate: null,
-                cost: 0,
-                arrivalFromId: context.arrivalFromNodeId
-            };
-
-        }
-
-        return allowedNodeIds
-            .map(nodeId => {
-
-                const candidate = this.findBestPlan(
-                    context,
-                    this.graph.requireNode(nodeId).position,
-                    6
-                );
-
-                if (!candidate ||
-                    candidate.plan.destinationId !== nodeId) return null;
-
-                return {
-                    nodeId,
-                    candidate,
-                    cost: candidate.accessCost + candidate.plan.cost,
-                    arrivalFromId: candidate.plan.nodeIds.at(-2) ?? null
-                };
-
-            })
-            .filter(Boolean)
-            .sort((first, second) => first.cost - second.cost)[0] ?? null;
+        return this.closedLoops.findEntry(context, nodeIds);
 
     }
 
     isNodeAttachedToActionPoint(nodeId) {
 
-        for (const point of this.connector.points.values()) {
-
-            if (point.metadata.role !== "action") continue;
-
-            const accessPoint = point.via ?? point;
-            const access = this.connector.connect(accessPoint, {
-                silent: true
-            });
-
-            // Projected approaches belong to an edge and are valid parts of a
-            // circuit. Only a direct node ActionPoint is a bad loop entrance:
-            // beginning there visually mixes an idle/action pose with travel.
-            if (access?.nodeIds?.length === 1 &&
-                access.nodeIds[0] === nodeId) return true;
-
-        }
-
-        return false;
+        return this.closedLoops.isNodeAttachedToActionPoint(nodeId);
 
     }
 
     startClosedLoopLap(context) {
 
-        const loop = context.closedLoop;
-
-        if (!loop) return false;
-
-        loop.phase = "looping";
-
-        const waypoints = this.createClosedLoopRouteWaypoints(
-            context,
-            loop.nodeIds
-        );
-
-        if (waypoints.length === 0) {
-
-            this.cancelClosedLoop(context, "invalidated");
-            return false;
-
-        }
-
-        context.actor.followWaypoints(waypoints);
-        this.refresh();
-        return true;
+        return this.closedLoops.startLap(context);
 
     }
 
     cancelClosedLoop(context, reason = "cancelled") {
 
-        const loop = context?.closedLoop;
-
-        if (!loop) return false;
-
-        context.closedLoop = null;
-        loop.onCancelled?.({
-            actor: context.actor,
-            id: loop.id,
-            lapsCompleted: loop.lapsCompleted,
-            reason
-        });
-        return true;
+        return this.closedLoops.cancel(context, reason);
 
     }
 
@@ -514,7 +532,7 @@ export class CharacterNavigationSystem {
 
         const context = this.requireContext(actor);
 
-        if (replaceIntent && context.closedLoop) {
+        if (replaceIntent && context.intent.closedLoop) {
 
             this.cancelClosedLoop(context, "replaced-by-command");
 
@@ -525,18 +543,18 @@ export class CharacterNavigationSystem {
         // not mean that the actor stopped wanting to reach this position.
         if (actor.navigationIntentPolicy === "persistent") {
 
-            context.pendingPosition = position.clone();
-            context.pendingInteraction = null;
-            context.destinationId = null;
-            context.retryElapsed = 0;
+            context.intent.position = position.clone();
+            context.intent.interaction = null;
+            context.intent.destinationId = null;
+            context.wait.retryElapsed = 0;
 
         }
 
-        if (context.preparingInteraction) {
+        if (context.interaction.entering) {
 
             // Do not interrupt an authored entry animation. The newest
             // command starts after the current action has actually arrived.
-            context.deferredCommand = {
+            context.intent.deferredCommand = {
                 type: "node",
                 position: position.clone()
             };
@@ -544,9 +562,9 @@ export class CharacterNavigationSystem {
 
         }
 
-        if (context.turningAround) {
+        if (context.turnaround.active) {
 
-            context.deferredCommand = {
+            context.intent.deferredCommand = {
                 type: "node",
                 position: position.clone()
             };
@@ -580,12 +598,13 @@ export class CharacterNavigationSystem {
         const routeNodeIds = exitTraversal.nodeIds;
         const nextNodeId = routeNodeIds[1] ?? null;
 
-        if (!skipInteractionExit && context.activeInteraction) {
+        if (!skipInteractionExit && context.interaction.active) {
 
             this.beginInteractionExit(context, {
                 type: "node",
                 position: position.clone(),
                 originId: routeOriginId,
+                nextNodeId,
                 preparedCandidate: candidate,
                 intentPrepared: true
             });
@@ -597,7 +616,7 @@ export class CharacterNavigationSystem {
             if (replaceIntent) {
 
                 this.traffic.cancel(actor);
-                this.connector.releaseReservations(actor);
+                this.interactionTraffic.releaseReservations(actor);
 
             }
 
@@ -623,44 +642,46 @@ export class CharacterNavigationSystem {
 
         if (replaceIntent) this.traffic.cancel(actor);
 
-        context.pendingPosition = position.clone();
-        context.pendingInteraction = null;
-        context.destinationId = candidate.plan.destinationId;
-        context.retryElapsed = 0;
-        context.blockedElapsed = null;
-        context.recoveryPending = false;
+        context.intent.position = position.clone();
+        context.intent.interaction = null;
+        context.intent.destinationId = candidate.plan.destinationId;
+        context.wait.retryElapsed = 0;
+        context.wait.blockedElapsed = null;
+        context.recovery.pending = false;
         this.prepareOrigin(context, routeOriginId, {
             preserveTrafficReservations: preparedCandidate !== null
         });
 
         const exitWaypoints = this.connector.createExitWaypoints(
-            context.interactionPoint,
-            routeOriginId
+            context.traversal.interactionPoint,
+            routeOriginId,
+            { nextNodeId }
         );
-        const entryConnection = exitWaypoints.find(
-            waypoint => waypoint.connectionEntry
-        )?.connectionEntry ?? null;
+        const graphWaypoints = this.createTraversalWaypoints(
+            context,
+            routeNodeIds
+        );
         const waypoints = [
             ...exitWaypoints,
-            ...this.createTraversalWaypoints(
+            ...this.applyTopologyToGraphPrefix(
                 context,
-                routeNodeIds,
-                { entryConnection }
+                graphWaypoints,
+                exitWaypoints
             )
         ];
         const traversal = actor.navigation.getTraversalState();
         const alreadyThere =
             traversal.currentNodeId === candidate.plan.destinationId &&
             candidate.plan.nodeIds.length === 1 &&
-            !context.interactionPoint;
+            !context.traversal.interactionPoint;
 
         this.helper?.highlightNode(candidate.plan.destinationId);
 
         if (alreadyThere) {
 
-            context.pendingPosition = null;
-            context.destinationId = null;
-            context.departureContinuity = null;
+            context.intent.position = null;
+            context.intent.destinationId = null;
+            context.route.departureContinuity = null;
             actor.cancel();
             return true;
 
@@ -672,7 +693,7 @@ export class CharacterNavigationSystem {
         ), {
             waitAtEnd: candidate.plan.status === "waiting"
         });
-        context.departureContinuity = null;
+        context.route.departureContinuity = null;
 
         return true;
 
@@ -687,7 +708,7 @@ export class CharacterNavigationSystem {
 
         const context = this.requireContext(actor);
 
-        if (replaceIntent && context.closedLoop) {
+        if (replaceIntent && context.intent.closedLoop) {
 
             this.cancelClosedLoop(context, "replaced-by-interaction");
 
@@ -697,7 +718,7 @@ export class CharacterNavigationSystem {
         // completed command, not a route with identical origin/destination.
         // This also protects autonomous behavior from re-enqueuing its current
         // ambient action while the controller is between decisions.
-        if (context.activeInteraction?.point === point) return true;
+        if (context.interaction.active?.point === point) return true;
 
         // Traffic/collision recovery can remove topology ownership while the
         // physical body has already reached its authored mark. Finish that
@@ -717,16 +738,16 @@ export class CharacterNavigationSystem {
         // suspend this interaction, but only a newer Player command replaces it.
         if (actor.navigationIntentPolicy === "persistent") {
 
-            context.pendingPosition = null;
-            context.pendingInteraction = { point, onArrive };
-            context.destinationId = null;
-            context.retryElapsed = 0;
+            context.intent.position = null;
+            context.intent.interaction = { point, onArrive };
+            context.intent.destinationId = null;
+            context.wait.retryElapsed = 0;
 
         }
 
-        if (context.preparingInteraction) {
+        if (context.interaction.entering) {
 
-            context.deferredCommand = {
+            context.intent.deferredCommand = {
                 type: "interaction",
                 point,
                 onArrive
@@ -735,9 +756,9 @@ export class CharacterNavigationSystem {
 
         }
 
-        if (context.turningAround) {
+        if (context.turnaround.active) {
 
-            context.deferredCommand = {
+            context.intent.deferredCommand = {
                 type: "interaction",
                 point,
                 onArrive
@@ -763,8 +784,8 @@ export class CharacterNavigationSystem {
         }
 
         if (!skipInteractionExit &&
-            context.activeInteraction &&
-            context.activeInteraction.point !== point) {
+            context.interaction.active &&
+            context.interaction.active.point !== point) {
 
             const routeCandidate = this.findInteractionRouteCandidate(
                 context,
@@ -772,7 +793,7 @@ export class CharacterNavigationSystem {
             );
 
             if (!routeCandidate ||
-                !this.connector.reserveRoutePoints(
+                !this.interactionTraffic.reserveRoutePoints(
                     routeCandidate.route,
                     actor
                 )) {
@@ -787,12 +808,14 @@ export class CharacterNavigationSystem {
                 routeCandidate.origin.id,
                 this.getGraphWaypointIds(routeCandidate.route.waypoints)
             );
+            const exitNodeIds = exitTraversal.nodeIds;
 
             this.beginInteractionExit(context, {
                 type: "interaction",
                 point,
                 onArrive,
                 originId: exitTraversal.exitNodeId,
+                nextNodeId: exitNodeIds[1] ?? null,
                 preparedRouteCandidate: routeCandidate,
                 intentPrepared: true
             });
@@ -806,7 +829,7 @@ export class CharacterNavigationSystem {
             if (replaceIntent) {
 
                 this.traffic.cancel(actor);
-                this.connector.releaseReservations(actor);
+                this.interactionTraffic.releaseReservations(actor);
 
             }
 
@@ -841,6 +864,7 @@ export class CharacterNavigationSystem {
                 candidate.origin.id,
                 this.getGraphWaypointIds(candidate.route.waypoints)
             );
+            const exitNodeIds = exitTraversal.nodeIds;
             const routeWaypoints = exitTraversal.skippedOrigin
                 ? candidate.route.waypoints.slice(1)
                 : candidate.route.waypoints;
@@ -855,8 +879,9 @@ export class CharacterNavigationSystem {
                 routeWaypoints
             );
             const exitWaypoints = this.connector.createExitWaypoints(
-                context.interactionPoint,
-                exitTraversal.exitNodeId
+                context.traversal.interactionPoint,
+                exitTraversal.exitNodeId,
+                { nextNodeId: exitNodeIds[1] ?? null }
             );
             const completeWaypoints = [
                 ...exitWaypoints,
@@ -870,7 +895,7 @@ export class CharacterNavigationSystem {
                 context,
                 completeWaypoints
             ));
-            context.departureContinuity = null;
+            context.route.departureContinuity = null;
             return true;
 
         }
@@ -879,7 +904,7 @@ export class CharacterNavigationSystem {
 
         if (directRoute) {
 
-            if (!this.connector.reserveRoutePoints(directRoute, actor)) {
+            if (!this.interactionTraffic.reserveRoutePoints(directRoute, actor)) {
 
                 this.deferPersistentIntent(context);
                 return false;
@@ -891,7 +916,7 @@ export class CharacterNavigationSystem {
                 context,
                 directRoute.waypoints
             ));
-            context.departureContinuity = null;
+            context.route.departureContinuity = null;
             return true;
 
         }
@@ -905,7 +930,7 @@ export class CharacterNavigationSystem {
 
         }
 
-        if (!this.connector.reserveRoutePoints(candidate.route, actor)) {
+        if (!this.interactionTraffic.reserveRoutePoints(candidate.route, actor)) {
 
             this.deferPersistentIntent(context);
             return false;
@@ -916,6 +941,7 @@ export class CharacterNavigationSystem {
             candidate.origin.id,
             this.getGraphWaypointIds(candidate.route.waypoints)
         );
+        const exitNodeIds = exitTraversal.nodeIds;
         const optimizedRouteWaypoints = exitTraversal.skippedOrigin
             ? candidate.route.waypoints.slice(1)
             : candidate.route.waypoints;
@@ -928,8 +954,9 @@ export class CharacterNavigationSystem {
             optimizedRouteWaypoints
         );
         const exitWaypoints = this.connector.createExitWaypoints(
-            context.interactionPoint,
-            exitTraversal.exitNodeId
+            context.traversal.interactionPoint,
+            exitTraversal.exitNodeId,
+            { nextNodeId: exitNodeIds[1] ?? null }
         );
         const completeWaypoints = [
             ...exitWaypoints,
@@ -943,7 +970,7 @@ export class CharacterNavigationSystem {
             context,
             completeWaypoints
         ));
-        context.departureContinuity = null;
+        context.route.departureContinuity = null;
 
         return true;
 
@@ -1040,7 +1067,7 @@ export class CharacterNavigationSystem {
 
     getAvoidFirstStepTo(context, originId) {
 
-        const continuity = context.departureContinuity;
+        const continuity = context.route.departureContinuity;
 
         return continuity?.nodeId === originId
             ? continuity.previousNodeId
@@ -1152,22 +1179,7 @@ export class CharacterNavigationSystem {
 
     createClosedLoopRouteWaypoints(context, nodeIds) {
 
-        return nodeIds.map((fromId, index) => {
-
-            const toId = nodeIds[(index + 1) % nodeIds.length];
-            const connection = this.graph.requireConnection(fromId, toId);
-            const preferredLaneIndex = connection.fromId === fromId ? 0 : 1;
-
-            return {
-                id: toId,
-                // Traffic replaces this center with the endpoint of the lane
-                // it actually reserves immediately before traversal.
-                position: this.graph.requireNode(toId).position.clone(),
-                preferredLaneIndex,
-                closedLoopLapEnd: index === nodeIds.length - 1
-            };
-
-        });
+        return this.closedLoops.createRouteWaypoints(nodeIds);
 
     }
 
@@ -1177,47 +1189,7 @@ export class CharacterNavigationSystem {
 
     }
 
-    appendPostLoopUTurnAnchors(pushAnchor, start, end, incomingDirection) {
 
-        const direction = incomingDirection.clone().setY(0);
-
-        if (direction.lengthSq() <= 0.0001 ||
-            start.distanceToSquared(end) <= 0.0001) return;
-
-        direction.normalize();
-        const laneSeparation = Math.sqrt(start.distanceToSquared(end));
-        const radius = THREE.MathUtils.clamp(
-            laneSeparation * 1.25,
-            0.75,
-            1.5
-        );
-        const firstControl = start.clone().addScaledVector(direction, radius);
-        const secondControl = end.clone().addScaledVector(direction, radius);
-        const sampleCount = 6;
-
-        // This cubic leaves the old lane in its current direction and arrives
-        // at the reverse lane already facing back. It is only used when the
-        // graph truly offers no forward route; ordinary post-loop decisions
-        // never cross to the opposite portal at the finishing node.
-        for (let index = 1; index < sampleCount; index++) {
-
-            const t = index / sampleCount;
-            const inverse = 1 - t;
-            const position = start.clone()
-                .multiplyScalar(inverse ** 3)
-                .add(firstControl.clone().multiplyScalar(
-                    3 * inverse ** 2 * t
-                ))
-                .add(secondControl.clone().multiplyScalar(
-                    3 * inverse * t ** 2
-                ))
-                .add(end.clone().multiplyScalar(t ** 3));
-
-            pushAnchor(position);
-
-        }
-
-    }
 
     applyTopologyToGraphPrefix(...args) {
 
@@ -1235,7 +1207,7 @@ export class CharacterNavigationSystem {
 
         const traversal = context.actor.navigation.getTraversalState();
         const startsAtCurrentNode =
-            !context.interactionPoint &&
+            !context.traversal.interactionPoint &&
             traversal.currentNodeId === waypoints[0]?.id;
 
         return startsAtCurrentNode ? waypoints.slice(1) : waypoints;
@@ -1259,40 +1231,17 @@ export class CharacterNavigationSystem {
 
     canAcceptWaypointArrival(context, waypoint, completedConnection) {
 
-        if (!completedConnection || !waypoint?.id) return true;
-
-        const { actor } = context;
-        this.traffic.claimPhysicalArrival(waypoint.id, actor);
-
-        if (!this.trafficState.isNodeAvailable(waypoint.id, actor)) {
-            this.traffic.setWaitReason(
-                actor,
-                waypoint.id,
-                WaitReason.NODE_OCCUPIED
-            );
-            return false;
-        }
-
-        return true;
+        return this.waypointTraversal.canAcceptArrival(
+            context,
+            waypoint,
+            completedConnection
+        );
 
     }
 
     rejectInvalidSegment(actor, fromId, toId) {
 
-        const context = this.requireContext(actor);
-
-        console.log(
-            `[Navigation] ${actor.name} discarded stale segment ` +
-            `"${fromId}" -> "${toId}".`
-        );
-
-        actor.cancel();
-        actor.setState(EntityState.WAITING);
-        context.retryElapsed = 0;
-
-        // pendingPosition/pendingInteraction remain intact. The normal retry
-        // cycle will build a fresh route from the actor's real current node.
-        this.refresh();
+        return this.waypointTraversal.rejectInvalidSegment(actor, fromId, toId);
 
     }
 
@@ -1304,244 +1253,17 @@ export class CharacterNavigationSystem {
 
     handleWaypointReached(context, waypoint, completedConnection) {
 
-        const { actor } = context;
-
-        const interactionResult = this.interactions.handleWaypoint(
+        return this.waypointTraversal.handleReached(
             context,
-            waypoint
+            waypoint,
+            completedConnection
         );
-
-        if (interactionResult === "waiting") return false;
-        if (interactionResult) return;
-
-        if (!waypoint.id) return;
-
-        if (context.interactionPoint) {
-
-            this.leaveInteractionPoint(context);
-
-        }
-
-        const isFinalRouteWaypoint =
-            actor.navigation.getNextWaypoint() === null;
-        const reachedDestination =
-            waypoint.id === context.destinationId ||
-            (
-                actor.navigationIntentPolicy !== "persistent" &&
-                isFinalRouteWaypoint &&
-                context.pendingPosition !== null &&
-                context.pendingInteraction === null
-            );
-
-        if (reachedDestination && waypoint.id !== context.destinationId) {
-
-            console.log(
-                `[NavigationRecovery] ${actor.name} treats final waypoint ` +
-                `"${waypoint.id}" as its destination after intent ` +
-                `synchronization was lost.`
-            );
-
-        }
-
-        if (completedConnection) {
-
-            context.traversingLaneCurve = false;
-            this.routeGeometry.clearActiveLaneCurve(actor);
-            context.arrivalFromNodeId = completedConnection.fromId;
-            context.currentTraversal = "flat";
-            actor.traversalType = "flat";
-
-            this.trafficState.releaseConnection(
-                completedConnection.fromId,
-                completedConnection.toId,
-                actor
-            );
-
-            if (reachedDestination &&
-                actor.visual &&
-                Math.abs(actor.visual.position.x) > 0.001) {
-
-                AnimationPresets.to(actor, {
-                    object: actor.visual.position,
-                    property: "x",
-                    to: 0,
-                    duration: 0.25,
-                    easing: Tween.easeInOutQuad
-                });
-
-            }
-
-        }
-
-        if (!this.trafficState.occupyNode(waypoint.id, actor)) {
-
-            actor.setState(EntityState.WAITING);
-            console.log(
-                `[NavigationReservation] ${actor.name} reached ` +
-                `"${waypoint.id}" but waits for its reservation to become ` +
-                `occupiable.`
-            );
-            this.refresh();
-            return false;
-
-        }
-
-        this.traffic.completeNodeArrival(waypoint.id, actor);
-
-        if (context.closedLoop?.phase === "entering" &&
-            waypoint.id === context.closedLoop.entryNodeId) {
-
-            // Entry is only a staging destination. Do not release it, warn
-            // about a terminal navigation node or let NPCController make a
-            // decision between arrival and the first loop connection.
-            context.pendingPosition = null;
-            context.destinationId = null;
-            context.retryElapsed = 0;
-            this.startClosedLoopPriming(context);
-            this.refresh();
-            return;
-
-        }
-
-        if (waypoint.closedLoopPrimingEnd &&
-            context.closedLoop?.phase === "priming") {
-
-            const loop = context.closedLoop;
-
-            // Begin the periodic curve at the endpoint just reached. Rotating
-            // the authored cycle preserves its direction while making the
-            // priming edge the final edge of every complete lap.
-            loop.nodeIds = [
-                ...loop.nodeIds.slice(1),
-                loop.nodeIds[0]
-            ];
-            loop.entryNodeId = waypoint.id;
-            loop.primingTargetId = null;
-            this.startClosedLoopLap(context);
-            this.refresh();
-            return;
-
-        }
-
-        if (waypoint.closedLoopLapEnd && context.closedLoop) {
-
-            this.completeClosedLoopLap(context, waypoint);
-            this.refresh();
-            return;
-
-        }
-
-        if (reachedDestination) {
-
-            context.pendingPosition =
-                null;
-
-            context.destinationId =
-                null;
-
-            actor.setState(
-                EntityState.IDLE
-            );
-
-            console.warn(
-                `[Navigation] "${waypoint.id}" ` +
-                `was used as a terminal destination. ` +
-                `Navigation nodes must only be used ` +
-                `for transit.`
-            );
-
-            this.trafficState.releaseNode(
-                waypoint.id,
-                actor
-            );
-
-            actor.navigation.setCurrentNode(
-                waypoint.id
-            );
-
-        } else {
-
-            actor.setState(
-                EntityState.WALKING
-            );
-
-        }
-
-        // console.log(`[Navigation] ${actor.name} passed: ${waypoint.id}`);
-        this.refresh();
 
     }
 
     completeClosedLoopLap(context, waypoint) {
 
-        const { actor } = context;
-        const loop = context.closedLoop;
-        const nodeId = waypoint.id;
-
-        if (!loop) return false;
-
-        loop.lapsCompleted++;
-        loop.lapsRemaining--;
-        loop.onLap?.({
-            actor,
-            id: loop.id,
-            completed: loop.lapsCompleted,
-            total: loop.lapsTotal
-        });
-
-        if (loop.lapsRemaining > 0) {
-
-            console.log(
-                `[ClosedLoop] ${actor.name} completed ` +
-                `${loop.lapsCompleted}/${loop.lapsTotal} on "${loop.id}".`
-            );
-            return this.startClosedLoopLap(context);
-
-        }
-
-        context.closedLoop = null;
-        this.routeGeometry.clearActiveLaneCurve(actor);
-
-        const previousNodeId = context.arrivalFromNodeId;
-        let direction = waypoint.routeCurve
-            ?.getTangent(1, new THREE.Vector3())
-            .setY(0) ?? new THREE.Vector3();
-
-        if (direction.lengthSq() <= 0.0001 && previousNodeId) {
-
-            direction = this.graph.requireNode(nodeId).position.clone()
-                .sub(this.graph.requireNode(previousNodeId).position)
-                .setY(0);
-
-        }
-
-        context.departureContinuity = previousNodeId &&
-            direction.lengthSq() > 0.0001
-            ? {
-                nodeId,
-                previousNodeId,
-                direction: direction.normalize()
-            }
-            : null;
-
-        // The circuit ends at the same logical and physical origin. Release
-        // its transit occupancy just like another completed autonomous task;
-        // the controller may now choose a fresh interaction or route.
-        this.trafficState.releaseNode(nodeId, actor);
-        actor.navigation.setCurrentNode(nodeId);
-        actor.setState(EntityState.IDLE);
-
-        console.log(
-            `[ClosedLoop] ${actor.name} leaves "${loop.id}" after ` +
-            `${loop.lapsCompleted} lap${loop.lapsCompleted === 1 ? "" : "s"}.`
-        );
-        loop.onComplete?.({
-            actor,
-            id: loop.id,
-            lapsCompleted: loop.lapsCompleted
-        });
-
-        return true;
+        return this.closedLoops.completeLap(context, waypoint);
 
     }
 
@@ -1574,23 +1296,10 @@ export class CharacterNavigationSystem {
 
         const { actor } = context;
 
-        const currentNodeId = actor.navigation.getTraversalState().currentNodeId;
-
-        if (currentNodeId) {
-
-            // Returning toward the center makes this actor part of traffic
-            // again, so the node must stop being passable immediately.
-            this.trafficState.setNodeAgentResting(
-                currentNodeId,
-                actor,
-                false
-            );
-
-        }
-
-        // object3D already occupies the resting spot in world space. Once the
-        // route is authorized, Locomotion moves directly from there to the next
-        // graph node and owns all turning; no visual recentering is necessary.
+        // InteractionPoints are outside node ownership. Their exits request
+        // traffic through their own originKey and enter the selected lane only
+        // after the normal queue grants passage. This method therefore has no
+        // node occupancy state to clear; it only removes obsolete visual tweens.
         actor.cancelTweens(actor.object3D.position, ["x", "z"]);
         return true;
 
@@ -1628,96 +1337,25 @@ export class CharacterNavigationSystem {
 
     shouldTurnAround(actor, requestedPosition) {
 
-        if (!actor.isState(EntityState.WALKING)) return false;
-
-        const waypoint = actor.navigation.getCurrentWaypoint();
-
-        if (!waypoint) return false;
-
-        const currentDirection = waypoint.position.clone()
-            .sub(actor.object3D.position)
-            .setY(0);
-        const requestedDirection = requestedPosition.clone()
-            .sub(actor.object3D.position)
-            .setY(0);
-
-        if (currentDirection.lengthSq() < 0.0001 ||
-            requestedDirection.lengthSq() < 0.0001) return false;
-
-        return currentDirection.normalize().dot(
-            requestedDirection.normalize()
-        ) < -0.1;
+        return this.turnaround.shouldTurnAround(actor, requestedPosition);
 
     }
 
     beginTurnaround(context, command) {
 
-        // The replacement route was structurally validated and queued before
-        // this callback. Future animation may replace the temporary timer.
-        context.deferredCommand = command;
-        context.turningAround = true;
-        context.turnaroundElapsed = 0;
-        context.actor.pause();
-        this.onTurnaroundRequested(context.actor);
+        return this.turnaround.begin(context, command);
 
     }
 
     onTurnaroundRequested(actor) {
 
-        // Future animation callback: play a turn-in-place clip and replace the
-        // timer by its onComplete signal before executing the deferred route.
-        console.log(`[Navigation] ${actor.name} prepares to turn around.`);
+        return this.turnaround.onRequested(actor);
 
     }
 
     executeDeferredCommand(context, { skipInteractionExit = false } = {}) {
 
-        const command = context.deferredCommand;
-
-        if (!command) return false;
-
-        context.deferredCommand = null;
-
-        let accepted;
-
-        if (command.type === "interaction") {
-
-            accepted = this.moveToInteractionPoint(
-                context.actor,
-                command.point,
-                command.onArrive,
-                {
-                    replaceIntent: !command.intentPrepared,
-                    skipTurnaround: true,
-                    skipInteractionExit,
-                    preparedRouteCandidate:
-                        command.preparedRouteCandidate ?? null
-                }
-            );
-
-        } else {
-
-            accepted = this.moveToClosestNode(
-                context.actor,
-                command.position,
-                {
-                    replaceIntent: !command.intentPrepared,
-                    skipTurnaround: true,
-                    skipInteractionExit,
-                    preparedCandidate: command.preparedCandidate ?? null
-                }
-            );
-
-        }
-
-        if (!accepted) {
-
-            context.deferredCommand = command;
-            context.actor.pause();
-
-        }
-
-        return accepted;
+        return this.turnaround.execute(context, { skipInteractionExit });
 
     }
 
@@ -1733,13 +1371,16 @@ export class CharacterNavigationSystem {
         this.updatePlanning(delta);
         this.updateTraffic(delta);
 
-        const actors = [...this.contexts.keys()]
+        const actors = [...this.agents.keys()]
             .filter(actor => actor.isActive());
 
         for (const actor of actors) actor.authorizeMovementTraffic();
         for (const actor of actors) actor.prepareMovement();
+        this.prepareCollisionFrame(actors);
+        this.resolveCharacterOverlaps(actors, delta);
         for (const actor of actors) actor.evaluateMovementGuard(delta);
         for (const actor of actors) actor.updateMovement(delta);
+        this.resolveResidualCharacterOverlaps(actors, delta);
 
         this.solvePhysics(delta);
 
@@ -1750,30 +1391,33 @@ export class CharacterNavigationSystem {
 
     updatePlanning(delta) {
 
-        for (const context of this.contexts.values()) {
+        this.navigationTime += delta;
+
+        for (const context of this.agents.values()) {
 
             const { actor } = context;
+            this.refreshPlannedRoutePreview(context);
             context.syncPhase(this.traffic.getWaitReason(actor));
 
             // Debug-only timer: this separates a pause owned by a visual exit
             // animation from a pause caused by traffic after it has finished.
-            if (context.preparingInteractionExit) {
+            if (context.interaction.leaving) {
 
-                context.interactionExitElapsed += delta;
+                context.interaction.exitElapsed += delta;
 
             }
 
             if (this.monitorNavigationProgress(context, delta)) continue;
             if (this.recoverOrphanedActor(context, delta)) continue;
 
-            if (context.turningAround) {
+            if (context.turnaround.active) {
 
-                context.turnaroundElapsed += delta;
+                context.turnaround.elapsed += delta;
 
-                if (context.turnaroundElapsed >= context.turnaroundDuration) {
+                if (context.turnaround.elapsed >= context.turnaround.duration) {
 
-                    context.turningAround = false;
-                    context.turnaroundElapsed = 0;
+                    context.turnaround.active = false;
+                    context.turnaround.elapsed = 0;
                     this.executeDeferredCommand(context);
 
                 }
@@ -1786,21 +1430,21 @@ export class CharacterNavigationSystem {
             // its animation callback fires. Generic retries here could execute
             // the command early, then leave the actor lowered at seat with no
             // command remaining for onComplete.
-            if (context.preparingInteractionExit) continue;
+            if (context.interaction.leaving) continue;
 
-            if (context.deferredCommand) {
+            if (context.intent.deferredCommand) {
 
-                context.retryElapsed += delta;
+                context.wait.retryElapsed += delta;
 
-                if (context.retryElapsed < 0.5) continue;
+                if (context.wait.retryElapsed < 0.5) continue;
 
-                context.retryElapsed = 0;
+                context.wait.retryElapsed = 0;
                 this.executeDeferredCommand(context);
                 continue;
 
             }
 
-            if (context.traversingLaneCurve &&
+            if (context.traversal.laneCurve &&
                 actor.isState(EntityState.WAITING) &&
                 !this.traffic.isWaitingForQueue(actor)) {
 
@@ -1809,7 +1453,7 @@ export class CharacterNavigationSystem {
 
             }
 
-            if (context.traversingInteractionCurve &&
+            if (context.traversal.interactionCurve &&
                 actor.isState(EntityState.WAITING) &&
                 !this.traffic.isWaitingForQueue(actor)) {
 
@@ -1818,43 +1462,43 @@ export class CharacterNavigationSystem {
 
             }
 
-            if (context.blockedElapsed !== null) {
+            if (context.wait.blockedElapsed !== null) {
 
-                context.blockedElapsed += delta;
+                context.wait.blockedElapsed += delta;
 
-                if (context.blockedElapsed >= context.blockedTimeout) {
+                if (context.wait.blockedElapsed >= context.wait.blockedTimeout) {
 
-                    context.blockedElapsed = null;
+                    context.wait.blockedElapsed = null;
                     this.abandonBlockedIntent(context);
 
                 }
 
             }
 
-            if (context.blockedElapsed !== null) continue;
+            if (context.wait.blockedElapsed !== null) continue;
 
             // prepareInteraction() owns this pause and resumes through its
             // onComplete callback; traffic retry must not interrupt animation.
-            if (context.preparingInteraction) continue;
+            if (context.interaction.entering) continue;
 
             if (!actor.isState(EntityState.WAITING)) continue;
 
-            context.retryElapsed += delta;
+            context.wait.retryElapsed += delta;
 
-            if (context.retryElapsed < 0.5) continue;
+            if (context.wait.retryElapsed < 0.5) continue;
 
-            context.retryElapsed = 0;
+            context.wait.retryElapsed = 0;
 
-            if (context.pendingInteraction ||
+            if (context.intent.interaction ||
                 actor.navigation.getCurrentWaypoint()?.interactionPoint) {
 
                 if (actor.navigation.hasPath()) {
 
                     actor.resume();
 
-                } else if (context.pendingInteraction) {
+                } else if (context.intent.interaction) {
 
-                    const { point, onArrive } = context.pendingInteraction;
+                    const { point, onArrive } = context.intent.interaction;
                     this.moveToInteractionPoint(actor, point, onArrive, {
                         replaceIntent: false,
                         skipTurnaround: true
@@ -1865,9 +1509,9 @@ export class CharacterNavigationSystem {
 
             }
 
-            if (context.pendingPosition) {
+            if (context.intent.position) {
 
-                this.moveToClosestNode(actor, context.pendingPosition, {
+                this.moveToClosestNode(actor, context.intent.position, {
                     replaceIntent: false,
                     skipTurnaround: true
                 });
@@ -1878,22 +1522,85 @@ export class CharacterNavigationSystem {
 
     }
 
+    refreshPlannedRoutePreview(context, force = false) {
+
+        const { actor } = context;
+        const currentWaypoint = actor.navigation.getCurrentWaypoint();
+        const signature = !currentWaypoint
+            ? null
+            : `${actor.navigation.getRouteRevision()}:` +
+                `${actor.navigation.currentIndex}:` +
+                `${actor.navigation.getGeometryRevision()}`;
+
+        if (!force && signature === context.route.previewSignature) return;
+
+        context.route.previewSignature = signature;
+
+        if (!signature) {
+            this.routeGeometry.clearPlannedLaneCurve(actor);
+            this.helper?.refreshActiveLaneCurves();
+            this.onChanged?.();
+            return;
+        }
+
+        const waypoints = actor.navigation.getRemainingWaypoints();
+        const points = this.geometryBuilder.createPlannedRoutePreview(
+            context,
+            waypoints
+        );
+
+        if (points.length >= 2) {
+            this.routeGeometry.setPlannedLaneCurve(actor, points);
+        } else {
+            this.routeGeometry.clearPlannedLaneCurve(actor);
+        }
+
+        this.helper?.refreshActiveLaneCurves();
+        this.onChanged?.();
+
+    }
+
     updateTraffic(delta) {
 
         // Queue timers and timeouts are resolved before movement authorization
         // for this same frame. No CharacterCollisionFailsafe decision is made
         // from last frame's traffic snapshot anymore.
-        this.traffic.update(delta);
+        let repairedLaneOccupancy = false;
 
-        for (const { actor } of this.contexts.values()) {
+        for (const { actor } of this.agents.values()) {
 
-            this.traffic.prequeueUpcomingTransit(actor);
+            const traversal = actor.navigation.getTraversalState();
+            const connection = traversal.currentConnection;
+
+            if (!connection) continue;
+
+            const preferredLaneIndex = actor.navigation
+                .getCurrentWaypoint()?.authorizedLaneIndex;
+            const result = this.trafficState.ensureConnectionOccupancy(
+                connection.fromId,
+                connection.toId,
+                actor,
+                preferredLaneIndex
+            );
+
+            if (!result?.repaired) continue;
+
+            repairedLaneOccupancy = true;
+            console.warn(
+                `[NavigationTraffic] Restored ${actor.name} as occupant of ` +
+                `lane ${result.laneIndex} on "${connection.fromId} -> ` +
+                `${connection.toId}".`
+            );
 
         }
 
+        if (repairedLaneOccupancy) this.refresh();
+
+        this.traffic.update(delta);
+
         // Callbacks executed above may have completed an interaction, started
         // recovery or resumed traversal. Publish the final phase of this frame.
-        for (const context of this.contexts.values()) {
+        for (const context of this.agents.values()) {
 
             context.syncPhase(
                 this.traffic.getWaitReason(context.actor)
@@ -1905,9 +1612,9 @@ export class CharacterNavigationSystem {
 
     solvePhysics(delta) {
 
-        // Cannon owns only residual body separation. manualContactSeparation
-        // remains false; navigation and the predictive brake are authoritative
-        // before bodies reach this phase.
+        // Cannon mirrors kinematic, detection-only character bodies. Traffic,
+        // the predictive brake and the negotiated backstep remain the only
+        // authorities allowed to affect character movement.
         this.physics.solve(delta);
 
     }
@@ -1915,6 +1622,18 @@ export class CharacterNavigationSystem {
     prepareCollisionFrame(characters) {
 
         this.collisionFailsafe.beginFrame(characters);
+
+    }
+
+    resolveCharacterOverlaps(characters, delta) {
+
+        this.collisionSolver.resolve(characters, delta);
+
+    }
+
+    resolveResidualCharacterOverlaps(characters, delta) {
+
+        this.collisionSolver.resolveResidual(characters, delta);
 
     }
 
@@ -1926,9 +1645,9 @@ export class CharacterNavigationSystem {
 
     retryPreservedIntent(context, { maxDetourFactor = 3 } = {}) {
 
-        if (context.pendingInteraction) {
+        if (context.intent.interaction) {
 
-            const { point, onArrive } = context.pendingInteraction;
+            const { point, onArrive } = context.intent.interaction;
             return this.moveToInteractionPoint(
                 context.actor,
                 point,
@@ -1938,11 +1657,11 @@ export class CharacterNavigationSystem {
 
         }
 
-        if (context.pendingPosition) {
+        if (context.intent.position) {
 
             return this.moveToClosestNode(
                 context.actor,
-                context.pendingPosition,
+                context.intent.position,
                 {
                     replaceIntent: false,
                     skipTurnaround: true,
@@ -1991,35 +1710,35 @@ export class CharacterNavigationSystem {
 
         this.refresh();
 
-        for (const context of this.contexts.values()) {
+        for (const context of this.agents.values()) {
 
-            if (context.recoveryPending) {
+            if (context.recovery.pending) {
 
                 this.tryRecoverToNearestNode(context);
                 continue;
 
             }
 
-            if (context.pendingPosition) {
+            if (context.intent.position) {
 
                 const replanned = this.moveToClosestNode(
                     context.actor,
-                    context.pendingPosition,
+                    context.intent.position,
                     { replaceIntent: false, skipTurnaround: true }
                 );
 
                 if (!replanned) {
 
                     context.actor.pause();
-                    context.blockedElapsed ??= 0;
+                    context.wait.blockedElapsed ??= 0;
 
                 }
 
             }
 
-            if (context.pendingInteraction) {
+            if (context.intent.interaction) {
 
-                const { point, onArrive } = context.pendingInteraction;
+                const { point, onArrive } = context.intent.interaction;
                 const replanned = this.moveToInteractionPoint(
                     context.actor,
                     point,
@@ -2030,7 +1749,7 @@ export class CharacterNavigationSystem {
                 if (!replanned) {
 
                     context.actor.pause();
-                    context.blockedElapsed ??= 0;
+                    context.wait.blockedElapsed ??= 0;
 
                 }
 
@@ -2054,7 +1773,7 @@ export class CharacterNavigationSystem {
 
     requireContext(actor) {
 
-        const context = this.contexts.get(actor);
+        const context = this.agents.get(actor);
 
         if (!context) {
 
@@ -2091,7 +1810,7 @@ export class CharacterNavigationSystem {
     getOccupiedInteractionPoint(actor) {
 
         const context =
-            this.contexts.get(actor);
+            this.agents.get(actor);
 
         if (!context) {
 
@@ -2100,7 +1819,7 @@ export class CharacterNavigationSystem {
         }
 
         const point =
-            context.activeInteraction?.point;
+            context.interaction.active?.point;
 
         if (!point) {
 
@@ -2125,7 +1844,7 @@ export class CharacterNavigationSystem {
         // Traffic and route changes are dynamic. Rebuilding the whole helper
         // here recreated every canvas label/texture and caused a large frame
         // spike whenever a spline appeared. Topology changes still call the
-        // helper's full refresh explicitly from Scene.
+        // helper's full refresh explicitly through GameServices/Game.
         this.helper?.refreshDynamic();
         this.onChanged?.();
 
@@ -2154,25 +1873,25 @@ export class CharacterNavigationSystem {
                 actor
             )
             : null;
-        const interaction = context.pendingInteraction?.point;
+        const interaction = context.intent.interaction?.point;
         const collision = this.collisionFailsafe.getDebugState(actor);
         const flags = [
-            context.turningAround && "turning",
-            context.preparingInteraction && "interaction-entry",
-            context.preparingInteractionExit && "interaction-exit",
-            context.interactionExitCommitted && "exit-committed",
-            context.interactionExitPoint &&
-                `exit-point:${context.interactionExitPoint.id}`,
-            context.closedLoop?.phase === "entering"
-                ? `closed-loop-entry:${context.closedLoop.entryNodeId}`
-                : context.closedLoop &&
-                    `closed-loop:${context.closedLoop.lapsCompleted}/` +
-                    `${context.closedLoop.lapsTotal}`,
+            context.turnaround.active && "turning",
+            context.interaction.entering && "interaction-entry",
+            context.interaction.leaving && "interaction-exit",
+            context.interaction.exitCommitted && "exit-committed",
+            context.traversal.interactionExitPoint &&
+                `exit-point:${context.traversal.interactionExitPoint.id}`,
+            context.intent.closedLoop?.phase === "entering"
+                ? `closed-loop-entry:${context.intent.closedLoop.entryNodeId}`
+                : context.intent.closedLoop &&
+                    `closed-loop:${context.intent.closedLoop.lapsCompleted}/` +
+                    `${context.intent.closedLoop.lapsTotal}`,
             this.collisionFailsafe.isWaiting(actor) &&
-                `collision-wait:${context.collisionWaitElapsed.toFixed(1)}s`,
+                `collision-wait:${context.wait.collisionElapsed.toFixed(1)}s`,
             waypoint?.routeGeometry && "route-segments",
-            context.traversingLaneCurve && "lane-curve",
-            context.traversingInteractionCurve && "interaction-curve"
+            context.traversal.laneCurve && "lane-curve",
+            context.traversal.interactionCurve && "interaction-curve"
         ].filter(Boolean);
 
         return {
@@ -2180,7 +1899,7 @@ export class CharacterNavigationSystem {
             state: actor.state,
             phase: context.phase,
             traversal:
-                context.currentTraversal,
+                context.traversal.kind,
             position:
                 `${actor.object3D.position.x.toFixed(2)}, ` +
                 `${actor.object3D.position.y.toFixed(2)}, ` +
@@ -2198,25 +1917,25 @@ export class CharacterNavigationSystem {
                     `${waypoint.curveStopDistance?.toFixed(2) ?? "?"}`
                 : "—",
             intent: interaction?.id ??
-                (context.closedLoop
-                    ? `${context.closedLoop.id} ` +
-                        (context.closedLoop.phase === "entering"
-                            ? `→ ${context.closedLoop.entryNodeId} `
+                (context.intent.closedLoop
+                    ? `${context.intent.closedLoop.id} ` +
+                        (context.intent.closedLoop.phase === "entering"
+                            ? `→ ${context.intent.closedLoop.entryNodeId} `
                             : "") +
-                        `(${context.closedLoop.lapsCompleted}/` +
-                        `${context.closedLoop.lapsTotal})`
+                        `(${context.intent.closedLoop.lapsCompleted}/` +
+                        `${context.intent.closedLoop.lapsTotal})`
                     : null) ??
-                (context.pendingPosition
-                    ? context.destinationId ??
-                    `position (${context.pendingPosition.x.toFixed(1)}, ` +
-                    `${context.pendingPosition.z.toFixed(1)})`
+                (context.intent.position
+                    ? context.intent.destinationId ??
+                    `position (${context.intent.position.x.toFixed(1)}, ` +
+                    `${context.intent.position.z.toFixed(1)})`
                     : "—"),
-            interaction: context.preparingInteractionExit
-                ? `exit animation (${context.interactionExitElapsed.toFixed(2)}s)`
-                : context.activeInteraction && context.deferredCommand
+            interaction: context.interaction.leaving
+                ? `exit animation (${context.interaction.exitElapsed.toFixed(2)}s)`
+                : context.interaction.active && context.intent.deferredCommand
                     ? "exit waits for traffic (animation not started)"
-                    : context.activeInteraction
-                        ? `active: ${context.activeInteraction.point.id}`
+                    : context.interaction.active
+                        ? `active: ${context.interaction.active.point.id}`
                         : "—",
             queue: [
                 traffic.departure &&
@@ -2234,15 +1953,16 @@ export class CharacterNavigationSystem {
             collision: collision
                 ? `${collision.kind}: ${collision.blocker.name} ` +
                     `(${collision.clearance.toFixed(2)}m, ` +
-                    `${context.collisionWaitElapsed.toFixed(1)}s)`
+                    `${context.wait.collisionElapsed.toFixed(1)}s)`
                 : "clear",
             collisionActive: Boolean(collision),
-            recovery: context.recoveryPending
-                ? `navigation ${context.recoveryElapsed.toFixed(1)}s / ` +
-                    `${context.recoveryTimeout.toFixed(1)}s`
+            recovery: context.recovery.pending
+                ? `navigation ${context.recovery.elapsed.toFixed(1)}s / ` +
+                    `${context.recovery.timeout.toFixed(1)}s`
                 : collision && actor.navigationIntentPolicy !== "persistent"
                     ? `collision timeout ` +
-                        `${context.collisionWaitElapsed.toFixed(1)}s / 4.0s`
+                        `${context.wait.collisionElapsed.toFixed(1)}s / ` +
+                        `${context.wait.collisionTimeout.toFixed(1)}s`
                     : collision
                         ? "persistent intent preserved"
                         : "—",
@@ -2257,7 +1977,28 @@ export class CharacterNavigationSystem {
 
     }
 
+    getMetricsSnapshot() {
+
+        return this.metrics.snapshot({
+            agents: this.agents,
+            trafficState: this.trafficState,
+            connector: this.connector,
+            traffic: this.traffic,
+            physics: this.physics
+        });
+
+    }
+
     dispose() {
+
+        for (const actor of [...this.agents.keys()]) {
+            this.unregisterActor(actor);
+        }
+
+        this.interactionTraffic.dispose();
+        if (this.connector.traffic === this.interactionTraffic) {
+            this.connector.traffic = null;
+        }
 
     }
 

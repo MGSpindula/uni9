@@ -36,6 +36,7 @@ export class RouteSegment {
         axisEnd = null,
         maxAxisDistance = Infinity,
         maxTurnRadians = Math.PI * 0.75,
+        allowChordReversal = false,
         samples = 20
     } = {}) {
 
@@ -106,7 +107,12 @@ export class RouteSegment {
 
         }
 
-        if (reverses) issues.push("direction-reversal");
+        // Junctions may legitimately begin in a direction opposed to the
+        // straight chord (an obtuse turn). What matters there is continuous
+        // local curvature, not monotonic progress along the chord.
+        if (reverses && !allowChordReversal) {
+            issues.push("direction-reversal");
+        }
         if (maximumTurn > maxTurnRadians) issues.push("excessive-curvature");
         if (maximumAxisDistance > maxAxisDistance) {
             issues.push("outside-corridor");

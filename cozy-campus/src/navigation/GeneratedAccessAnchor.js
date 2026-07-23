@@ -7,8 +7,6 @@ export class GeneratedAccessAnchor {
         this.amount = 0;
         this.center = null;
         this.lanePositions = [];
-        this.occupants = new Set();
-        this.reservations = new Set();
 
     }
 

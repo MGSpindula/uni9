@@ -17,6 +17,10 @@ export class Navigation {
         // Character uses this number to avoid advancing that brand-new route
         // as though it were the route that has just finished.
         this.routeRevision = 0;
+        // Authorized curves can change without replacing the topological
+        // route. Debug/planning previews use this cheap counter instead of
+        // serializing every waypoint on every frame.
+        this.geometryRevision = 0;
 
     }
 
@@ -43,6 +47,7 @@ export class Navigation {
         this.waitAtEnd = waitAtEnd;
         this.paused = false;
         this.routeRevision++;
+        this.geometryRevision++;
 
     }
 
@@ -52,6 +57,7 @@ export class Navigation {
         this.currentIndex = 0;
         this.waitAtEnd = false;
         this.routeRevision++;
+        this.geometryRevision++;
 
     }
 
@@ -87,6 +93,18 @@ export class Navigation {
 
     }
 
+    getGeometryRevision() {
+
+        return this.geometryRevision;
+
+    }
+
+    touchGeometry() {
+
+        this.geometryRevision++;
+
+    }
+
     insertManyBeforeCurrent(waypoints) {
 
         this.path.splice(
@@ -97,7 +115,7 @@ export class Navigation {
                 position: waypoint.position.clone()
             }))
         );
-
+        this.geometryRevision++;
 
     }
 
@@ -111,7 +129,7 @@ export class Navigation {
                 position: waypoint.position.clone()
             }))
         );
-
+        this.geometryRevision++;
 
     }
 
@@ -147,6 +165,7 @@ export class Navigation {
         }));
         this.currentIndex = 0;
         this.routeRevision++;
+        this.geometryRevision++;
 
     }
 

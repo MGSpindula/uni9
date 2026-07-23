@@ -11,86 +11,231 @@ export class InteractionTraversalCoordinator {
         this.navigation = navigation;
         this.graph = navigation.graph;
         this.connector = navigation.connector;
+        this.interactionTraffic = navigation.interactionTraffic;
         this.traffic = navigation.traffic;
         this.interactions = navigation.interactions;
 
     }
 
-    beginInteractionExit(context, command) {
+    beginInteractionExit(
+        context,
+        command
+    ) {
 
-        if (context.preparingInteractionExit) {
+        if (
+            context.interaction.leaving
+        ) {
 
-            // A newer Player command replaces the destination, but never cuts
-            // short the stand-up/release animation already in progress.
-            context.deferredCommand = command;
+            context.intent.deferredCommand =
+                command;
+
             return;
 
         }
 
-        if (context.interactionExitCommitted) {
+        if (
+            context.interaction.exitCommitted
+        ) {
 
-            // The actor has already stood up or left its action pose. A new
-            // target replaces only what happens after the exit; replaying the
-            // exit animation would teleport it back toward the old action.
-            context.deferredCommand = command;
+            context.intent.deferredCommand =
+                command;
 
-            if (!context.actor.navigation.hasPath()) {
+            if (
+                !context.actor.navigation
+                    .hasPath()
+            ) {
 
-                this.navigation.executeDeferredCommand(context, {
-                    skipInteractionExit: true
-                });
+                this.navigation
+                    .executeDeferredCommand(
+                        context,
+                        {
+                            skipInteractionExit:
+                                true
+                        }
+                    );
 
             }
+
             return;
 
         }
 
-        const interaction = context.activeInteraction;
-        const approachPoint = interaction.point.via ?? interaction.point;
-        const exitWaypoints = this.connector.createExitWaypoints(
-            interaction.point,
-            command.originId
-        );
-        const connectionEntry = exitWaypoints.find(
-            waypoint => waypoint.connectionEntry
-        )?.connectionEntry ?? null;
+        const actor =
+            context.actor;
 
-        context.deferredCommand = command;
-        context.actor.pause();
+        const interaction =
+            context.interaction.active;
 
-        // Reserve the real exit before playing the visual transition. Without
-        // this preflight, the actor visibly stood up and only then discovered
-        // that its lane was busy, appearing frozen beside the interaction.
-        if (!this.traffic.preflightInteractionExit(
-            context.actor,
-            connectionEntry
-        )) {
+        const actionPoint =
+            interaction.point;
 
-            context.retryElapsed = 0;
-            return;
+        const approachPoint =
+            actionPoint.via ??
+            actionPoint;
 
-        }
+        const requiresApproachReservation =
+            approachPoint !== actionPoint;
 
-        context.interactionExitCommitted = true;
-        context.preparingInteractionExit = true;
-        context.interactionExitElapsed = 0;
+        const exitWaypoints =
+            this.connector
+                .createExitWaypoints(
+                    actionPoint,
+                    command.originId,
+                    {
+                        nextNodeId:
+                            command.nextNodeId ??
+                            null
+                    }
+                );
 
-        interaction.target?.prepareInteractionExit(
-            context.actor,
-            interaction.point,
-            approachPoint,
-            () => {
+        const trafficWaypoint =
+            exitWaypoints.find(
+                waypoint =>
+                    waypoint.connectionEntry ||
+                    waypoint.nodeEntry
+            ) ??
+            null;
 
-                if (!context.preparingInteractionExit) return;
+        const trafficEntry =
+            trafficWaypoint
+                ?.connectionEntry ??
+            trafficWaypoint
+                ?.nodeEntry ??
+            null;
 
-                context.preparingInteractionExit = false;
-                context.interactionExitElapsed = 0;
-                this.navigation.executeDeferredCommand(context, {
-                    skipInteractionExit: true
-                });
+        context.intent.deferredCommand =
+            command;
+
+        actor.pause();
+
+        /*
+         * Reserva primeiro o ApproachPoint.
+         *
+         * O ActionPoint permanece ocupado pelo
+         * ator durante todo o preflight.
+         */
+        if (
+            requiresApproachReservation &&
+            context.traversal
+                .interactionExitPoint !==
+            approachPoint
+        ) {
+
+            if (
+                !this.interactionTraffic
+                    .reservePoint(
+                        approachPoint,
+                        actor
+                    )
+            ) {
+
+                context.wait.retryElapsed =
+                    0;
+
+                return;
 
             }
-        );
+
+            /*
+             * interactionExitPoint representa
+             * tanto uma reserva quanto uma
+             * ocupação do staging point.
+             *
+             * releasePoint() limpa ambas.
+             */
+            context.traversal
+                .interactionExitPoint =
+                approachPoint;
+
+        }
+
+        /*
+         * Depois reserva lane ou nodeEntry.
+         *
+         * Se falhar, desfaz a reserva do Approach,
+         * mas não libera o ActionPoint ocupado.
+         */
+        if (
+            !this.traffic
+                .preflightInteractionExit(
+                    actor,
+                    trafficEntry
+                )
+        ) {
+
+            if (
+                requiresApproachReservation &&
+                context.traversal
+                    .interactionExitPoint ===
+                approachPoint
+            ) {
+
+                this.interactionTraffic
+                    .releasePoint(
+                        approachPoint,
+                        actor
+                    );
+
+                context.traversal
+                    .interactionExitPoint =
+                    null;
+
+            }
+
+            context.wait.retryElapsed =
+                0;
+
+            return;
+
+        }
+
+        context.interaction
+            .exitCommitted =
+            true;
+
+        context.interaction
+            .leaving =
+            true;
+
+        context.interaction
+            .exitElapsed =
+            0;
+
+        interaction.target
+            ?.prepareInteractionExit(
+                actor,
+                actionPoint,
+                approachPoint,
+                () => {
+
+                    if (
+                        !context.interaction
+                            .leaving
+                    ) {
+
+                        return;
+
+                    }
+
+                    context.interaction
+                        .leaving =
+                        false;
+
+                    context.interaction
+                        .exitElapsed =
+                        0;
+
+                    this.navigation
+                        .executeDeferredCommand(
+                            context,
+                            {
+                                skipInteractionExit:
+                                    true
+                            }
+                        );
+
+                }
+            );
 
     }
 
@@ -98,13 +243,13 @@ export class InteractionTraversalCoordinator {
 
         this.leaveInteractionPoint(context);
         this.releaseInteractionExitPoint(context);
-        context.interactionExitCommitted = false;
+        context.interaction.exitCommitted = false;
 
     }
 
     finishActiveInteraction(context) {
 
-        const interaction = context.activeInteraction;
+        const interaction = context.interaction.active;
 
         if (!interaction) return;
 
@@ -112,39 +257,39 @@ export class InteractionTraversalCoordinator {
             context.actor,
             interaction.point
         );
-        context.activeInteraction = null;
+        context.interaction.active = null;
 
     }
 
     leaveInteractionPoint(context) {
 
-        if (!context.interactionPoint) return;
+        if (!context.traversal.interactionPoint) return;
 
-        if (context.activeInteraction?.point === context.interactionPoint) {
+        if (context.interaction.active?.point === context.traversal.interactionPoint) {
 
             this.finishActiveInteraction(context);
 
         }
 
-        this.connector.releasePoint(
-            context.interactionPoint,
+        this.interactionTraffic.releasePoint(
+            context.traversal.interactionPoint,
             context.actor
         );
 
-        context.interactionPoint = null;
+        context.traversal.interactionPoint = null;
 
     }
 
     releaseInteractionExitPoint(context) {
 
-        if (!context.interactionExitPoint) return;
+        if (!context.traversal.interactionExitPoint) return;
 
-        this.connector.releasePoint(
-            context.interactionExitPoint,
+        this.interactionTraffic.releasePoint(
+            context.traversal.interactionExitPoint,
             context.actor
         );
 
-        context.interactionExitPoint = null;
+        context.traversal.interactionExitPoint = null;
 
     }
 
@@ -154,19 +299,19 @@ export class InteractionTraversalCoordinator {
 
         this.traffic.cancel(actor);
         this.navigation.trafficState.releaseReservations(actor);
-        this.connector.releaseReservations(actor);
+        this.interactionTraffic.releaseReservations(actor);
         this.navigation.routeGeometry.clearActiveLaneCurve(actor);
         actor.navigation.clearRoute();
         actor.locomotion.resetCurve();
 
-        context.pendingPosition = null;
-        context.destinationId = null;
-        context.pendingInteraction = { point, onArrive };
-        context.deferredCommand = null;
-        context.traversingLaneCurve = false;
-        context.traversingInteractionCurve = false;
-        context.recoveryElapsed = 0;
-        context.recoveryPosition.copy(actor.object3D.position);
+        context.intent.position = null;
+        context.intent.destinationId = null;
+        context.intent.interaction = { point, onArrive };
+        context.intent.deferredCommand = null;
+        context.traversal.laneCurve = false;
+        context.traversal.interactionCurve = false;
+        context.recovery.elapsed = 0;
+        context.recovery.position.copy(actor.object3D.position);
 
         this.interactions.handleWaypoint(context, {
             id: null,

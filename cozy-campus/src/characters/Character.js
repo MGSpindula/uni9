@@ -21,6 +21,11 @@ export class Character extends Entity {
 
         this.navigation = new Navigation();
         this.navigationPriority = 0;
+        // "absolute" is reserved for player-like actors whose movement input
+        // must not be silently frustrated by ambient traffic. Traffic still
+        // respects hard blocks and physical bodies; other actors are asked to
+        // vacate instead of letting this actor clip through them.
+        this.navigationPassagePolicy = "ordinary";
         this.traversalType = "flat";
         this.locomotion = new Locomotion(this.object3D);
         this.animation = null;
@@ -235,6 +240,15 @@ export class Character extends Entity {
 
     }
 
+    onTrafficRerouteRequested(wait) {
+
+        // Future animation hook: the autonomous actor has waited long enough
+        // and will now reconsider the route. A glance, sigh or turn-around
+        // animation belongs on `visual`; Traffic preserves topological truth.
+        void wait;
+
+    }
+
     onTrafficWaitEnded(wait) {
 
         // Future animation hook: finish the yielding pose before walk resumes.
@@ -257,6 +271,75 @@ export class Character extends Entity {
         // the node needed it to leave. Keep the route and retry naturally.
         // Future presentation may add a short hesitation on `visual`.
         void event;
+
+    }
+
+    onPriorityPassageRequested({ by, resourceType }) {
+
+        // Future social animation hook: notice `by`, step out of the way and
+        // optionally apologize. Navigation owns the actual evacuation route;
+        // this hook should animate only visual/bones.
+        console.log(
+            `[PriorityPassage] ${this.name} gives ${resourceType} ` +
+            `passage to ${by.name}.`
+        );
+
+    }
+
+    onCollisionYieldStarted({ blocker, strategy }) {
+
+        // Future social animation hook: look at `blocker`, apologize or signal
+        // passage. Navigation moves object3D; bones/visual animate here without
+        // replacing the route or its destination.
+        console.log(
+            `[CollisionSolver] ${this.name} gives way to ${blocker.name} ` +
+            `(${strategy}).`
+        );
+
+    }
+
+    onCollisionYieldEnded({ blocker }) {
+
+        // Future animation hook: finish the yielding pose before the normal
+        // walk cycle resumes toward the unchanged destination.
+        console.log(
+            `[CollisionSolver] ${this.name} resumes after ${blocker.name}.`
+        );
+
+    }
+
+    onCollisionPassStarted({ yieldingActor }) {
+
+        // Future social animation hook for the actor receiving passage: a
+        // nod/glance can play while normal locomotion remains authoritative.
+        console.log(
+            `[CollisionSolver] ${this.name} has right-of-way; ` +
+            `${yieldingActor.name} gives passage.`
+        );
+
+    }
+
+    onCollisionPassEnded({ yieldingActor }) {
+
+        // Finish the acknowledgement layer, if one was playing.
+        void yieldingActor;
+
+    }
+
+    centerVisualForNavigation() {
+
+        if (!this.visual || Math.abs(this.visual.position.x) <= 0.001) {
+            return false;
+        }
+
+        AnimationPresets.to(this, {
+            object: this.visual.position,
+            property: "x",
+            to: 0,
+            duration: 0.35,
+            easing: Tween.easeInOutQuad
+        });
+        return true;
 
     }
 
@@ -446,11 +529,18 @@ export class Character extends Entity {
         // connection between non-neighbouring nodes.
         if (this.navigation.getRouteRevision() !== completedRouteRevision) {
 
+            this.locomotion.resetCurve();
             return;
 
         }
 
         const result = this.navigation.advance();
+        const nextWaypoint = this.navigation.getCurrentWaypoint();
+
+        if (waypoint.routeCurveFinal !== false ||
+            nextWaypoint?.routeCurve !== waypoint.routeCurve) {
+            this.locomotion.resetCurve();
+        }
 
         if (result.finished) {
 
@@ -483,6 +573,14 @@ export class Character extends Entity {
         // the middle of the traffic or physics phases.
         super.update(delta);
         this.animation?.update(delta, this.locomotion.getMotionState());
+
+    }
+
+    requiresContinuousRender() {
+
+        return super.requiresContinuousRender() ||
+            this.locomotion.getMotionState().moving ||
+            Boolean(this.animation?.isVisuallyActive?.());
 
     }
 

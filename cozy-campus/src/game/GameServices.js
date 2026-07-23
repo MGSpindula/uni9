@@ -7,11 +7,17 @@ import { NavigationGraphHelper } from "../navigation/NavigationGraphHelper";
 import { CharacterNavigationSystem } from "../navigation/CharacterNavigationSystem";
 
 export class GameServices {
-    constructor({ camera, element, onChanged }) {
+    constructor({
+        camera,
+        element,
+        onChanged,
+        navigationHelperVisible = false
+    }) {
         this.registry = new EntityRegistry();
         this.interactions = new InteractionSystem();
         this.selection = new SelectionManager(camera, this.registry, element, { onChanged });
         this.onChanged = onChanged;
+        this.navigationHelperVisible = navigationHelperVisible;
     }
     createNavigation(configure) {
         this.navigationGraph = new NavigationGraph({ selectionRadius: 1.25 });
@@ -26,7 +32,8 @@ export class GameServices {
         this.navigationHelper = new NavigationGraphHelper(this.navigationGraph, {
             connector: this.navigationConnector,
             trafficState: this.characterNavigation.trafficState,
-            routeGeometry: this.characterNavigation.routeGeometry
+            routeGeometry: this.characterNavigation.routeGeometry,
+            visible: this.navigationHelperVisible
         });
         // Interaction points are authored after the graph in most levels.
         // Rebuild the debug drawing whenever action/approach points change.

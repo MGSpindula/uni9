@@ -1,8 +1,10 @@
 export class PerformanceDebugPanel {
 
-    constructor({ refreshInterval = 500 } = {}) {
+    constructor({ refreshInterval = 500, simplified = false } = {}) {
 
         this.refreshInterval = refreshInterval;
+        this.simplified = simplified;
+        this.requiresDetailedMetrics = !simplified;
         this.lastRefresh = performance.now();
         this.frames = 0;
         this.frameTime = 0;
@@ -10,10 +12,23 @@ export class PerformanceDebugPanel {
         this.renderTime = 0;
         this.maximumFrameTime = 0;
         this.renderedFrames = 0;
+        this.phaseTotals = {};
+        this.previousNavigationCounters = null;
 
         this.element = document.createElement("aside");
         this.element.className = "performance-debug";
-        this.element.innerHTML = `
+        this.element.classList.toggle("simplified", simplified);
+        this.element.innerHTML = simplified ? `
+            <strong>Performance</strong>
+            <span data-value="fps">-- FPS</span>
+            <dl>
+                <dt>Frame</dt><dd data-value="frame">--</dd>
+                <dt>Update</dt><dd data-value="update">--</dd>
+                <dt>Render</dt><dd data-value="render">--</dd>
+                <dt>Calls</dt><dd data-value="calls">--</dd>
+                <dt>Triangles</dt><dd data-value="triangles">--</dd>
+            </dl>
+        ` : `
             <strong>Performance</strong>
             <span data-value="fps">-- FPS</span>
             <dl>
@@ -22,6 +37,24 @@ export class PerformanceDebugPanel {
                 <dt>Render</dt><dd data-value="render">--</dd>
                 <dt>Rendered</dt><dd data-value="rendered">--</dd>
                 <dt>Collision</dt><dd data-value="collision">--</dd>
+                <dt>AI</dt><dd data-value="phase-ai">--</dd>
+                <dt>Planning</dt><dd data-value="phase-planning">--</dd>
+                <dt>Traffic</dt><dd data-value="phase-traffic">--</dd>
+                <dt>Movement</dt><dd data-value="phase-movement">--</dd>
+                <dt>Locomotion</dt><dd data-value="phase-locomotion">--</dd>
+                <dt>Failsafe</dt><dd data-value="phase-collision">--</dd>
+                <dt>Physics</dt><dd data-value="phase-physics">--</dd>
+                <dt>Grounding</dt><dd data-value="phase-grounding">--</dd>
+                <dt>Animation</dt><dd data-value="phase-animation">--</dd>
+                <dt>Routes/s</dt><dd data-value="routes-rate">--</dd>
+                <dt>Recovery/s</dt><dd data-value="recovery-rate">--</dd>
+                <dt>Geometry/s</dt><dd data-value="geometry-rate">--</dd>
+                <dt>Geometry CPU</dt><dd data-value="geometry-cpu">--</dd>
+                <dt>Segments/s</dt><dd data-value="segments-rate">--</dd>
+                <dt>Timeouts/s</dt><dd data-value="timeouts-rate">--</dd>
+                <dt>Waiting</dt><dd data-value="waiting">--</dd>
+                <dt>Reservations</dt><dd data-value="reservations">--</dd>
+                <dt>Phys. adjust</dt><dd data-value="physics-adjust">--</dd>
                 <dt>Worst</dt><dd data-value="worst">--</dd>
                 <dt>Calls</dt><dd data-value="calls">--</dd>
                 <dt>Triangles</dt><dd data-value="triangles">--</dd>
@@ -51,7 +84,9 @@ export class PerformanceDebugPanel {
         render,
         rendered = true,
         renderer,
-        collision = null
+        collision = null,
+        phases = null,
+        navigation = null
     }) {
 
         this.frames++;
@@ -60,6 +95,9 @@ export class PerformanceDebugPanel {
         this.renderTime += render;
         this.maximumFrameTime = Math.max(this.maximumFrameTime, frame);
         if (rendered) this.renderedFrames++;
+        for (const [name, duration] of Object.entries(phases ?? {})) {
+            this.phaseTotals[name] = (this.phaseTotals[name] ?? 0) + duration;
+        }
 
         const elapsed = now - this.lastRefresh;
         if (elapsed < this.refreshInterval) return;
@@ -77,9 +115,52 @@ export class PerformanceDebugPanel {
             "collision",
             collision
                 ? `${collision.candidateChecks} checks / ` +
-                    `${collision.queries} queries`
+                    `${collision.queries} queries / ` +
+                    `${collision.residualCorrections ?? 0} corrections`
                 : "--"
         );
+        for (const name of [
+            "ai",
+            "planning",
+            "traffic",
+            "movement",
+            "locomotion",
+            "collision",
+            "physics",
+            "grounding",
+            "animation"
+        ]) {
+            this.set(
+                `phase-${name}`,
+                `${((this.phaseTotals[name] ?? 0) / divisor).toFixed(3)} ms`
+            );
+        }
+        if (navigation) {
+            const seconds = Math.max(elapsed / 1000, 0.001);
+            const previous = this.previousNavigationCounters ?? navigation;
+            const rate = name => Math.max(
+                0,
+                (navigation[name] - (previous[name] ?? 0)) / seconds
+            ).toFixed(1);
+
+            this.set("routes-rate", rate("routesCalculated"));
+            this.set("recovery-rate", rate("routeRecoveries"));
+            this.set("geometry-rate", rate("routeGeometryBuilds"));
+            this.set(
+                "geometry-cpu",
+                `${rate("routeGeometryMilliseconds")} ms/s`
+            );
+            this.set("segments-rate", rate("routeSegmentsCreated"));
+            this.set("timeouts-rate", rate("trafficTimeouts"));
+            this.set("waiting", navigation.waitingActors);
+            this.set("reservations", navigation.activeReservations);
+            this.set(
+                "physics-adjust",
+                `${navigation.physicsCorrections} / ` +
+                    `${navigation.physicsMaximumCorrection.toFixed(3)}m`
+            );
+            this.previousNavigationCounters = { ...navigation };
+        }
         this.set("worst", `${this.maximumFrameTime.toFixed(2)} ms`);
         this.set("calls", info.render.calls.toLocaleString());
         this.set("triangles", info.render.triangles.toLocaleString());
@@ -110,6 +191,7 @@ export class PerformanceDebugPanel {
         this.renderTime = 0;
         this.maximumFrameTime = 0;
         this.renderedFrames = 0;
+        this.phaseTotals = {};
 
     }
 

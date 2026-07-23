@@ -47,12 +47,10 @@ export function configureCozyCampusNavigation(graph) {
 
     const nodes = [
         ["spawn", new THREE.Vector3(0, 0, -8)],
-        ["north-1", new THREE.Vector3(-5, 0, -5)],
-        ["north-2", new THREE.Vector3(2, 0, -3)],
-        ["junction", new THREE.Vector3(0, 0, 0)],
-        ["west-exit", new THREE.Vector3(-7, 0, 6)],
-        ["west-1", new THREE.Vector3(3, 0, 7), {laneRadius: 3}],
-        ["west-2", new THREE.Vector3(-3, 0, 8.5)],
+        ["north-1", new THREE.Vector3(-5, 0, -5), {laneRadius: 2}],
+        ["junction", new THREE.Vector3(0, 0, 0), {laneRadius: 2}],
+        ["west-exit", new THREE.Vector3(-6, 0, 8), {laneRadius: 2.5}],
+        ["west-1", new THREE.Vector3(3, 0, 7), {laneRadius: 2}],
         ["west-3", new THREE.Vector3(-8.5, 0, 1)],
         ["east-exit", new THREE.Vector3(7.3, 0, 7)],
         // Transition nodes belong exactly at the center of each physical edge.
@@ -76,18 +74,16 @@ export function configureCozyCampusNavigation(graph) {
         graph.connect(fromId, toId, options);
 
     connect("spawn", "north-1");
-    connect("spawn", "north-2");
+    connect("spawn", "slope-north-bottom");
     connect("spawn", "junction");
     connect("north-1", "junction");
     connect("north-1", "west-exit");
     connect("north-1", "west-3");
-    connect("north-2", "junction");
-    connect("junction", "west-1");
+    connect("slope-north-bottom", "junction", {laneCapacity: 1});
     connect("west-1", "west-exit");
-    connect("west-1", "west-2");
     connect("west-1", "west-3");
     connect("west-1", "east-exit");
-    connect("west-2", "west-exit");
+    connect("junction", "west-1");
     connect("west-3", "west-exit");
     connect("junction", "west-exit");
 
@@ -109,20 +105,20 @@ export function configureCozyCampusNavigation(graph) {
 
     // Height prototype. Traversal metadata will later select slope/stairs
     // animation clips without changing the route or Locomotion contracts.
-    connect("north-2", "slope-north-bottom", {
-        metadata: { traversal: "flat" }
+    connect("slope-north-bottom", "junction", {
+        metadata: { traversal: "flat", laneCapacity: 1 }
     });
     connect("slope-north-bottom", "upper-north", {
         metadata: { traversal: "slope" }
     });
     connect("upper-north", "upper-north-2", {
-        metadata: { traversal: "flat" }
+        metadata: { traversal: "flat", laneCapacity: 1 }
     });
     connect("upper-north-2", "upper-east", {
         metadata: { traversal: "flat" }
     });
     connect("upper-east", "slope-east-bottom", {
-        metadata: { traversal: "slope" }
+        metadata: { traversal: "slope", laneCapacity: 1 }
     });
     connect("slope-east-bottom", "east-exit", {
         metadata: { traversal: "flat" }

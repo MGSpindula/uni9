@@ -12,6 +12,7 @@ export class NavigationConnector {
         // them. The connector itself keeps only its authored points here.
         this.pathfinder = null;
         this.routeGeometry = null;
+        this.traffic = null;
         this.onPointsChanged = null;
 
     }
@@ -39,6 +40,7 @@ export class NavigationConnector {
         }
 
         this.points.set(point.id, point);
+        this.traffic?.registerPoint(point);
         this.connect(point);
         this.onPointsChanged?.();
 
@@ -50,8 +52,7 @@ export class NavigationConnector {
 
         if (!point) return false;
 
-        point.occupants.clear();
-        point.reservations.clear();
+        this.traffic?.unregisterPoint(point);
 
         this.points.delete(point.id);
 
@@ -121,8 +122,11 @@ export class NavigationConnector {
             )[0];
 
         if (!nearest ||
-            nearest.distanceSquared >
-            point.maxConnectionDistance * point.maxConnectionDistance) {
+            (
+                point.connectTo === null &&
+                nearest.distanceSquared >
+                point.maxConnectionDistance * point.maxConnectionDistance
+            )) {
 
             if (!silent) {
 
@@ -428,10 +432,14 @@ export class NavigationConnector {
 
         const pointPosition = point.getWorldPosition();
         const departureDirection = point.getWorldDirection().negate();
+
+        // Characters use +Z as their forward axis. In this convention their
+        // anatomical right is forward × world-up: (-z, 0, x). The opposite
+        // cross-product yields the actor's left and swaps near/far portals.
         const rightDirection = new THREE.Vector3(
-            departureDirection.z,
+            -departureDirection.z,
             0,
-            -departureDirection.x
+            departureDirection.x
         );
         const destinationDirection = this.graph
             .requireNode(destinationNodeId)
@@ -481,98 +489,6 @@ export class NavigationConnector {
     // Route creation
     // -----------------------------
 
-    isPointAvailable(point, agent = null) {
-
-        const users = new Set([
-            ...point.occupants,
-            ...point.reservations
-        ]);
-
-        if (agent) users.delete(agent);
-
-        return point.accessible && users.size < point.capacity;
-
-    }
-
-    occupyPoint(point, agent) {
-
-        if (!this.isPointAvailable(point, agent)) return false;
-
-        point.reservations.delete(agent);
-        point.occupants.add(agent);
-
-        return true;
-
-    }
-
-    reservePoint(point, agent) {
-
-        if (!this.isPointAvailable(point, agent)) return false;
-
-        point.reservations.add(agent);
-
-        return true;
-
-    }
-
-    reserveRoutePoints(route, agent) {
-
-        const points = [...new Set(
-            route.waypoints
-                .map(waypoint => waypoint.interactionPoint)
-                .filter(Boolean)
-        )];
-        const reserved = [];
-
-        for (const point of points) {
-
-            if (!this.reservePoint(point, agent)) {
-
-                for (const reservedPoint of reserved) {
-
-                    reservedPoint.reservations.delete(agent);
-
-                }
-
-                return false;
-
-            }
-
-            reserved.push(point);
-
-        }
-
-        return true;
-
-    }
-
-    releasePoint(point, agent) {
-
-        point.occupants.delete(agent);
-        point.reservations.delete(agent);
-
-    }
-
-    releaseAgent(agent) {
-
-        for (const point of this.points.values()) {
-
-            this.releasePoint(point, agent);
-
-        }
-
-    }
-
-    releaseReservations(agent) {
-
-        for (const point of this.points.values()) {
-
-            point.reservations.delete(agent);
-
-        }
-
-    }
-
     createRoute(point, startId, agent, {
         avoidFirstStepTo = null,
         ignorePointAvailability = false
@@ -581,8 +497,8 @@ export class NavigationConnector {
         const accessPoint = point.via ?? point;
 
         if (!ignorePointAvailability &&
-            (!this.isPointAvailable(point, agent) ||
-                !this.isPointAvailable(accessPoint, agent))) return null;
+            (!this.traffic.isPointAvailable(point, agent) ||
+                !this.traffic.isPointAvailable(accessPoint, agent))) return null;
 
         // Reconnect because graph blocking and object transforms can change.
         const connection = this.connect(accessPoint);
@@ -704,6 +620,7 @@ export class NavigationConnector {
                     accessPoint
                         .getWorldPosition()
             },
+            interactionDirection: accessPoint.getWorldDirection(),
             // An interaction projected on an edge must be entered through the
             // same lane geometry as ordinary traffic. The TrafficSystem uses
             // this portal to make endpoint -> lane start -> anchor explicit.
@@ -746,81 +663,249 @@ export class NavigationConnector {
 
     }
 
-    createExitWaypoints(point, destinationNodeId = null) {
+    createExitWaypoints(
+        point,
+        destinationNodeId = null,
+        {
+            nextNodeId = null
+        } = {}
+    ) {
 
-        if (!point) return [];
+        if (!point) {
 
-        const accessPoint = point.via ?? point;
-        const connection = this.connect(accessPoint);
+            return [];
 
-        if (!connection) return [];
+        }
+
+        const accessPoint =
+            point.via ??
+            point;
+
+        const connection =
+            this.connect(
+                accessPoint
+            );
+
+        if (!connection) {
+
+            return [];
+
+        }
 
         const waypoints = [];
-        const departureDirection = accessPoint.getWorldDirection().negate();
 
-        if (point !== accessPoint) {
+        const departureDirection =
+            accessPoint
+                .getWorldDirection()
+                .negate();
+
+        /*
+         * ActionPoint com ApproachPoint.
+         *
+         * Primeiro o ator retorna fisicamente ao
+         * ApproachPoint. Este waypoint não entra
+         * ainda no grafo.
+         */
+        if (
+            point !== accessPoint
+        ) {
 
             waypoints.push({
-                id: null,
-                position: accessPoint.getWorldPosition(),
-                interactionPoint: accessPoint,
-                // This is the physical action -> approach transition. It must
-                // not end the active interaction yet: the action remains busy
-                // until the actor crosses the graph-entry portal below.
-                interactionExitPoint: true,
-                departureDirection,
-                // seat -> approach belongs to the interaction animation. Keep
-                // the facing established at approach instead of turning the
-                // actor toward the backwards displacement.
-                preserveFacing: point.metadata.preserveFacing === true
+                id:
+                    null,
+
+                position:
+                    accessPoint
+                        .getWorldPosition(),
+
+                leavingInteraction:
+                    false,
+
+                interactionPoint:
+                    accessPoint,
+
+                interactionExitPoint:
+                    true,
+
+                departureDirection:
+                    null,
+
+                connectionEntry:
+                    null,
+
+                nodeEntry:
+                    null,
+
+                graphEntryNodeId:
+                    null,
+
+                skipGraphOrigin:
+                    false
             });
 
         }
 
-        const otherNodeId = (connection.segmentNodeIds ??
-            connection.nodeIds)?.find(
-            id => id !== destinationNodeId
-        ) ?? null;
-        const laneIndex = connection.anchor && destinationNodeId && otherNodeId
-            ? this.getApproachExitLaneIndex(
-                accessPoint,
-                connection,
+        const nodeIds =
+            connection.segmentNodeIds ??
+            connection.nodeIds ??
+            [];
+
+        const otherNodeId =
+            nodeIds.find(
+                id =>
+                    id !==
+                    destinationNodeId
+            ) ??
+            null;
+
+        const laneIndex =
+            connection.anchor &&
+                destinationNodeId &&
+                otherNodeId
+
+                ? this.getApproachExitLaneIndex(
+                    accessPoint,
+                    connection,
+                    destinationNodeId
+                )
+
+                : null;
+
+        const directNodeExit =
+            Boolean(
+                destinationNodeId &&
+                nextNodeId &&
+                connection.nodeIds
+                    ?.length === 1 &&
+                connection.nodeIds[0] ===
+                destinationNodeId &&
+                this.graph.hasNode(
+                    nextNodeId
+                ) &&
+                this.graph.areConnected(
+                    destinationNodeId,
+                    nextNodeId
+                )
+            );
+
+        const directLaneIndex =
+            directNodeExit
+
+                ? this.getRightHandLaneIndex(
+                    destinationNodeId,
+                    nextNodeId
+                )
+
+                : laneIndex;
+
+        const portalPosition =
+            directNodeExit
+
+                ? this.routeGeometry
+                    .getConnectionLaneNodePosition(
+                        destinationNodeId,
+                        destinationNodeId,
+                        nextNodeId,
+                        directLaneIndex
+                    )
+
+                : this.getPortalPosition(
+                    accessPoint,
+                    connection,
+                    laneIndex
+                );
+
+        const graphEntryNodeId =
+            !directNodeExit &&
+                destinationNodeId &&
+                connection.nodeIds
+                    ?.length === 1 &&
+                connection.nodeIds[0] ===
                 destinationNodeId
-            )
-            : null;
-        const portalPosition = this.getPortalPosition(
-            accessPoint,
-            connection,
-            laneIndex
-        );
+
+                ? destinationNodeId
+                : null;
+
+        const originKey =
+            `interaction:${accessPoint.id}`;
 
         waypoints.push({
-            id: null,
-            position: portalPosition,
-            preferredLaneIndex: laneIndex,
-            leavingInteraction: true,
-            // When already standing at approach, this is the first exit
-            // waypoint and therefore owns the same immediate 180° turn.
-            departureDirection: point === accessPoint
-                ? departureDirection
-                : null,
-            connectionEntry: destinationNodeId && otherNodeId
-                ? {
-                    fromId: otherNodeId,
-                    toId: destinationNodeId,
-                    anchorId: connection.anchor?.id ?? null,
-                    preferredLaneIndex: laneIndex,
-                    originKey: `interaction:${accessPoint.id}`
-                }
-                : null,
-            // A direct connectTo: "node" starts with the center only as a
-            // topological placeholder. If the route continues through an
-            // edge, RouteGeometryBuilder replaces it with that lane start.
-            graphEntryNodeId: destinationNodeId &&
-                connection.nodeIds?.length === 1 &&
-                connection.nodeIds[0] === destinationNodeId
-                ? destinationNodeId
-                : null
+            id:
+                null,
+
+            position:
+                portalPosition,
+
+            preferredLaneIndex:
+                directLaneIndex,
+
+            leavingInteraction:
+                true,
+
+            departureDirection:
+                point === accessPoint
+
+                    ? departureDirection
+                    : null,
+
+            connectionEntry:
+                directNodeExit
+
+                    ? {
+                        fromId:
+                            destinationNodeId,
+
+                        toId:
+                            nextNodeId,
+
+                        anchorId:
+                            null,
+
+                        preferredLaneIndex:
+                            directLaneIndex,
+
+                        originKey
+                    }
+
+                    : destinationNodeId &&
+                        otherNodeId
+
+                        ? {
+                            fromId:
+                                otherNodeId,
+
+                            toId:
+                                destinationNodeId,
+
+                            anchorId:
+                                connection.anchor
+                                    ?.id ??
+                                null,
+
+                            preferredLaneIndex:
+                                laneIndex,
+
+                            originKey
+                        }
+
+                        : null,
+
+            nodeEntry:
+                graphEntryNodeId
+
+                    ? {
+                        nodeId:
+                            graphEntryNodeId,
+
+                        originKey
+                    }
+
+                    : null,
+
+            skipGraphOrigin:
+                directNodeExit,
+
+            graphEntryNodeId
         });
 
         return waypoints;

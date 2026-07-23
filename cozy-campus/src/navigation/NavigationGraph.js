@@ -124,44 +124,105 @@ export class NavigationGraph {
     connect(fromId, toId, {
         bidirectional = true,
         metadata = {},
-        laneWidth = 1.0
+        laneWidth = 1.0,
+        laneCapacity = 1
     } = {}) {
 
-        const from = this.getNode(fromId);
-        const to = this.getNode(toId);
+        const from =
+            this.getNode(fromId);
+
+        const to =
+            this.getNode(toId);
 
         if (!from || !to) {
+
             this.reportValidationError(
                 "INVALID_CONNECTION",
-                `Connection "${fromId}" -> "${toId}" references a missing or invalid node.`
+                `Connection "${fromId}" -> "${toId}" ` +
+                `references a missing or invalid node.`
             );
+
             return null;
+
         }
 
-        const delta = to.position.clone().sub(from.position);
-        const horizontalDistance = Math.hypot(delta.x, delta.z);
+        const delta =
+            to.position.clone()
+                .sub(from.position);
+
+        const horizontalDistance =
+            Math.hypot(
+                delta.x,
+                delta.z
+            );
+
         const resource = {
             fromId,
             toId,
+
             blocked: false,
+
             laneWidth,
+
+            /*
+             * Duas lanes direcionais:
+             *
+             * lane 0: fromId → toId
+             * lane 1: toId → fromId
+             */
             laneCount: 2,
-            capacity: metadata.capacity ?? 2,
+
+            /*
+             * Capacidade máxima de cada lane.
+             */
+            laneCapacity,
+
+            /*
+             * Mantida para compatibilidade com
+             * APIs genéricas que ainda consultam
+             * resource.capacity.
+             *
+             * Não deve ser usada para controlar
+             * uma lane individual.
+             */
+            capacity:
+                metadata.capacity ??
+                laneCapacity,
+
             metadata: {
-                traversal: "flat",
-                slopeAngle: Math.atan2(
-                    Math.abs(delta.y),
-                    horizontalDistance || Number.EPSILON
-                ),
-                rise: delta.y,
+                traversal:
+                    "flat",
+
+                slopeAngle:
+                    Math.atan2(
+                        Math.abs(delta.y),
+                        horizontalDistance ||
+                        Number.EPSILON
+                    ),
+
+                rise:
+                    delta.y,
+
                 ...metadata
             }
         };
 
-        from.connections.set(toId, resource);
-        if (bidirectional) to.connections.set(fromId, resource);
+        from.connections.set(
+            toId,
+            resource
+        );
+
+        if (bidirectional) {
+
+            to.connections.set(
+                fromId,
+                resource
+            );
+
+        }
 
         this.revision++;
+
         return resource;
 
     }

@@ -66,6 +66,12 @@ export class NavigationDepartureQueue {
 
         queue.sort((first, second) =>
             second.rank - first.rank ||
+            // Rank describes physical urgency: an actor already occupying a
+            // node must be allowed to leave before a remote Player lookahead.
+            // Absolute passage wins only within the same operational phase;
+            // otherwise it could trap the very NPC asked to clear the node.
+            Number(second.actor.navigationPassagePolicy === "absolute") -
+            Number(first.actor.navigationPassagePolicy === "absolute") ||
             second.priority - first.priority ||
             first.order - second.order
         );
@@ -90,6 +96,24 @@ export class NavigationDepartureQueue {
 
     }
 
+    getActorsBefore(originId, actor) {
+
+        const queue = this.queues.get(originId) ?? [];
+        const index = queue.findIndex(request => request.actor === actor);
+
+        if (index <= 0) return [];
+
+        return queue.slice(0, index).map(request => request.actor);
+
+    }
+
+    getActors(originId) {
+
+        return (this.queues.get(originId) ?? [])
+            .map(request => request.actor);
+
+    }
+
     promote(originId, actor, {
         rank = 4,
         kind = "deadlock-release"
@@ -108,7 +132,9 @@ export class NavigationDepartureQueue {
 
     hasAt(originId, actor) {
 
-        return this.actorIndex.get(actor)?.has(originId) ?? false;
+        return this.actorIndex
+            .get(actor)
+            ?.has(originId) ?? false;
 
     }
 

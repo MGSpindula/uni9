@@ -3,71 +3,229 @@
 // reachability without actors, reservations or a running world.
 export class Pathfinder {
 
-    constructor(graph, traffic = null) {
+    constructor(graph, traffic = null, metrics = null) {
 
         this.graph = graph;
         this.traffic = traffic;
+        this.metrics = metrics;
 
     }
 
-    planClosestPath(startId, position, agent = null, {
-        maxDetourFactor = 3,
-        avoidFirstStepTo = null
-    } = {}) {
+    planClosestPath(
+        startId,
+        position,
+        agent = null,
+        {
+            maxDetourFactor = 3,
+            avoidFirstStepTo = null
+        } = {}
+    ) {
 
-        const destination = this.findClosestNode(position);
+        const destination =
+            this.findClosestNode(
+                position
+            );
 
-        if (!destination || destination.blocked) {
-            return { status: "unreachable", nodeIds: [] };
-        }
+        if (
+            !destination ||
+            destination.blocked
+        ) {
 
-        const directPlan = this.findShortestPath(startId, destination.id, {
-            agent,
-            avoidOccupied: false,
-            avoidFirstStepTo
-        });
-
-        if (!directPlan) return { status: "unreachable", nodeIds: [] };
-
-        const availablePlan = this.findShortestPath(startId, destination.id, {
-            agent,
-            avoidOccupied: true,
-            avoidFirstStepTo
-        });
-        const maximumDetour = directPlan.cost === 0
-            ? 0
-            : directPlan.cost * maxDetourFactor;
-
-        if (availablePlan && availablePlan.cost <= maximumDetour) {
             return {
-                status: "ready",
-                nodeIds: availablePlan.nodeIds,
-                cost: availablePlan.cost,
-                destinationId: destination.id
+                status:
+                    "unreachable",
+
+                nodeIds:
+                    []
             };
+
         }
 
-        const unavailable = this.findFirstUnavailableResource(
-            directPlan.nodeIds,
-            agent
-        );
+        const directPlan =
+            this.findShortestPath(
+                startId,
+                destination.id,
+                {
+                    agent,
+
+                    avoidOccupied:
+                        false,
+
+                    avoidFirstStepTo
+                }
+            );
+
+        if (!directPlan) {
+
+            return {
+                status:
+                    "unreachable",
+
+                nodeIds:
+                    []
+            };
+
+        }
+
+        const availablePlan =
+            this.findShortestPath(
+                startId,
+                destination.id,
+                {
+                    agent,
+
+                    avoidOccupied:
+                        true,
+
+                    avoidFirstStepTo
+                }
+            );
+
+        const directContainsOccupiedNode =
+            directPlan.nodeIds
+                .slice(1)
+                .some(nodeId =>
+                    this.traffic
+                        ?.isNodeOccupiedByOther(
+                            nodeId,
+                            agent
+                        )
+                );
+
+        /*
+         * Um nó ocupado nunca pode permanecer
+         * no path criado.
+         */
+        if (
+            directContainsOccupiedNode
+        ) {
+
+            if (availablePlan) {
+
+                return {
+                    status:
+                        "ready",
+
+                    nodeIds:
+                        availablePlan.nodeIds,
+
+                    cost:
+                        availablePlan.cost,
+
+                    destinationId:
+                        destination.id
+                };
+
+            }
+
+            /*
+             * Não cria uma rota parcial em direção
+             * ao nó ocupado.
+             *
+             * O controller preserva a intenção e
+             * tentará planejar novamente quando o
+             * estado do tráfego mudar.
+             */
+            return {
+                status:
+                    "unreachable",
+
+                nodeIds:
+                    [],
+
+                destinationId:
+                    destination.id,
+
+                blockedByOccupiedNode:
+                    true
+            };
+
+        }
+
+        const maximumDetour =
+            directPlan.cost === 0
+
+                ? 0
+                : directPlan.cost *
+                maxDetourFactor;
+
+        if (
+            availablePlan &&
+            availablePlan.cost <=
+            maximumDetour
+        ) {
+
+            return {
+                status:
+                    "ready",
+
+                nodeIds:
+                    availablePlan.nodeIds,
+
+                cost:
+                    availablePlan.cost,
+
+                destinationId:
+                    destination.id
+            };
+
+        }
+
+        const unavailable =
+            this.findFirstUnavailableResource(
+                directPlan.nodeIds,
+                agent
+            );
 
         if (!unavailable) {
+
             return {
-                status: "ready",
-                nodeIds: directPlan.nodeIds,
-                cost: directPlan.cost,
-                destinationId: destination.id
+                status:
+                    "ready",
+
+                nodeIds:
+                    directPlan.nodeIds,
+
+                cost:
+                    directPlan.cost,
+
+                destinationId:
+                    destination.id
             };
+
         }
 
+        /*
+         * O trecho ativo termina ANTES do recurso
+         * indisponível.
+         *
+         * A implementação anterior usava
+         * index + 2, incluindo o nó bloqueado.
+         */
+        const safeNodeIds =
+            directPlan.nodeIds.slice(
+                0,
+                unavailable.index + 1
+            );
+
         return {
-            status: "waiting",
-            nodeIds: directPlan.nodeIds.slice(0, unavailable.index + 2),
-            fullNodeIds: directPlan.nodeIds,
-            waitingFor: unavailable.resource,
-            destinationId: destination.id,
-            cost: directPlan.cost
+            status:
+                "waiting",
+
+            nodeIds:
+                safeNodeIds,
+
+            fullNodeIds:
+                directPlan.nodeIds,
+
+            waitingFor:
+                unavailable.resource,
+
+            destinationId:
+                destination.id,
+
+            cost:
+                directPlan.cost
         };
 
     }
@@ -120,29 +278,109 @@ export class Pathfinder {
 
     }
 
-    findPreferredPath(startId, destinationId, agent = null, {
-        maxDetourFactor = 3,
-        avoidFirstStepTo = null
-    } = {}) {
+    findPreferredPath(
+        startId,
+        destinationId,
+        agent = null,
+        {
+            maxDetourFactor = 3,
+            avoidFirstStepTo = null
+        } = {}
+    ) {
 
-        const direct = this.findShortestPath(startId, destinationId, {
-            agent,
-            avoidOccupied: false,
-            avoidFirstStepTo
-        });
+        const direct =
+            this.findShortestPath(
+                startId,
+                destinationId,
+                {
+                    agent,
+                    avoidOccupied:
+                        false,
 
-        if (!direct) return null;
+                    avoidFirstStepTo
+                }
+            );
 
-        const available = this.findShortestPath(startId, destinationId, {
-            agent,
-            avoidOccupied: true,
-            avoidFirstStepTo
-        });
-        const maximumDetour = direct.cost === 0
-            ? 0
-            : direct.cost * maxDetourFactor;
+        if (!direct) {
 
-        return available && available.cost <= maximumDetour
+            return null;
+
+        }
+
+        const available =
+            this.findShortestPath(
+                startId,
+                destinationId,
+                {
+                    agent,
+                    avoidOccupied:
+                        true,
+
+                    avoidFirstStepTo
+                }
+            );
+
+        /*
+         * Verifica se a rota direta contém
+         * algum nó fisicamente ocupado.
+         *
+         * O primeiro nó é ignorado, pois ele
+         * pode ser o nó atualmente ocupado pelo
+         * próprio actor.
+         */
+        const directContainsOccupiedNode =
+            direct.nodeIds
+                .slice(1)
+                .some(nodeId =>
+                    this.traffic
+                        ?.isNodeOccupiedByOther(
+                            nodeId,
+                            agent
+                        )
+                );
+
+        /*
+         * Se a rota direta atravessa um nó
+         * ocupado, ela nunca é usada como
+         * fallback.
+         *
+         * Se houver outra rota, ela será usada
+         * mesmo que seja significativamente
+         * mais longa.
+         */
+        if (
+            directContainsOccupiedNode
+        ) {
+
+            return available ??
+                null;
+
+        }
+
+        /*
+         * Se nenhum nó está fisicamente ocupado,
+         * mantém-se a política normal de desvio.
+         *
+         * Isso permite que uma reserva temporária
+         * ou uma lane cheia ainda resulte em espera
+         * quando o desvio seria desproporcional.
+         */
+        if (!available) {
+
+            return direct;
+
+        }
+
+        const maximumDetour =
+            direct.cost === 0
+
+                ? 0
+                : direct.cost *
+                maxDetourFactor;
+
+        return available.cost <=
+            maximumDetour
+
             ? available
             : direct;
 
@@ -176,84 +414,310 @@ export class Pathfinder {
 
     }
 
-    findAllShortestPaths(startId, {
-        agent = null,
-        avoidOccupied = true,
-        avoidFirstStepTo = null
-    } = {}) {
+    findAllShortestPaths(
+        startId,
+        {
+            agent = null,
+            avoidOccupied = true,
+            avoidFirstStepTo = null
+        } = {}
+    ) {
 
-        this.graph.requireNode(startId);
+        this.metrics?.increment(
+            "routesCalculated"
+        );
 
-        const distances = new Map([[startId, 0]]);
-        const parents = new Map([[startId, null]]);
-        const unvisited = new Set([startId]);
+        this.graph.requireNode(
+            startId
+        );
 
-        while (unvisited.size > 0) {
+        const distances =
+            new Map([
+                [
+                    startId,
+                    0
+                ]
+            ]);
 
-            const currentId = [...unvisited].reduce((closestId, id) =>
-                distances.get(id) < distances.get(closestId) ? id : closestId
+        const parents =
+            new Map([
+                [
+                    startId,
+                    null
+                ]
+            ]);
+
+        const unvisited =
+            new Set([
+                startId
+            ]);
+
+        while (
+            unvisited.size > 0
+        ) {
+
+            const currentId =
+                [...unvisited]
+                    .reduce(
+                        (
+                            closestId,
+                            id
+                        ) =>
+                            distances.get(id) <
+                                distances.get(
+                                    closestId
+                                )
+
+                                ? id
+                                : closestId
+                    );
+
+            unvisited.delete(
+                currentId
             );
 
-            unvisited.delete(currentId);
+            const current =
+                this.graph.requireNode(
+                    currentId
+                );
 
-            const current = this.graph.requireNode(currentId);
+            for (
+                const [
+                    neighborId,
+                    connection
+                ] of current.connections
+            ) {
 
-            for (const [neighborId, connection] of current.connections) {
+                const neighbor =
+                    this.graph.requireNode(
+                        neighborId
+                    );
 
-                const neighbor = this.graph.requireNode(neighborId);
+                if (
+                    currentId === startId &&
+                    neighborId ===
+                    avoidFirstStepTo
+                ) {
 
-                if (currentId === startId &&
-                    neighborId === avoidFirstStepTo) continue;
-                if (connection.blocked || neighbor.blocked) continue;
-                if (!this.canAgentTraverseConnection(connection, agent)) continue;
+                    continue;
 
-                if (avoidOccupied && this.traffic && (
-                    !this.traffic.isConnectionAvailable(
-                        currentId,
-                        neighborId,
+                }
+
+                if (
+                    connection.blocked ||
+                    neighbor.blocked
+                ) {
+
+                    continue;
+
+                }
+
+                if (
+                    !this.canAgentTraverseConnection(
+                        connection,
                         agent
-                    ) ||
-                    !this.traffic.isNodeAvailable(neighbor.id, agent)
-                )) continue;
+                    )
+                ) {
 
-                const cost = distances.get(currentId) +
-                    current.position.distanceTo(neighbor.position);
+                    continue;
 
-                if (cost >= (distances.get(neighborId) ?? Infinity)) continue;
+                }
 
-                distances.set(neighborId, cost);
-                parents.set(neighborId, currentId);
-                unvisited.add(neighborId);
+                if (
+                    avoidOccupied &&
+                    this.traffic
+                ) {
+
+                    /*
+                     * Lane cheia retira esta
+                     * conexão da rota disponível.
+                     */
+                    if (
+                        !this.traffic
+                            .isConnectionAvailable(
+                                currentId,
+                                neighborId,
+                                agent
+                            )
+                    ) {
+
+                        continue;
+
+                    }
+
+                    /*
+                     * Uma reserva de nó não
+                     * remove o nó do traçado.
+                     *
+                     * Apenas bloqueios
+                     * topológicos ou físicos
+                     * excepcionais fazem isso.
+                     */
+                    if (
+                        !this.traffic
+                            .isNodeTraversableForPlanning(
+                                neighbor.id,
+                                agent
+                            )
+                    ) {
+
+                        continue;
+
+                    }
+
+                }
+
+                const cost =
+                    distances.get(
+                        currentId
+                    ) +
+                    current.position
+                        .distanceTo(
+                            neighbor.position
+                        );
+
+                if (
+                    cost >=
+                    (
+                        distances.get(
+                            neighborId
+                        ) ??
+                        Infinity
+                    )
+                ) {
+
+                    continue;
+
+                }
+
+                distances.set(
+                    neighborId,
+                    cost
+                );
+
+                parents.set(
+                    neighborId,
+                    currentId
+                );
+
+                unvisited.add(
+                    neighborId
+                );
 
             }
 
         }
 
-        return { distances, parents };
+        return {
+            distances,
+            parents
+        };
 
     }
 
-    findFirstUnavailableResource(nodeIds, agent) {
+    findFirstUnavailableResource(
+        nodeIds,
+        agent
+    ) {
 
-        if (!this.traffic) return null;
+        if (!this.traffic) {
 
-        for (let index = 0; index < nodeIds.length - 1; index++) {
+            return null;
 
-            const fromId = nodeIds[index];
-            const toId = nodeIds[index + 1];
+        }
 
-            if (!this.traffic.isConnectionAvailable(fromId, toId, agent)) {
+        for (
+            let index = 0;
+            index <
+            nodeIds.length - 1;
+            index++
+        ) {
+
+            const fromId =
+                nodeIds[index];
+
+            const toId =
+                nodeIds[index + 1];
+
+            if (
+                !this.traffic
+                    .isConnectionAvailable(
+                        fromId,
+                        toId,
+                        agent
+                    )
+            ) {
+
                 return {
                     index,
-                    resource: { type: "connection", fromId, toId }
+
+                    resource: {
+                        type:
+                            "connection",
+
+                        fromId,
+                        toId
+                    }
                 };
+
             }
 
-            if (!this.traffic.isNodeAvailable(toId, agent)) {
+            /*
+             * Aqui usamos isNodeAvailable().
+             *
+             * Uma reserva não impede planejar,
+             * mas impede executar a entrada
+             * naquele momento.
+             */
+            if (
+                this.traffic
+                    .isNodeOccupiedByOther(
+                        toId,
+                        agent
+                    )
+            ) {
+
                 return {
                     index,
-                    resource: { type: "node", id: toId }
+
+                    resource: {
+                        type:
+                            "occupied-node",
+
+                        id:
+                            toId
+                    }
                 };
+
+            }
+
+            /*
+             * Reservas continuam sendo recursos
+             * temporariamente indisponíveis.
+             *
+             * Elas não removem o nó da topologia, mas
+             * impedem que o ator prossiga até a entrada.
+             */
+            if (
+                !this.traffic
+                    .isNodeAvailable(
+                        toId,
+                        agent
+                    )
+            ) {
+
+                return {
+                    index,
+
+                    resource: {
+                        type:
+                            "node",
+
+                        id:
+                            toId
+                    }
+                };
+
             }
 
         }

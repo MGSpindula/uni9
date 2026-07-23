@@ -3,6 +3,8 @@ export class CharacterDebugPanel {
     constructor({ getRows, refreshInterval = 200 }) {
 
         this.getRows = getRows;
+        this.copyFeedback = "";
+        this.copyFeedbackUntil = 0;
         this.element = document.createElement("aside");
         this.element.className = "character-debug";
         document.body.appendChild(this.element);
@@ -20,9 +22,17 @@ export class CharacterDebugPanel {
 
         const header = document.createElement("header");
         const title = document.createElement("strong");
+        const controls = document.createElement("div");
+        const copy = document.createElement("button");
         const toggle = document.createElement("button");
 
         title.textContent = "Character Debug";
+        copy.className = "character-debug-copy";
+        copy.textContent = performance.now() < this.copyFeedbackUntil
+            ? this.copyFeedback
+            : "JSON";
+        copy.title = "Copiar o debug instantaneo de todos os atores como JSON";
+        copy.addEventListener("click", () => this.copyJsonSnapshot());
         toggle.textContent = collapsed ? "+" : "−";
         toggle.addEventListener("click", () => {
 
@@ -30,7 +40,9 @@ export class CharacterDebugPanel {
             this.render();
 
         });
-        header.append(title, toggle);
+        controls.className = "character-debug-controls";
+        controls.append(copy, toggle);
+        header.append(title, controls);
         this.element.append(header);
 
         if (collapsed) return;
@@ -71,6 +83,71 @@ export class CharacterDebugPanel {
             this.element.append(card);
 
         }
+
+    }
+
+    createJsonSnapshot() {
+
+        return JSON.stringify({
+            capturedAt: new Date().toISOString(),
+            characters: this.getRows()
+        }, null, 2);
+
+    }
+
+    async copyJsonSnapshot() {
+
+        const json = this.createJsonSnapshot();
+
+        try {
+
+            if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(json);
+            } else {
+                this.copyTextFallback(json);
+            }
+
+            this.showCopyFeedback("Copied");
+
+        } catch (error) {
+
+            try {
+                this.copyTextFallback(json);
+                this.showCopyFeedback("Copied");
+            } catch (fallbackError) {
+                console.error(
+                    "[CharacterDebug] Could not copy the JSON snapshot.",
+                    fallbackError ?? error
+                );
+                this.showCopyFeedback("Error");
+            }
+
+        }
+
+    }
+
+    copyTextFallback(text) {
+
+        const field = document.createElement("textarea");
+        field.value = text;
+        field.setAttribute("readonly", "");
+        field.style.position = "fixed";
+        field.style.opacity = "0";
+        document.body.appendChild(field);
+        field.select();
+
+        const copied = document.execCommand("copy");
+        field.remove();
+
+        if (!copied) throw new Error("document.execCommand(copy) failed.");
+
+    }
+
+    showCopyFeedback(message) {
+
+        this.copyFeedback = message;
+        this.copyFeedbackUntil = performance.now() + 1200;
+        this.render();
 
     }
 

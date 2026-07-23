@@ -43,10 +43,10 @@ export class RoutePlanner {
         const traversal = context.actor.navigation.getTraversalState();
         let originIds = [];
 
-        if (context.interactionPoint) {
+        if (context.traversal.interactionPoint) {
 
             const currentAccess = this.connector.connect(
-                context.interactionPoint.via ?? context.interactionPoint
+                context.traversal.interactionPoint.via ?? context.traversal.interactionPoint
             );
 
             originIds = currentAccess?.nodeIds ?? [];
@@ -150,7 +150,8 @@ export class RoutePlanner {
 
     getOrigins(context) {
 
-        const { actor, interactionPoint } = context;
+        const { actor } = context;
+        const interactionPoint = context.traversal.interactionPoint;
 
         if (interactionPoint) {
 
@@ -160,10 +161,19 @@ export class RoutePlanner {
             if (!connection) return [];
 
             return connection.nodeIds
-                // Occupancy is temporary and must not force an interaction
-                // exit through the opposite endpoint. Planning keeps the
-                // intended endpoint and traffic waits at approach if needed.
-                .filter(id => !this.graph.isNodeBlocked(id))
+                .filter(id =>
+                    !this.graph.isNodeBlocked(
+                        id
+                    )
+                )
+                .filter(id =>
+                    !this.navigation
+                        .trafficState
+                        .isNodeOccupiedByOther(
+                            id,
+                            actor
+                        )
+                )
                 .map(id => ({
                     id,
                     accessCost: Math.sqrt(
@@ -211,12 +221,12 @@ export class RoutePlanner {
             skippedOrigin: false
         };
 
-        if (!context.interactionPoint ||
+        if (!context.traversal.interactionPoint ||
             nodeIds.length < 2 ||
             nodeIds[0] !== originId) return unchanged;
 
-        const accessPoint = context.interactionPoint.via ??
-            context.interactionPoint;
+        const accessPoint = context.traversal.interactionPoint.via ??
+            context.traversal.interactionPoint;
         const access = this.connector.connect(accessPoint, { silent: true });
         const segmentNodeIds = access?.segmentNodeIds ?? access?.nodeIds;
         const nextNodeId = nodeIds[1];

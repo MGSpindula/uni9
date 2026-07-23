@@ -25,7 +25,7 @@ export class Cube extends Entity {
 
         );
 
-        this.object3D.position.set(-3, 0.5, 0);
+        this.object3D.position.set(4, 0.5, 0);
 
         this.object3D.castShadow = true;
 
@@ -114,6 +114,14 @@ export class Cube extends Entity {
     // Lifecycle
     // -----------------------------
 
+    requiresContinuousRender() {
+
+        // rotationSpeed is a procedural animation applied directly in update();
+        // it therefore needs to keep requesting frames even without a Tween.
+        return super.requiresContinuousRender() ||
+            Math.abs(this.rotationSpeed) > Number.EPSILON;
+
+    }
 
     update(delta) {
 

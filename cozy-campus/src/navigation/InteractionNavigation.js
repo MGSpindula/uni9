@@ -10,17 +10,18 @@ export class InteractionNavigation {
         this.owner = owner;
         this.graph = owner.graph;
         this.connector = owner.connector;
+        this.interactionTraffic = owner.interactionTraffic;
 
     }
 
     beginRoute(context, point, onArrive) {
 
-        context.pendingPosition = null;
-        context.destinationId = null;
-        context.pendingInteraction = { point, onArrive };
-        context.retryElapsed = 0;
-        context.blockedElapsed = null;
-        context.recoveryPending = false;
+        context.intent.position = null;
+        context.intent.destinationId = null;
+        context.intent.interaction = { point, onArrive };
+        context.wait.retryElapsed = 0;
+        context.wait.blockedElapsed = null;
+        context.recovery.pending = false;
     }
 
     createDirectConnectionRoute(actor, point) {
@@ -90,7 +91,7 @@ export class InteractionNavigation {
 
         if (waypoint.leavingGraph) {
 
-            context.traversingInteractionCurve = false;
+            context.traversal.interactionCurve = false;
             this.owner.routeGeometry.clearActiveLaneCurve(actor);
 
             const traversal = actor.navigation.getTraversalState();
@@ -135,28 +136,43 @@ export class InteractionNavigation {
 
         if (waypoint.leavingInteraction) {
 
-            context.traversingInteractionCurve = false;
+            context.traversal.interactionCurve = false;
 
             if (waypoint.graphEntryNodeId) {
 
                 const nodeId = waypoint.graphEntryNodeId;
 
                 // Ambient points connect directly to one graph node. They do
-                // not have a lane callback that would normally set this
-                // ownership, so entering the portal must do it explicitly.
+                // not have a lane callback, but their physical arrival still
+                // uses the same queue/handshake as every connection endpoint.
                 this.owner.traffic.claimPhysicalArrival(nodeId, actor);
 
-                if (!this.owner.trafficState.isNodeAvailable(nodeId, actor) ||
-                    !this.owner.trafficState.occupyNode(nodeId, actor)) {
+                const crossing = actor.navigation.getNextWaypoint() !== null;
+
+                if (!this.owner.traffic.hasArrivalGrant(nodeId, actor)) {
+
+                    this.owner.traffic.setWaitReason(
+                        actor,
+                        nodeId,
+                        WaitReason.ENDPOINT_WAIT
+                    );
+                    return "waiting";
+
+                }
+
+                if (!this.owner.traffic.canCrossNode(nodeId, actor) ||
+                    !this.owner.trafficState.occupyNode(nodeId, actor, {
+                        crossing
+                    })) {
 
                     this.owner.traffic.setWaitReason(
                         actor,
                         nodeId,
                         WaitReason.NODE_OCCUPIED
                     );
-                    // Keep this waypoint current until the node is truly
-                    // available; CharacterNavigationSystem forwards this
-                    // explicit result to Character as a rejected arrival.
+                    // Keep this waypoint current until the queue grants the
+                    // physical crossing. The InteractionPoint remains owned
+                    // until completeInteractionExit() commits this handoff.
                     return "waiting";
 
                 }
@@ -167,10 +183,15 @@ export class InteractionNavigation {
 
             }
 
-            this.owner.traffic.completeInteractionDeparture(
-                actor,
-                waypoint.connectionEntry?.originKey
-            );
+            this.owner.traffic
+                .completeInteractionDeparture(
+                    actor,
+
+                    waypoint.connectionEntry
+                        ?.originKey ??
+                    waypoint.nodeEntry
+                        ?.originKey
+                );
             this.owner.completeInteractionExit(context);
             this.owner.refresh();
             return true;
@@ -179,14 +200,34 @@ export class InteractionNavigation {
 
         if (!waypoint.interactionPoint) return false;
 
-        if (waypoint.interactionExitPoint) {
+        if (
+            waypoint.interactionExitPoint
+        ) {
 
-            // Reaching approach during an exit is not a new interaction. The
-            // actor now occupies this physical staging point, but continues to
-            // own action/seat until leavingInteraction is really crossed.
-            this.connector.occupyPoint(waypoint.interactionPoint, actor);
-            context.interactionExitPoint = waypoint.interactionPoint;
+            /*
+             * O ApproachPoint já foi reservado durante
+             * beginInteractionExit(). occupyPoint()
+             * converte a reserva em ocupação.
+             */
+            const occupied =
+                this.interactionTraffic
+                    .occupyPoint(
+                        waypoint.interactionPoint,
+                        actor
+                    );
+
+            if (!occupied) {
+
+                return "waiting";
+
+            }
+
+            context.traversal
+                .interactionExitPoint =
+                waypoint.interactionPoint;
+
             this.owner.refresh();
+
             return true;
 
         }
@@ -224,40 +265,40 @@ export class InteractionNavigation {
 
         }
 
-        if (context.interactionPoint !== waypoint.interactionPoint) {
+        if (context.traversal.interactionPoint !== waypoint.interactionPoint) {
 
             this.owner.leaveInteractionPoint(context);
-            this.connector.occupyPoint(waypoint.interactionPoint, actor);
-            context.interactionPoint = waypoint.interactionPoint;
+            this.interactionTraffic.occupyPoint(waypoint.interactionPoint, actor);
+            context.traversal.interactionPoint = waypoint.interactionPoint;
 
         }
 
-        const interaction = context.pendingInteraction;
+        const interaction = context.intent.interaction;
 
-        if (!context.preparingInteraction &&
+        if (!context.interaction.entering &&
             interaction?.point.via === waypoint.interactionPoint) {
 
-            context.preparingInteraction = true;
+            context.interaction.entering = true;
             actor.pause();
-                interaction.point.entity?.prepareInteraction(
-                    actor,
-                    waypoint.interactionPoint,
-                    interaction.point,
-                    () => {
+            interaction.point.entity?.prepareInteraction(
+                actor,
+                waypoint.interactionPoint,
+                interaction.point,
+                () => {
 
-                        context.preparingInteraction = false;
-                        // The authored entry animation may move object3D from
-                        // approach to action. Its root transform is now the
-                        // source of truth, so Locomotion must project that
-                        // position onto the action segment instead of resuming
-                        // with the old approach arc distance and walking back.
-                        actor.locomotion.resetCurve();
-                        context.recoveryElapsed = 0;
-                        context.recoveryPosition.copy(actor.object3D.position);
-                        actor.resume();
+                    context.interaction.entering = false;
+                    // The authored entry animation may move object3D from
+                    // approach to action. Its root transform is now the
+                    // source of truth, so Locomotion must project that
+                    // position onto the action segment instead of resuming
+                    // with the old approach arc distance and walking back.
+                    actor.locomotion.resetCurve();
+                    context.recovery.elapsed = 0;
+                    context.recovery.position.copy(actor.object3D.position);
+                    actor.resume();
 
-                    }
-                );
+                }
+            );
 
         }
 
@@ -269,7 +310,7 @@ export class InteractionNavigation {
             const entered =
                 interaction.onArrive?.();
 
-            context.pendingInteraction =
+            context.intent.interaction =
                 null;
 
             if (entered === false) {
@@ -287,7 +328,7 @@ export class InteractionNavigation {
 
             }
 
-            context.activeInteraction = {
+            context.interaction.active = {
                 target:
                     waypoint
                         .interactionPoint
@@ -302,7 +343,7 @@ export class InteractionNavigation {
                 EntityState.IDLE
             );
 
-            if (context.deferredCommand) {
+            if (context.intent.deferredCommand) {
 
                 // A command issued during the entry animation begins only
                 // after the original action is fully established. Replacing

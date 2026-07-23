@@ -21,7 +21,7 @@ export class Sphere extends Entity {
 
         );
 
-        this.object3D.position.set(2, 0.6, 0);
+        this.object3D.position.set(-8.5, 0.6, -2);
 
         this.object3D.castShadow = true;
 

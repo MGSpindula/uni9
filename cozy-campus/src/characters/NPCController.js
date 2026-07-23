@@ -88,10 +88,30 @@ export class NPCController {
 
             this.elapsed = 0;
 
-            this.tryChooseActivity({
+            const accepted = this.tryChooseActivity({
                 excludePoint:
                     activePoint
             });
+
+            if (!accepted) {
+
+                const leaving = this.navigationSystem
+                    .leaveInteraction?.(this.npc) ?? false;
+
+                this.state = leaving
+                    ? "leaving interaction"
+                    : "waiting to leave interaction";
+
+                // A temporarily unavailable exit is retried promptly; the
+                // full interaction duration applies only to the activity.
+                if (!leaving) {
+                    this.elapsed = Math.max(
+                        0,
+                        this.interactionDuration - this.retryDuration
+                    );
+                }
+
+            }
 
             return;
 

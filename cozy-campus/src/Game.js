@@ -6,18 +6,30 @@ import { CharacterDebugPanel } from "./debug/CharacterDebugPanel";
 import { PerformanceDebugPanel } from "./debug/PerformanceDebugPanel";
 
 export class Game {
-    constructor(renderer, { level } = {}) {
+    constructor(renderer, {
+        level,
+        debugMode = false,
+        simplePerformanceDebug = false
+    } = {}) {
         if (!level) {
             throw new Error("Game requires a Level instance.");
         }
 
-        this.renderer = renderer; this.renderRequested = true;
+        this.renderer = renderer;
+        this.renderRequested = true;
+        this.debugMode = Boolean(debugMode);
+        this.simplePerformanceDebug = Boolean(simplePerformanceDebug);
         this.renderPipeline = new RenderPipeline(renderer, () => this.requestRender());
-        this.services = new GameServices({ camera: this.renderPipeline.camera, element: renderer.renderer.domElement, onChanged: () => this.requestRender() });
+        this.services = new GameServices({
+            camera: this.renderPipeline.camera,
+            element: renderer.renderer.domElement,
+            onChanged: () => this.requestRender(),
+            navigationHelperVisible: this.debugMode
+        });
         this.services.selection.addEffect(this.renderPipeline.outline);
         this.loop = new GameLoop(this);
         this.loadLevel(level);
-        if (import.meta.env.DEV) this.createDebug();
+        this.applyDebugMode();
     }
     loadLevel(level) {
         if (!level || typeof level.load !== "function" || typeof level.unload !== "function") {
@@ -32,13 +44,16 @@ export class Game {
         // anchors all represent the completely loaded level.
         this.services.navigationHelper?.refresh();
         this.playerController = new PlayerController({ player: this.player, selection: this.services.selection, interactionSystem: this.services.interactions, element: this.renderer.renderer.domElement });
+        if (this.debugMode) this.applyDebugCamera();
         this.requestRender(); return level;
     }
-    createDebug() {
-        this.performanceDebugPanel = new PerformanceDebugPanel();
+    createCharacterDebug() {
+        if (this.characterDebugPanel) return;
+
         this.characterDebugPanel = new CharacterDebugPanel({
             getRows: () => this.world.characters.map(actor => {
                 const visibility = this.loop.getActorVisibility(actor);
+                const decision = actor.lastBehaviorDecision;
 
                 return {
                     ...this.services.characterNavigation.getActorDebugState(actor),
@@ -48,13 +63,77 @@ export class Game {
                     view: visibility.visible
                         ? `ONSCREEN (${visibility.distance.toFixed(1)}m)`
                         : `OFFSCREEN (${visibility.distance.toFixed(1)}m)`,
+                    choice: decision
+                        ? `${decision.interactionId} ` +
+                            `(score ${decision.score.toFixed(2)}, ` +
+                            `path ${decision.pathCost.toFixed(2)}, ` +
+                            `traffic ${decision.congestion.toFixed(2)})`
+                        : null,
                     offscreen: !visibility.visible
                 };
             })
         });
     }
+    createPerformanceDebug({ simplified = false } = {}) {
+        if (this.performanceDebugPanel?.simplified === simplified) return;
+
+        this.performanceDebugPanel?.dispose();
+        this.performanceDebugPanel = new PerformanceDebugPanel({ simplified });
+    }
+    disposeCharacterDebug() {
+        this.characterDebugPanel?.dispose();
+        this.characterDebugPanel = null;
+    }
+    disposePerformanceDebug() {
+        this.performanceDebugPanel?.dispose();
+        this.performanceDebugPanel = null;
+    }
+    disposeDebug() {
+        this.disposeCharacterDebug();
+        this.disposePerformanceDebug();
+    }
+    applyDebugCamera() {
+        const positions = [...(this.services.navigationGraph?.nodes.values() ?? [])]
+            .map(node => node.position);
+        this.renderPipeline.setBirdEyeView(positions);
+    }
+    applyDebugMode() {
+        this.setNavigationHelperVisible(this.debugMode);
+
+        if (this.debugMode) {
+            this.createCharacterDebug();
+            this.applyDebugCamera();
+        } else {
+            this.disposeCharacterDebug();
+            this.renderPipeline.setDefaultCameraView();
+        }
+
+        if (this.debugMode || this.simplePerformanceDebug) {
+            this.createPerformanceDebug({
+                simplified: this.simplePerformanceDebug
+            });
+        } else {
+            this.disposePerformanceDebug();
+        }
+    }
+    setDebugMode(value) {
+        this.debugMode = Boolean(value);
+        // Keep future level loads consistent with the current runtime mode.
+        this.services.navigationHelperVisible = this.debugMode;
+        this.applyDebugMode();
+        this.requestRender();
+    }
+    setSimplePerformanceDebug(value) {
+        this.simplePerformanceDebug = Boolean(value);
+        this.applyDebugMode();
+        this.requestRender();
+    }
     requestRender() { this.renderRequested = true; }
-    hasContinuousVisualActivity() { return this.world?.entities.some(e => e.tweens?.length) || this.world?.characters.some(c => c.locomotion.getMotionState().moving || c.tweens?.length || c.animation?.mixer); }
+    hasContinuousVisualActivity() {
+        return this.world?.entities.some(entity =>
+            entity.isActive() && entity.requiresContinuousRender?.()
+        ) ?? false;
+    }
     start() { this.loop.start(); }
     update(delta) { this.loop.update(delta); }
     setQualityPreset(name) { this.renderPipeline.setQualityPreset(name); }
@@ -65,7 +144,7 @@ export class Game {
     disconnectNavigationNodes(a, b) { this.services.navigationGraph.disconnect(a, b); this.navigationTopologyChanged(); }
     navigationTopologyChanged() { this.services.navigationHelper?.refresh(); this.services.characterNavigation.topologyChanged(); }
     dispose() {
-        this.loop.stop(); this.playerController?.dispose(); this.characterDebugPanel?.dispose(); this.performanceDebugPanel?.dispose();
+        this.loop.stop(); this.playerController?.dispose(); this.disposeDebug();
         this.level?.unload(this); this.services.dispose(); this.renderPipeline.dispose();
     }
     get scene() { return this.renderPipeline.scene; }

@@ -2,14 +2,19 @@ import "./style.css";
 
 import { Renderer } from "./Renderer";
 import { Game } from "./Game";
+import {
+    DEBUG_MODE,
+    SIMPLE_PERFORMANCE_DEBUG
+} from "./GameConfig";
 import { CozyCampusLevel } from "./levels/CozyCampusLevel";
 
 const renderer = new Renderer();
 
-const game = new Game(renderer, { level: new CozyCampusLevel() });
-
-// O helper pode ser habilitado durante o desenvolvimento.
-game.setNavigationHelperVisible(true);
+const game = new Game(renderer, {
+    level: new CozyCampusLevel(),
+    debugMode: DEBUG_MODE,
+    simplePerformanceDebug: SIMPLE_PERFORMANCE_DEBUG
+});
 
 game.start();
 

@@ -22,8 +22,8 @@ export class Chair extends Entity {
         this.legsGroup = new THREE.Group();
 
         this.object3D.add(this.legsGroup);
-        this.object3D.position.set(-0.5, 0, 2.8);
-        this.object3D.rotateOnAxis(new THREE.Vector3(0, 1, 0), -Math.PI / 4);
+        this.object3D.position.set(4, 0, 2);
+        this.object3D.rotateOnAxis(new THREE.Vector3(0, 1, 0), -Math.PI / 2.7);
 
         this.createSeat();
         this.createBack();
