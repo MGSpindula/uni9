@@ -1,28 +1,20 @@
-import * as THREE from "three";
-import { Character } from "./Character";
+import { Character } from "./Character.js"
 
 export class Player extends Character {
+    constructor(options = {}) {
+        const {
+            name = "Player",
+            color = 0x4f8edb,
+            ...characterOptions
+        } = options
 
-    constructor() {
+        super({
+            ...characterOptions,
+            name,
+            color,
+            kind: "player",
+        })
 
-        super("Player");
-
-        this.navigationPriority = 100;
-        // Player commands have absolute traffic precedence. This does not
-        // bypass authored hard blocks; it promotes queues and asks ambient
-        // actors to leave conflicting nodes/interactions/lanes.
-        this.navigationPassagePolicy = "absolute";
-
-        const visual = new THREE.Mesh(
-            new THREE.CylinderGeometry(0.45, 0.45, 1.7, 16),
-            new THREE.MeshStandardMaterial({ color: 0x4d8edb })
-        );
-
-        visual.castShadow = true;
-        this.setVisual(visual, { floorOffset: 0.85 });
-        this.addForwardHelper();
-        this.object3D.position.set(0, 0, -1);
-
+        this.isPlayer = true
     }
-
 }

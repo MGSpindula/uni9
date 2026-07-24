@@ -1,293 +1,176 @@
+const EASING = Object.freeze({
+    linear: (value) => value,
+
+    easeInQuad: (value) => value * value,
+
+    easeOutQuad: (value) => 1 - (1 - value) * (1 - value),
+
+    easeInOutQuad: (value) =>
+        value < 0.5 ? 2 * value * value : 1 - Math.pow(-2 * value + 2, 2) / 2,
+
+    easeOutCubic: (value) => 1 - Math.pow(1 - value, 3),
+
+    easeInOutCubic: (value) =>
+        value < 0.5
+            ? 4 * value * value * value
+            : 1 - Math.pow(-2 * value + 2, 3) / 2,
+})
+
 export class Tween {
+    static Easing = EASING
 
     constructor({
+        duration = 0,
+        delay = 0,
+        easing = EASING.linear,
+        onUpdate = null,
+        onComplete = null,
+        onCancel = null,
+    } = {}) {
+        if (!Number.isFinite(duration) || duration < 0) {
+            throw new RangeError(
+                "Tween duration must be a finite number greater than or equal to zero.",
+            )
+        }
 
-        object,
-        property,
-        from,
-        to,
-        duration = 1,
-        easing = Tween.linear,
-        onComplete = null
+        if (!Number.isFinite(delay) || delay < 0) {
+            throw new RangeError(
+                "Tween delay must be a finite number greater than or equal to zero.",
+            )
+        }
 
-    }) {
+        if (typeof easing !== "function") {
+            throw new TypeError("Tween easing must be a function.")
+        }
 
-        this.object = object;
-        this.property = property;
+        this.duration = duration
+        this.delay = delay
+        this.easing = easing
 
-        this.from = from;
-        this.to = to;
+        this.onUpdate = onUpdate
+        this.onComplete = onComplete
+        this.onCancel = onCancel
 
-        this.duration = duration;
-        this.elapsed = 0;
+        this.elapsed = 0
+        this.progress = 0
+        this.value = 0
 
-        this.easing = easing;
-        this.onComplete = onComplete;
-
-        this.finished = false;
-
-        this.object[this.property] = this.from;
-
+        this.started = false
+        this.completed = false
+        this.cancelled = false
     }
-
-    // -----------------------------
-    // Lifecycle
-    // -----------------------------
 
     update(delta) {
-
-        if (this.finished) {
-
-            return;
-
+        if (!this.isActive()) {
+            return false
         }
 
-        this.elapsed += delta;
+        const safeDelta = Number.isFinite(delta) && delta > 0 ? delta : 0
 
-        const t = Math.min(
-            this.elapsed / this.duration,
-            1
-        );
+        this.elapsed += safeDelta
 
-        const value =
-            this.from +
-            (this.to - this.from) *
-            this.easing(t);
-
-        this.object[this.property] = value;
-
-        if (t === 1) {
-
-            this.finished = true;
-
-            if (this.onComplete) {
-
-                this.onComplete();
-
-            }
-
+        if (this.elapsed < this.delay) {
+            return true
         }
 
+        this.started = true
+
+        const tweenElapsed = this.elapsed - this.delay
+
+        this.progress =
+            this.duration === 0 ? 1 : Math.min(tweenElapsed / this.duration, 1)
+
+        this.value = this.easing(this.progress)
+
+        this.onUpdate?.(this.value, this.progress, this)
+
+        if (this.progress >= 1) {
+            this.completed = true
+
+            this.onComplete?.(this)
+        }
+
+        return this.isActive()
     }
 
-    static linear(t) {
+    cancel({ complete = false } = {}) {
+        if (!this.isActive()) {
+            return false
+        }
 
-        return t;
+        if (complete) {
+            this.elapsed = this.delay + this.duration
 
+            this.progress = 1
+            this.value = 1
+
+            this.onUpdate?.(1, 1, this)
+
+            this.completed = true
+
+            this.onComplete?.(this)
+
+            return true
+        }
+
+        this.cancelled = true
+
+        this.onCancel?.(this)
+
+        return true
     }
 
-
-    // -----------------------------
-    // Easing functions: Quadratic
-    // -----------------------------
-
-    static easeInQuad(t) {
-
-        return t * t;
-
+    isActive() {
+        return !this.completed && !this.cancelled
     }
 
-    static easeOutQuad(t) {
+    dispose() {
+        if (this.isActive()) {
+            this.cancel()
+        }
 
-        return 1 - (1 - t) * (1 - t);
-
+        this.onUpdate = null
+        this.onComplete = null
+        this.onCancel = null
     }
 
-    static easeInOutQuad(t) {
+    static number({ from = 0, to = 1, onUpdate, ...options } = {}) {
+        if (typeof onUpdate !== "function") {
+            throw new TypeError("Tween.number requires an onUpdate function.")
+        }
 
-        return t < 0.5
-            ? 2 * t * t
-            : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        const difference = to - from
 
+        return new Tween({
+            ...options,
+
+            onUpdate: (value, progress, tween) => {
+                onUpdate(
+                    from + difference * value,
+
+                    progress,
+                    tween,
+                )
+            },
+        })
     }
-
-
-    // -----------------------------
-    // Easing functions: Cubic
-    // -----------------------------
-
-    static easeInCubic(t) {
-
-        return t * t * t;
-
-    }
-
-    static easeOutCubic(t) {
-
-        return 1 - Math.pow(1 - t, 3);
-
-    }
-
-    static easeInOutCubic(t) {
-
-        return t < 0.5
-            ? 4 * t * t * t
-            : 1 - Math.pow(-2 * t + 2, 3) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Quartic
-    // -----------------------------
-
-    static easeInQuart(t) {
-
-        return t * t * t * t;
-
-    }
-
-    static easeOutQuart(t) {
-
-        return 1 - Math.pow(1 - t, 4);
-
-    }
-
-    static easeInOutQuart(t) {
-
-        return t < 0.5
-            ? 8 * Math.pow(t, 4)
-            : 1 - Math.pow(-2 * t + 2, 4) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Quintic
-    // -----------------------------
-
-    static easeInQuint(t) {
-
-        return t * t * t * t * t;
-
-    }
-
-    static easeOutQuint(t) {
-
-        return 1 - Math.pow(1 - t, 5);
-
-    }
-
-    static easeInOutQuint(t) {
-
-        return t < 0.5
-            ? 16 * Math.pow(t, 5)
-            : 1 - Math.pow(-2 * t + 2, 5) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Sine
-    // -----------------------------
-
-    static easeInSine(t) {
-
-        return 1 - Math.cos((t * Math.PI) / 2);
-
-    }
-
-    static easeOutSine(t) {
-
-        return Math.sin((t * Math.PI) / 2);
-
-    }
-
-    static easeInOutSine(t) {
-
-        return -(Math.cos(Math.PI * t) - 1) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Exponential
-    // -----------------------------
-
-    static easeInExpo(t) {
-
-        return t === 0
-            ? 0
-            : Math.pow(2, 10 * t - 10);
-
-    }
-
-    static easeOutExpo(t) {
-
-        return t === 1
-            ? 1
-            : 1 - Math.pow(2, -10 * t);
-
-    }
-
-    static easeInOutExpo(t) {
-
-        if (t === 0) return 0;
-        if (t === 1) return 1;
-
-        return t < 0.5
-            ? Math.pow(2, 20 * t - 10) / 2
-            : (2 - Math.pow(2, -20 * t + 10)) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Circular
-    // -----------------------------
-
-    static easeInCirc(t) {
-
-        return 1 - Math.sqrt(1 - t * t);
-
-    }
-
-    static easeOutCirc(t) {
-
-        return Math.sqrt(1 - Math.pow(t - 1, 2));
-
-    }
-
-    static easeInOutCirc(t) {
-
-        return t < 0.5
-            ? (1 - Math.sqrt(1 - Math.pow(2 * t, 2))) / 2
-            : (Math.sqrt(1 - Math.pow(-2 * t + 2, 2)) + 1) / 2;
-
-    }
-
-
-    // -----------------------------
-    // Easing functions: Back (overshoots)
-    // -----------------------------
-
-    static easeInBack(t) {
-
-        const c1 = 1.70158;
-        const c3 = c1 + 1;
-
-        return c3 * t * t * t - c1 * t * t;
-
-    }
-
-    static easeOutBack(t) {
-
-        const c1 = 1.70158;
-        const c3 = c1 + 1;
-
-        return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
-
-    }
-
-    static easeInOutBack(t) {
-
-        const c1 = 1.70158;
-        const c2 = c1 * 1.525;
-
-        return t < 0.5
-            ? (Math.pow(2 * t, 2) * ((c2 + 1) * 2 * t - c2)) / 2
-            : (Math.pow(2 * t - 2, 2) * ((c2 + 1) * (2 * t - 2) + c2) + 2) / 2;
-
-    }
-
 }
+
+// Exemplo futuro:
+
+// entity.addTween(
+//     Tween.number({
+//         from: 1,
+//         to: 1.2,
+//         duration: 0.25,
+//         easing:
+//             Tween.Easing
+//                 .easeOutCubic,
+
+//         onUpdate: value => {
+//             entity.object3D
+//                 .scale
+//                 .setScalar(value);
+//         }
+//     })
+// );

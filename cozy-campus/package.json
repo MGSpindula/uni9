@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
+    "navcat": "^0.4.1",
     "three": "^0.185.1"
   }
 }

@@ -1,0 +1,114 @@
+html,
+body {
+
+    margin: 0;
+
+    overflow: hidden;
+
+}
+
+canvas {
+
+    display: block;
+
+}
+
+.performance-debug {
+    position: fixed;
+    right: 12px;
+    top: 12px;
+    z-index: 1000;
+    width: 210px;
+    padding: 10px;
+    color: #edf4ff;
+    background: rgba(15, 22, 34, 0.9);
+    border: 1px solid #49617e;
+    border-radius: 8px;
+    font: 12px/1.4 monospace;
+    pointer-events: none;
+}
+
+.performance-debug > strong,
+.performance-debug > span {
+    display: block;
+}
+
+.performance-debug > span {
+    margin: 3px 0 7px;
+    color: #7ed6a5;
+    font-size: 18px;
+}
+
+.performance-debug[data-level="warning"] > span { color: #ffd166; }
+.performance-debug[data-level="slow"] > span { color: #ff7b7b; }
+
+.performance-debug dl {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    margin: 0;
+}
+
+.performance-debug dt { color: #8fa8c6; }
+.performance-debug dd { margin: 0; text-align: right; }
+
+.performance-debug.simplified {
+    width: 160px;
+    padding: 8px 10px;
+}
+
+.performance-debug.simplified > span {
+    margin-bottom: 5px;
+    font-size: 16px;
+}
+
+.character-debug {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    width: 310px;
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    padding: 10px;
+    color: #edf4ff;
+    background: rgba(15, 22, 34, 0.94);
+    border: 1px solid #49617e;
+    border-radius: 8px;
+    font: 12px/1.35 monospace;
+}
+
+.character-debug header,
+.character-debug section {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 6px;
+}
+
+.character-debug header button { width: 28px; }
+.character-debug .character-debug-controls { display: flex; gap: 5px; }
+.character-debug header .character-debug-copy {
+    width: auto;
+    min-width: 42px;
+    padding: 1px 6px;
+}
+.character-debug section { padding: 9px 0; border-top: 1px solid #35465c; }
+.character-debug dl { grid-column: 1 / -1; display: grid; grid-template-columns: 68px 1fr; margin: 0; }
+.character-debug dt { color: #8fa8c6; }
+.character-debug dd { margin: 0; overflow-wrap: anywhere; }
+.character-debug-state { color: #7ed6a5; }
+.character-debug-state.waiting { color: #ffd166; }
+.character-debug-state.idle {color: #9fc5ff;}
+.character-debug section[data-visibility="offscreen"] {
+    border-left: 3px solid #8396ad;
+    padding-left: 7px;
+    opacity: 0.78;
+}
+.character-debug section[data-collision="waiting"] {
+    border-left: 3px solid #ff7b7b;
+    padding-left: 7px;
+    opacity: 1;
+}
+.character-debug section[data-collision="waiting"] .character-debug-state {
+    color: #ff9b7b;
+}
+.character-debug.collapsed { width: 190px; overflow: hidden; }

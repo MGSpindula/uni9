@@ -1,114 +1,407 @@
+:root {
+    font-family:
+        Inter,
+        system-ui,
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        sans-serif;
+
+    color-scheme: light;
+    background: #e9e3d8;
+}
+
+* {
+    box-sizing: border-box;
+}
+
 html,
-body {
-
+body,
+#app {
+    width: 100%;
+    height: 100%;
     margin: 0;
-
     overflow: hidden;
+}
 
+body {
+    background: #e9e3d8;
+}
+
+#app {
+    position: relative;
+    isolation: isolate;
 }
 
 canvas {
-
     display: block;
+    width: 100%;
+    height: 100%;
 
+    outline: none;
+
+    touch-action: none;
+    user-select: none;
 }
 
-.performance-debug {
+/*
+ * Debug overlay
+ */
+
+.debug-overlay {
     position: fixed;
-    right: 12px;
-    top: 12px;
     z-index: 1000;
-    width: 210px;
-    padding: 10px;
-    color: #edf4ff;
-    background: rgba(15, 22, 34, 0.9);
-    border: 1px solid #49617e;
-    border-radius: 8px;
-    font: 12px/1.4 monospace;
+    inset: 0;
+
     pointer-events: none;
 }
 
-.performance-debug > strong,
-.performance-debug > span {
-    display: block;
+.debug-overlay__content {
+    position: absolute;
+    inset: 0;
 }
 
-.performance-debug > span {
+.debug-overlay[data-hidden="true"] .debug-overlay__content {
+    display: none;
+}
+
+.debug-overlay__region {
+    position: absolute;
+    top: 12px;
+
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+
+    max-height: calc(100vh - 72px);
+
+    overflow-x: hidden;
+    overflow-y: auto;
+
+    pointer-events: none;
+}
+
+.debug-overlay__region--left {
+    left: 12px;
+
+    align-items: flex-start;
+}
+
+.debug-overlay__region--right {
+    right: 12px;
+
+    align-items: flex-end;
+}
+
+.debug-overlay__toolbar {
+    position: absolute;
+    right: 12px;
+    bottom: 12px;
+
+    pointer-events: auto;
+}
+
+.debug-overlay__toolbar button {
+    padding: 7px 10px;
+
+    color: #edf4ff;
+    background: rgb(15 22 34 / 94%);
+
+    border: 1px solid #49617e;
+    border-radius: 6px;
+
+    font: 11px/1.4 monospace;
+
+    cursor: pointer;
+}
+
+.debug-overlay__toolbar button:hover {
+    background: #26374d;
+}
+
+.debug-overlay__toolbar button:active {
+    transform: translateY(1px);
+}
+
+/*
+ * Shared debug panels
+ */
+
+.debug-panel {
+    position: relative;
+
+    padding: 10px;
+
+    color: #edf4ff;
+    background: rgb(15 22 34 / 94%);
+
+    border: 1px solid #49617e;
+    border-radius: 8px;
+
+    box-shadow: 0 4px 16px rgb(0 0 0 / 18%);
+
+    font: 12px/1.4 monospace;
+
+    pointer-events: auto;
+}
+
+.debug-panel[hidden] {
+    display: none;
+}
+
+.debug-panel button {
+    color: #dfeaff;
+    background: #26374d;
+
+    border: 1px solid #526d8d;
+    border-radius: 4px;
+
+    font: inherit;
+
+    cursor: pointer;
+}
+
+.debug-panel button:hover {
+    background: #344b68;
+}
+
+.debug-panel button:active {
+    transform: translateY(1px);
+}
+
+.debug-panel button:focus-visible {
+    outline: 2px solid #9fd3ff;
+    outline-offset: 2px;
+}
+
+/*
+ * Performance debug
+ */
+
+.performance-debug {
+    width: 250px;
+    max-width: calc(100vw - 24px);
+}
+
+.performance-debug--compact {
+    width: 180px;
+}
+
+.performance-debug__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.performance-debug__header button {
+    padding: 2px 6px;
+
+    font-size: 10px;
+    line-height: 1.4;
+}
+
+.performance-debug__fps {
+    display: block;
+
     margin: 3px 0 7px;
+
     color: #7ed6a5;
+
     font-size: 18px;
 }
 
-.performance-debug[data-level="warning"] > span { color: #ffd166; }
-.performance-debug[data-level="slow"] > span { color: #ff7b7b; }
+.performance-debug[data-level="warning"] .performance-debug__fps {
+    color: #ffd166;
+}
+
+.performance-debug[data-level="slow"] .performance-debug__fps {
+    color: #ff7b7b;
+}
 
 .performance-debug dl {
     display: grid;
-    grid-template-columns: 72px 1fr;
+    grid-template-columns: 94px minmax(0, 1fr);
+    gap: 2px 8px;
+
     margin: 0;
 }
 
-.performance-debug dt { color: #8fa8c6; }
-.performance-debug dd { margin: 0; text-align: right; }
-
-.performance-debug.simplified {
-    width: 160px;
-    padding: 8px 10px;
+.performance-debug dt {
+    color: #8fa8c6;
 }
 
-.performance-debug.simplified > span {
-    margin-bottom: 5px;
-    font-size: 16px;
+.performance-debug dd {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+
+    color: #f4f7fb;
+
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
+
+.performance-debug--compact [data-detail="extended"] {
+    display: none;
+}
+
+/*
+ * Character debug
+ */
 
 .character-debug {
-    position: fixed;
-    top: 12px;
-    left: 12px;
-    z-index: 1000;
-    width: 310px;
-    max-height: calc(100vh - 24px);
-    overflow: auto;
-    padding: 10px;
-    color: #edf4ff;
-    background: rgba(15, 22, 34, 0.94);
-    border: 1px solid #49617e;
-    border-radius: 8px;
-    font: 12px/1.35 monospace;
+    width: 380px;
+    max-width: calc(100vw - 24px);
+
+    transition: width 120ms ease;
 }
 
-.character-debug header,
-.character-debug section {
+.character-debug--collapsed {
+    width: 280px;
+}
+
+.character-debug--collapsed .character-debug__body {
+    display: none;
+}
+
+.character-debug__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.character-debug__header strong {
+    min-width: 0;
+    overflow: hidden;
+
+    font-size: 13px;
+
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.character-debug__header-actions {
+    display: flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 8px;
+}
+
+.character-debug__header-actions span {
+    color: #9fd3ff;
+
+    font-size: 10px;
+    white-space: nowrap;
+}
+
+.character-debug__header-actions button {
+    padding: 2px 6px;
+
+    font-size: 10px;
+    line-height: 1.4;
+}
+
+.character-debug__body {
+    margin-top: 10px;
+}
+
+.character-debug__actions {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
+
+    margin-bottom: 12px;
 }
 
-.character-debug header button { width: 28px; }
-.character-debug .character-debug-controls { display: flex; gap: 5px; }
-.character-debug header .character-debug-copy {
-    width: auto;
-    min-width: 42px;
-    padding: 1px 6px;
+.character-debug__actions button {
+    min-width: 0;
+    min-height: 30px;
+    padding: 5px 7px;
+
+    font-size: 11px;
+
+    white-space: nowrap;
 }
-.character-debug section { padding: 9px 0; border-top: 1px solid #35465c; }
-.character-debug dl { grid-column: 1 / -1; display: grid; grid-template-columns: 68px 1fr; margin: 0; }
-.character-debug dt { color: #8fa8c6; }
-.character-debug dd { margin: 0; overflow-wrap: anywhere; }
-.character-debug-state { color: #7ed6a5; }
-.character-debug-state.waiting { color: #ffd166; }
-.character-debug-state.idle {color: #9fc5ff;}
-.character-debug section[data-visibility="offscreen"] {
-    border-left: 3px solid #8396ad;
-    padding-left: 7px;
-    opacity: 0.78;
+
+.character-debug__state {
+    display: grid;
+    gap: 3px;
 }
-.character-debug section[data-collision="waiting"] {
-    border-left: 3px solid #ff7b7b;
-    padding-left: 7px;
-    opacity: 1;
+
+.character-debug__state > div {
+    display: grid;
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: 10px;
+
+    min-width: 0;
 }
-.character-debug section[data-collision="waiting"] .character-debug-state {
-    color: #ff9b7b;
+
+.character-debug__state span {
+    color: #9eaec1;
 }
-.character-debug.collapsed { width: 190px; overflow: hidden; }
+
+.character-debug__state output {
+    min-width: 0;
+    overflow: hidden;
+
+    color: #f4f7fb;
+
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.character-debug__command {
+    min-height: 18px;
+    margin: 10px 0 0;
+
+    color: #a9e3af;
+}
+
+/*
+ * Smaller screens
+ */
+
+@media (max-width: 720px) {
+    .debug-overlay__region {
+        max-height: calc(100vh - 64px);
+    }
+
+    .debug-overlay__region--left {
+        right: 12px;
+    }
+
+    .debug-overlay__region--right {
+        top: auto;
+        right: 12px;
+        bottom: 52px;
+        left: 12px;
+
+        align-items: flex-end;
+
+        max-height: 45vh;
+    }
+
+    .character-debug {
+        width: 100%;
+    }
+
+    .character-debug--collapsed {
+        width: 100%;
+    }
+
+    .character-debug__actions {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .performance-debug {
+        width: min(250px, 100%);
+    }
+
+    .performance-debug--compact {
+        width: 180px;
+    }
+}

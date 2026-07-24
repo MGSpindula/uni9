@@ -1,64 +1,76 @@
-import { EntityRegistry } from "../core/EntityRegistry";
-import { SelectionManager } from "../core/SelectionManager";
-import { InteractionSystem } from "../core/InteractionSystem";
-import { NavigationGraph } from "../navigation/NavigationGraph";
-import { NavigationConnector } from "../navigation/NavigationConnector";
-import { NavigationGraphHelper } from "../navigation/NavigationGraphHelper";
-import { CharacterNavigationSystem } from "../navigation/CharacterNavigationSystem";
+import { EntityRegistry } from "../core/EntityRegistry.js"
+import { SelectionManager } from "../core/SelectionManager.js"
+
+import { NavMeshWorld } from "../navigation/NavMeshWorld.js"
+import { CrowdNavigationSystem } from "../navigation/CrowdNavigationSystem.js"
+import { NavigationFacade } from "../navigation/NavigationFacade.js"
 
 export class GameServices {
-    constructor({
-        camera,
-        element,
-        onChanged,
-        navigationHelperVisible = false
-    }) {
-        this.registry = new EntityRegistry();
-        this.interactions = new InteractionSystem();
-        this.selection = new SelectionManager(camera, this.registry, element, { onChanged });
-        this.onChanged = onChanged;
-        this.navigationHelperVisible = navigationHelperVisible;
-    }
-    createNavigation(configure) {
-        this.navigationGraph = new NavigationGraph({ selectionRadius: 1.25 });
-        configure(this.navigationGraph);
-        this.navigationConnector = new NavigationConnector(this.navigationGraph);
-        this.characterNavigation = new CharacterNavigationSystem({
-            graph: this.navigationGraph,
-            connector: this.navigationConnector,
-            helper: null,
-            onChanged: this.onChanged
-        });
-        this.navigationHelper = new NavigationGraphHelper(this.navigationGraph, {
-            connector: this.navigationConnector,
-            trafficState: this.characterNavigation.trafficState,
-            routeGeometry: this.characterNavigation.routeGeometry,
-            visible: this.navigationHelperVisible
-        });
-        // Interaction points are authored after the graph in most levels.
-        // Rebuild the debug drawing whenever action/approach points change.
-        this.navigationConnector.onPointsChanged = () => {
-            this.navigationHelper?.refresh();
-            this.onChanged?.();
-        };
-        this.characterNavigation.helper = this.navigationHelper;
-        return this.navigationHelper;
-    }
-    disposeNavigation() {
-        this.characterNavigation?.dispose();
-        this.navigationHelper?.dispose();
-        if (this.navigationConnector) {
-            this.navigationConnector.onPointsChanged = null;
+    constructor({ camera, element, config, requestRender }) {
+        if (!camera) {
+            throw new TypeError("GameServices requires a camera.")
         }
-        this.characterNavigation = null;
-        this.navigationHelper = null;
-        this.navigationConnector = null;
-        this.navigationGraph = null;
+
+        if (!element) {
+            throw new TypeError("GameServices requires an input element.")
+        }
+
+        this.config = config
+        this.requestRender = requestRender
+
+        this.registry = new EntityRegistry()
+
+        this.selection = new SelectionManager({
+            camera,
+            registry: this.registry,
+            element,
+
+            onChanged: () => {
+                this.requestRender?.()
+            },
+        })
+
+        this.navMeshWorld = new NavMeshWorld({
+            config: config.navigation,
+        })
+
+        this.crowdNavigation = new CrowdNavigationSystem({
+            navMeshWorld: this.navMeshWorld,
+
+            config: config.navigation.crowd,
+
+            defaultAgent: config.navigation.defaultAgent,
+
+            onChanged: () => {
+                this.requestRender?.()
+            },
+        })
+
+        this.navigation = new NavigationFacade({
+            navMeshWorld: this.navMeshWorld,
+
+            crowdNavigation: this.crowdNavigation,
+        })
     }
+
+    update(delta) {
+        this.crowdNavigation.update(delta)
+    }
+
+    resetLevel() {
+        this.navigation.reset()
+        this.navMeshWorld.clear()
+    }
+
     dispose() {
-        this.disposeNavigation();
-        this.selection.dispose();
-        this.interactions.dispose();
-        this.registry.clear();
+        this.selection.dispose()
+
+        this.navigation.reset()
+        this.crowdNavigation.dispose()
+        this.navMeshWorld.dispose()
+
+        this.registry.clear()
+
+        this.requestRender = null
     }
 }

@@ -1,132 +1,236 @@
-import * as THREE from "three";
-
 export class GameLoop {
-    constructor(game) {
-        this.game = game; this.running = false;
-        this.frustum = new THREE.Frustum(); this.projection = new THREE.Matrix4();
-        // Debug and AI share the same visibility result for this frame.
-        this.actorVisibility = new WeakMap();
-        this.phaseTimings = {};
-    }
-    update(delta) {
-        const g = this.game, s = g.services, world = g.world;
-        if (!world || !s.characterNavigation) return;
-        this.phaseTimings = {};
-        if (g.hasContinuousVisualActivity()) g.requestRender();
-        this.measure("input", () => {
-            s.selection.update();
-            if (g.renderPipeline.controls.update()) g.requestRender();
-        });
-        const characters = world.characters.filter(actor => actor.isActive());
-        const characterSet = new Set(characters);
-        this.measure("entities", () => {
-            for (const entity of world.entities) {
-                if (entity.isActive() && !characterSet.has(entity)) {
-                    entity.update(delta);
-                }
-            }
-        });
+    constructor({ game, config, measurePerformance = false }) {
+        if (!game) {
+            throw new TypeError("GameLoop requires a Game.")
+        }
 
-        const camera = g.renderPipeline.camera;
-        this.measure("ai", () => {
-            if (camera) {
-                camera.updateMatrixWorld();
-                this.projection.multiplyMatrices(
-                    camera.projectionMatrix,
-                    camera.matrixWorldInverse
-                );
-                this.frustum.setFromProjectionMatrix(this.projection);
-            }
-            for (const actor of characters) {
-                const position = actor.object3D?.position;
-                this.actorVisibility.set(actor, {
-                    visible: camera && position
-                        ? this.frustum.containsPoint(position)
-                        : true,
-                    distance: camera && position
-                        ? camera.position.distanceTo(position)
-                        : 0
-                });
-            }
-            for (const controller of world.controllers) {
-                if (!camera || !controller.npc) {
-                    controller.update(delta);
-                    continue;
-                }
-                controller.update(
-                    delta,
-                    this.getActorVisibility(controller.npc)
-                );
-            }
-        });
-        const navigation = s.characterNavigation;
-        this.measure("planning", () => navigation.updatePlanning(delta));
-        this.measure("traffic", () => navigation.updateTraffic(delta));
-        this.measure("movement", () => {
-            for (const actor of characters) actor.authorizeMovementTraffic();
-            for (const actor of characters) actor.prepareMovement();
-        });
-        this.measure("collision", () => {
-            navigation.prepareCollisionFrame(characters);
-            navigation.resolveCharacterOverlaps(characters, delta);
-            for (const actor of characters) actor.evaluateMovementGuard(delta);
-        });
-        this.measure("locomotion", () => {
-            for (const actor of characters) actor.updateMovement(delta);
-        });
-        this.measure("collision", () => {
-            navigation.resolveResidualCharacterOverlaps(characters, delta);
-        });
-        this.measure("physics", () => navigation.solvePhysics(delta));
-        this.measure("grounding", () => {
-            for (const actor of characters) actor.updateGrounding();
-        });
-        this.measure("animation", () => {
-            for (const actor of characters) actor.updateAnimation(delta);
-        });
+        this.game = game
+        this.config = config
+
+        this.measurePerformance = Boolean(measurePerformance)
+        this.collectMetrics = false
+
+        this.running = false
+        this.animationFrameId = null
+        this.previousTime = 0
+
+        this.context = {
+            game,
+            world: null,
+            services: game.services,
+            camera: game.renderPipeline.camera,
+            delta: 0,
+        }
+
+        this.metrics = {
+            delta: 0,
+            frame: 0,
+            update: 0,
+            render: 0,
+            rendered: false,
+
+            phases: {
+                input: 0,
+                controllers: 0,
+                navigation: 0,
+                entities: 0,
+            },
+        }
+
+        this.frame = this.frame.bind(this)
+
+        this.handleVisibilityChange = this.handleVisibilityChange.bind(this)
+
+        document.addEventListener(
+            "visibilitychange",
+            this.handleVisibilityChange,
+        )
     }
-    measure(name, callback) {
-        const started = performance.now();
-        const result = callback();
-        this.phaseTimings[name] = (this.phaseTimings[name] ?? 0) +
-            performance.now() - started;
-        return result;
-    }
-    getActorVisibility(actor) {
-        return this.actorVisibility.get(actor) ?? { visible: true, distance: 0 };
-    }
+
     start() {
-        let previous = performance.now(); this.running = true;
-        const frame = now => {
-            if (!this.running) return;
-            const delta = Math.min((now - previous) / 1000, 1 / 15); previous = now;
-            const updateStart = performance.now(); this.update(delta); const updateEnd = performance.now();
-            const render = this.game.renderRequested || this.game.hasContinuousVisualActivity();
-            if (render) { this.game.renderPipeline.render(delta); this.game.renderRequested = false; }
-            const end = performance.now();
-            const performancePanel = this.game.performanceDebugPanel;
-            const detailedPerformance =
-                performancePanel?.requiresDetailedMetrics ?? false;
-            performancePanel?.record({
-                now: end,
-                frame: end - now,
-                update: updateEnd - updateStart,
-                render: render ? end - updateEnd : 0,
-                rendered: render,
-                phases: detailedPerformance ? this.phaseTimings : null,
-                collision: detailedPerformance
-                    ? this.game.services.characterNavigation
-                        .collisionFailsafe.metrics
-                    : null,
-                navigation: detailedPerformance
-                    ? this.game.services.characterNavigation
-                        .getMetricsSnapshot()
-                    : null,
-                renderer: this.game.renderer.renderer
-            });
-            this.animationFrameId = requestAnimationFrame(frame);
-        };
-        this.animationFrameId = requestAnimationFrame(frame);
+        if (this.running) {
+            return
+        }
+
+        this.running = true
+        this.previousTime = performance.now()
+
+        this.animationFrameId = requestAnimationFrame(this.frame)
     }
-    stop() { this.running = false; if (this.animationFrameId !== undefined) cancelAnimationFrame(this.animationFrameId); }
+
+    stop() {
+        if (!this.running) {
+            return
+        }
+
+        this.running = false
+
+        if (this.animationFrameId !== null) {
+            cancelAnimationFrame(this.animationFrameId)
+
+            this.animationFrameId = null
+        }
+    }
+
+    frame(now) {
+        if (!this.running) {
+            return
+        }
+
+        if (this.config.pauseWhenHidden && document.hidden) {
+            this.previousTime = now
+
+            this.animationFrameId = requestAnimationFrame(this.frame)
+
+            return
+        }
+
+        const elapsed = Math.max(0, (now - this.previousTime) / 1000)
+
+        const delta = Math.min(elapsed, this.config.maxDelta)
+
+        this.previousTime = now
+
+        const performancePanel = this.game.performanceDebugPanel
+
+        this.collectMetrics =
+            this.measurePerformance || Boolean(performancePanel)
+
+        const frameStarted = this.collectMetrics ? performance.now() : 0
+
+        const updateStarted = this.collectMetrics ? performance.now() : 0
+
+        this.update(delta)
+
+        if (this.collectMetrics) {
+            this.metrics.update = performance.now() - updateStarted
+        }
+
+        const shouldRender =
+            this.game.renderRequested || this.game.hasContinuousVisualActivity()
+
+        if (shouldRender) {
+            const renderStarted = this.collectMetrics ? performance.now() : 0
+
+            this.game.render(delta)
+
+            if (this.collectMetrics) {
+                this.metrics.render = performance.now() - renderStarted
+            }
+        } else if (this.collectMetrics) {
+            this.metrics.render = 0
+        }
+
+        this.metrics.delta = delta
+        this.metrics.rendered = shouldRender
+
+        if (this.collectMetrics) {
+            const frameEnded = performance.now()
+
+            this.metrics.frame = frameEnded - frameStarted
+
+            performancePanel?.record({
+                now: frameEnded,
+
+                frame: this.metrics.frame,
+                update: this.metrics.update,
+                render: this.metrics.render,
+
+                rendered: this.metrics.rendered,
+
+                phases: this.metrics.phases,
+            })
+        }
+
+        this.animationFrameId = requestAnimationFrame(this.frame)
+    }
+
+    update(delta) {
+        this.resetPhaseMetrics()
+
+        const game = this.game
+        const world = game.world
+
+        if (!world) {
+            return
+        }
+
+        const services = game.services
+        const renderPipeline = game.renderPipeline
+
+        this.context.world = world
+        this.context.delta = delta
+
+        let phaseStarted = this.startPhase()
+
+        services.selection.update()
+
+        if (renderPipeline.update(delta)) {
+            game.requestRender()
+        }
+
+        this.finishPhase("input", phaseStarted)
+
+        phaseStarted = this.startPhase()
+
+        world.updateControllers(delta, this.context)
+
+        this.finishPhase("controllers", phaseStarted)
+
+        phaseStarted = this.startPhase()
+
+        services.update(delta)
+
+        this.finishPhase("navigation", phaseStarted)
+
+        phaseStarted = this.startPhase()
+
+        world.updateEntities(delta, this.context)
+
+        this.finishPhase("entities", phaseStarted)
+
+        if (world.requiresContinuousRender()) {
+            game.requestRender()
+        }
+    }
+
+    startPhase() {
+        return this.collectMetrics ? performance.now() : 0
+    }
+
+    finishPhase(name, started) {
+        if (!this.collectMetrics) {
+            return
+        }
+
+        this.metrics.phases[name] = performance.now() - started
+    }
+
+    resetPhaseMetrics() {
+        const phases = this.metrics.phases
+
+        phases.input = 0
+        phases.controllers = 0
+        phases.navigation = 0
+        phases.entities = 0
+    }
+
+    handleVisibilityChange() {
+        this.previousTime = performance.now()
+
+        if (!document.hidden) {
+            this.game.requestRender()
+
+            this.game.performanceDebugPanel?.resetSampling()
+        }
+    }
+
+    dispose() {
+        this.stop()
+
+        document.removeEventListener(
+            "visibilitychange",
+            this.handleVisibilityChange,
+        )
+    }
 }

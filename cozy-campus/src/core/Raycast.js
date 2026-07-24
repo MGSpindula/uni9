@@ -1,80 +1,113 @@
-import * as THREE from "three";
+import { Raycaster, Vector2 } from "three"
 
 export class Raycast {
+    constructor({ near = 0, far = Infinity, layer = null } = {}) {
+        this.raycaster = new Raycaster()
 
-    constructor(camera, element = null) {
+        this.raycaster.near = near
 
-        this.camera = camera;
-        this.element = element;
+        this.raycaster.far = far
 
-        this.raycaster = new THREE.Raycaster();
-        this.mouse = new THREE.Vector2();
+        this.pointer = new Vector2()
 
+        this.intersections = []
+
+        if (layer !== null) {
+            this.setLayer(layer)
+        }
     }
 
-    // -----------------------------
-    // Pointer coordinates
-    // -----------------------------
+    setLayer(layer) {
+        this.raycaster.layers.set(layer)
 
-    updateMouse(event) {
-
-        const rect =
-            this.element?.getBoundingClientRect() ?? {
-                left: 0,
-                top: 0,
-                width: window.innerWidth,
-                height: window.innerHeight
-            };
-
-        this.mouse.x =
-            ((event.clientX - rect.left) / rect.width) * 2 - 1;
-
-        this.mouse.y =
-            -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
+        return this
     }
 
-    getHit(event, registry) {
+    enableLayer(layer) {
+        this.raycaster.layers.enable(layer)
 
-        this.updateMouse(event);
+        return this
+    }
 
-        this.raycaster.setFromCamera(
-            this.mouse,
-            this.camera
-        );
+    disableLayer(layer) {
+        this.raycaster.layers.disable(layer)
 
-        const targets =
-            registry.getRaycastTargets();
+        return this
+    }
 
-        if (targets.length === 0) {
+    intersectFromCamera(
+        pointer,
+        camera,
+        objects,
+        { recursive = true, filter = null } = {},
+    ) {
+        this.intersections.length = 0
 
-            return null;
-
+        if (!camera || !objects || objects.length === 0) {
+            return this.intersections
         }
 
-        const hits =
-            this.raycaster.intersectObjects(
-                targets,
-                true
-            );
+        this.pointer.copy(pointer)
 
-        for (const hit of hits) {
+        this.raycaster.setFromCamera(this.pointer, camera)
 
-            const entity =
-                registry.get(hit.object);
+        const results = this.raycaster.intersectObjects(
+            objects,
+            recursive,
+            this.intersections,
+        )
 
-            if (!entity) continue;
-
-            return {
-                entity,
-                object: hit.object,
-                point: hit.point
-            };
-
+        /*
+         * Compatibilidade com versões do
+         * Three.js que não reutilizam o
+         * terceiro argumento.
+         */
+        if (results !== this.intersections) {
+            for (let index = 0; index < results.length; index += 1) {
+                this.intersections.push(results[index])
+            }
         }
 
-        return null;
+        if (typeof filter === "function") {
+            let writeIndex = 0
 
+            for (
+                let readIndex = 0;
+                readIndex < this.intersections.length;
+                readIndex += 1
+            ) {
+                const intersection = this.intersections[readIndex]
+
+                if (!filter(intersection)) {
+                    continue
+                }
+
+                this.intersections[writeIndex] = intersection
+
+                writeIndex += 1
+            }
+
+            this.intersections.length = writeIndex
+        }
+
+        return this.intersections
     }
 
+    firstFromCamera(pointer, camera, objects, options) {
+        const intersections = this.intersectFromCamera(
+            pointer,
+            camera,
+            objects,
+            options,
+        )
+
+        return intersections[0] ?? null
+    }
+
+    dispose() {
+        this.intersections.length = 0
+
+        this.raycaster = null
+        this.pointer = null
+    }
 }

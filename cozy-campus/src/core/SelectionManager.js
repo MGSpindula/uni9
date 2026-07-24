@@ -1,266 +1,314 @@
-import { Raycast } from "./Raycast";
+import { Input } from "./Input.js"
+
+import { Raycast } from "./Raycast.js"
 
 export class SelectionManager {
+    constructor({ camera, registry, element, onChanged = null }) {
+        if (!camera) {
+            throw new TypeError("SelectionManager requires a camera.")
+        }
 
-    constructor(camera, registry, element, { onChanged = null } = {}) {
+        if (!registry) {
+            throw new TypeError("SelectionManager requires an EntityRegistry.")
+        }
 
-        this.raycast =
-            new Raycast(
-                camera,
-                element
-            );
+        this.camera = camera
+        this.registry = registry
+        this.onChanged = onChanged
 
-        this.registry = registry;
-        this.element = element;
-        this.onChanged = onChanged;
+        this.input = new Input({
+            element,
+        })
 
-        this.effects = [];
+        this.raycast = new Raycast()
 
-        this.entity = null;
-        this.object = null;
+        this.effects = new Set()
 
-        this.selectedEntity = null;
-        this.selectedObject = null;
+        this.primaryActionListeners = new Set()
 
-        // O último mousemove recebido será processado no próximo frame.
-        this.pendingPointerEvent = null;
+        this.hoveredEntity = null
+        this.hoveredObject = null
 
-        // Cache do último raycast.
-        this.lastHit = null;
-        this.lastRaycastClientX = null;
-        this.lastRaycastClientY = null;
+        this.hoveredIntersection = null
 
+        this.lastPointerVersion = -1
+
+        this.lastPrimaryActionVersion = this.input.primaryActionVersion
+
+        this.lastRegistryVersion = -1
+
+        this.enabled = true
+        this.disposed = false
     }
 
-    // -----------------------------
-    // Effects
-    // -----------------------------
-
     addEffect(effect) {
+        if (
+            !effect ||
+            typeof effect.setSelection !== "function" ||
+            typeof effect.clearSelection !== "function"
+        ) {
+            throw new TypeError(
+                "SelectionManager effects must implement setSelection() and clearSelection().",
+            )
+        }
 
-        this.effects.push(effect);
+        this.effects.add(effect)
 
+        this.syncEffects()
+
+        return effect
     }
 
     removeEffect(effect) {
+        if (!this.effects.delete(effect)) {
+            return false
+        }
 
-        this.effects =
-            this.effects.filter(
-                item => item !== effect
-            );
+        effect.clearSelection()
 
+        return true
     }
 
-    // -----------------------------
-    // Pointer queue
-    // -----------------------------
+    onPrimaryAction(listener) {
+        if (typeof listener !== "function") {
+            throw new TypeError(
+                "SelectionManager.onPrimaryAction requires a function.",
+            )
+        }
 
-    handleMouseMove(event) {
+        this.primaryActionListeners.add(listener)
 
-        this.pendingPointerEvent = event;
+        return () => {
+            this.primaryActionListeners.delete(listener)
+        }
+    }
 
+    setEnabled(enabled) {
+        const nextEnabled = Boolean(enabled)
+
+        if (nextEnabled === this.enabled) {
+            return false
+        }
+
+        this.enabled = nextEnabled
+
+        this.input.setEnabled(nextEnabled)
+
+        if (!nextEnabled) {
+            this.clearHover()
+        }
+
+        return true
     }
 
     update() {
-
-        if (!this.pendingPointerEvent) {
-
-            return;
-
+        if (this.disposed || !this.enabled) {
+            return false
         }
 
-        const event =
-            this.pendingPointerEvent;
+        const pointerChanged =
+            this.input.pointerVersion !== this.lastPointerVersion
 
-        this.pendingPointerEvent = null;
+        const actionChanged =
+            this.input.primaryActionVersion !== this.lastPrimaryActionVersion
 
-        const hit =
-            this.resolveHit(event);
+        const registryChanged =
+            this.registry.version !== this.lastRegistryVersion
 
-        if (!hit || !hit.entity.canInteract()) {
-
-            this.clearHover();
-            this.element.style.cursor = "default";
-            return;
-
+        if (!pointerChanged && !actionChanged && !registryChanged) {
+            return false
         }
 
-        this.setHovered(
-            hit.entity,
-            hit.object
-        );
+        this.lastPointerVersion = this.input.pointerVersion
 
-        this.element.style.cursor = "pointer";
+        this.lastPrimaryActionVersion = this.input.primaryActionVersion
 
+        this.lastRegistryVersion = this.registry.version
+
+        if (!this.input.pointerInside) {
+            return this.clearHover()
+        }
+
+        const targets = this.registry.getRaycastTargets()
+
+        const intersection = this.raycast.firstFromCamera(
+            this.input.pointer,
+            this.camera,
+            targets,
+        )
+
+        const entity = intersection
+            ? this.registry.resolveEntity(intersection.object)
+            : null
+
+        let changed = this.setHover(entity, intersection)
+
+        if (actionChanged) {
+            this.dispatchPrimaryAction(entity, intersection)
+
+            changed = true
+        }
+
+        if (changed) {
+            this.onChanged?.()
+        }
+
+        return changed
     }
 
-    handleClick(event) {
+    dispatchPrimaryAction(entity, intersection) {
+        entity?.onPrimaryAction?.(intersection, this)
 
-        // Normalmente o mousemove anterior já resolveu este ponto.
-        // Se ainda há um movimento pendente, ele é processado agora.
-        if (this.pendingPointerEvent) {
+        entity?.dispatchEvent?.({
+            type: "primaryaction",
 
-            const pendingEvent =
-                this.pendingPointerEvent;
+            intersection,
+            selection: this,
+        })
 
-            this.pendingPointerEvent = null;
-
-            this.lastHit =
-                this.resolveHit(pendingEvent);
-
+        for (const listener of this.primaryActionListeners) {
+            listener(entity, intersection, this)
         }
-
-        const hit =
-            this.resolveHit(event);
-
-        if (!hit || !hit.entity.canInteract()) {
-
-            return false;
-
-        }
-
-        return hit;
-
     }
 
-    resolveHit(event) {
+    setHover(entity, intersection) {
+        const object = intersection?.object ?? null
 
-        const samePointerPosition =
-            event.clientX === this.lastRaycastClientX &&
-            event.clientY === this.lastRaycastClientY;
+        if (entity === this.hoveredEntity) {
+            const objectChanged = object !== this.hoveredObject
 
-        if (samePointerPosition) {
+            this.hoveredObject = object
 
-            return this.lastHit;
+            this.hoveredIntersection = intersection
 
+            entity?.onPointerMove?.(intersection, this)
+
+            if (objectChanged) {
+                this.syncEffects()
+            }
+
+            return objectChanged
         }
 
-        this.lastRaycastClientX =
-            event.clientX;
+        const previousEntity = this.hoveredEntity
 
-        this.lastRaycastClientY =
-            event.clientY;
+        const previousIntersection = this.hoveredIntersection
 
-        this.lastHit =
-            this.raycast.getHit(
-                event,
-                this.registry
-            );
+        this.hoveredEntity = entity
 
-        return this.lastHit;
+        this.hoveredObject = object
 
-    }
+        this.hoveredIntersection = intersection
 
-    // -----------------------------
-    // Hover
-    // -----------------------------
+        if (previousEntity) {
+            previousEntity.onPointerLeave?.(previousIntersection, this)
 
-    setHovered(entity, object) {
+            previousEntity.dispatchEvent?.({
+                type: "pointerleave",
 
-        if (entity === this.entity &&
-            object === this.object) {
+                intersection: previousIntersection,
 
-            return;
-
+                selection: this,
+            })
         }
 
-        this.clearHover();
+        if (entity) {
+            entity.onPointerEnter?.(intersection, this)
 
-        this.entity = entity;
-        this.object = object;
+            entity.dispatchEvent?.({
+                type: "pointerenter",
 
-        entity.hover(object);
-
-        for (const effect of this.effects) {
-
-            effect.hover(
-                entity,
-                object
-            );
-
+                intersection,
+                selection: this,
+            })
         }
 
-        this.onChanged?.();
+        this.syncEffects()
 
+        return true
     }
 
     clearHover() {
-
-        if (!this.entity) {
-
-            return;
-
+        if (!this.hoveredEntity) {
+            return false
         }
 
-        this.entity.unhover(this.object);
+        const previousEntity = this.hoveredEntity
+
+        const previousIntersection = this.hoveredIntersection
+
+        this.hoveredEntity = null
+        this.hoveredObject = null
+
+        this.hoveredIntersection = null
+
+        previousEntity.onPointerLeave?.(previousIntersection, this)
+
+        previousEntity.dispatchEvent?.({
+            type: "pointerleave",
+
+            intersection: previousIntersection,
+
+            selection: this,
+        })
+
+        this.syncEffects()
+        this.onChanged?.()
+
+        return true
+    }
+
+    syncEffects() {
+        if (!this.hoveredEntity) {
+            this.clearEffects()
+            return
+        }
+
+        const selectionObject =
+            typeof this.hoveredEntity.getSelectionObject === "function"
+                ? this.hoveredEntity.getSelectionObject(
+                      this.hoveredObject,
+                      this.hoveredIntersection,
+                  )
+                : this.hoveredEntity.object3D
+
+        if (!selectionObject) {
+            this.clearEffects()
+            return
+        }
 
         for (const effect of this.effects) {
-
-            effect.unhover(
-                this.entity,
-                this.object
-            );
-
+            effect.setSelection(selectionObject)
         }
-
-        this.entity = null;
-        this.object = null;
-        this.onChanged?.();
-
     }
 
-    clear() {
-
-        this.clearHover();
-
-    }
-
-    getEntity() {
-
-        return this.entity;
-
-    }
-
-    getObject() {
-
-        return this.object;
-
-    }
-
-    // -----------------------------
-    // Selection
-    // -----------------------------
-
-    select(
-        entity = this.entity,
-        object = this.object
-    ) {
-
-        this.selectedEntity = entity;
-        this.selectedObject = object;
-        this.onChanged?.();
-
-    }
-
-    clearSelection() {
-
-        this.selectedEntity = null;
-        this.selectedObject = null;
-        this.onChanged?.();
-
+    clearEffects() {
+        for (const effect of this.effects) {
+            effect.clearSelection()
+        }
     }
 
     dispose() {
+        if (this.disposed) {
+            return
+        }
 
-        this.clearHover();
-        this.clearSelection();
+        this.disposed = true
 
-        this.effects.length = 0;
-        this.pendingPointerEvent = null;
-        this.lastHit = null;
+        this.clearHover()
+        this.clearEffects()
 
-        this.element.style.cursor = "default";
+        this.effects.clear()
 
+        this.primaryActionListeners.clear()
+
+        this.input.dispose()
+        this.raycast.dispose()
+
+        this.input = null
+        this.raycast = null
+        this.camera = null
+        this.registry = null
+        this.onChanged = null
     }
-
 }

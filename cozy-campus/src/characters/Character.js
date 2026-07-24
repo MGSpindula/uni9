@@ -1,723 +1,427 @@
-import * as THREE from "three";
-import { Entity } from "../core/Entity";
-import { EntityState } from "../core/EntityState";
-import { Navigation } from "../navigation/Navigation";
-import { AnimationController } from "./AnimationController";
-import { Locomotion } from "./Locomotion";
-import { AnimationPresets } from "../core/AnimationPresets";
-import { Tween } from "../core/Tween";
+import {
+    CapsuleGeometry,
+    ConeGeometry,
+    Group,
+    Mesh,
+    MeshStandardMaterial,
+    Quaternion,
+    Vector3,
+} from "three"
+
+import { Entity } from "../core/Entity.js"
+
+const UP_AXIS = new Vector3(0, 1, 0)
+
+const MIN_FACING_SPEED_SQUARED = 0.0025
+const TURN_COMPLETION_EPSILON = 0.002
+
+const DEFAULT_NAVIGATION_PROFILE = Object.freeze({
+    radius: 0.42,
+    height: 1.8,
+    maxSpeed: 2.2,
+    maxAcceleration: 8,
+})
+
+function positiveNumber(value, fallback, label) {
+    const resolved = value ?? fallback
+
+    if (!Number.isFinite(resolved) || resolved <= 0) {
+        throw new RangeError(
+            `${label} must be a finite number greater than zero.`,
+        )
+    }
+
+    return resolved
+}
+
+function createNavigationProfile(profile = {}) {
+    return Object.freeze({
+        radius: positiveNumber(
+            profile.radius,
+            DEFAULT_NAVIGATION_PROFILE.radius,
+            "Character radius",
+        ),
+
+        height: positiveNumber(
+            profile.height,
+            DEFAULT_NAVIGATION_PROFILE.height,
+            "Character height",
+        ),
+
+        maxSpeed: positiveNumber(
+            profile.maxSpeed,
+            DEFAULT_NAVIGATION_PROFILE.maxSpeed,
+            "Character maxSpeed",
+        ),
+
+        maxAcceleration: positiveNumber(
+            profile.maxAcceleration,
+            DEFAULT_NAVIGATION_PROFILE.maxAcceleration,
+            "Character maxAcceleration",
+        ),
+    })
+}
+
+function copyPosition(target, source) {
+    if (Array.isArray(source) || ArrayBuffer.isView(source)) {
+        target.set(source[0], source[1], source[2])
+
+        return target
+    }
+
+    if (
+        source &&
+        Number.isFinite(source.x) &&
+        Number.isFinite(source.y) &&
+        Number.isFinite(source.z)
+    ) {
+        target.copy(source)
+
+        return target
+    }
+
+    throw new TypeError(
+        "Character position must contain finite x, y and z values.",
+    )
+}
+
+function createPrototypeVisual({ radius, height, color }) {
+    const visual = new Group()
+
+    visual.name = "CharacterVisual"
+
+    const middleHeight = Math.max(0.01, height - radius * 2)
+
+    const bodyGeometry = new CapsuleGeometry(radius, middleHeight, 4, 10, 1)
+
+    const bodyMaterial = new MeshStandardMaterial({
+        color,
+        roughness: 0.85,
+        metalness: 0,
+    })
+
+    const body = new Mesh(bodyGeometry, bodyMaterial)
+
+    body.name = "CharacterBody"
+    body.position.y = height * 0.5
+    body.castShadow = true
+    body.receiveShadow = true
+
+    const directionGeometry = new ConeGeometry(
+        Math.max(0.05, radius * 0.2),
+        Math.max(0.12, radius * 0.55),
+        8,
+    )
+
+    const directionMaterial = new MeshStandardMaterial({
+        color: 0xf7f2e8,
+        roughness: 0.8,
+        metalness: 0,
+    })
+
+    const directionMarker = new Mesh(directionGeometry, directionMaterial)
+
+    directionMarker.name = "CharacterDirectionMarker"
+
+    directionMarker.position.set(0, height * 0.67, radius * 0.92)
+
+    directionMarker.rotation.x = Math.PI * 0.5
+    directionMarker.castShadow = true
+
+    visual.add(body)
+    visual.add(directionMarker)
+
+    return visual
+}
 
 export class Character extends Entity {
-
-    constructor(name = "Character") {
-
-        super(name);
-
-        // All characters share the same movement contract. PlayerController and
-        // NPC behavior only differ in where their commands come from.
-        this.object3D = new THREE.Group();
-        this.visual = null;
-        this.forwardHelper = null;
-
-        this.navigation = new Navigation();
-        this.navigationPriority = 0;
-        // "absolute" is reserved for player-like actors whose movement input
-        // must not be silently frustrated by ambient traffic. Traffic still
-        // respects hard blocks and physical bodies; other actors are asked to
-        // vacate instead of letting this actor clip through them.
-        this.navigationPassagePolicy = "ordinary";
-        this.traversalType = "flat";
-        this.locomotion = new Locomotion(this.object3D);
-        this.animation = null;
-        this.grounding = null;
-
-        this.waypointReachedHandler = null;
-        this.waypointArrivalGuard = null;
-        this.segmentRequestedHandler = null;
-        this.localPointRequestedHandler = null;
-        this.localConnectionRequestedHandler = null;
-        this.departureRequestedHandler = null;
-        this.navigationCancelledHandler = null;
-        this.movementGuard = null;
-        this.movementFrame = {
-            waypoint: null,
-            trafficAuthorized: false,
-            collisionAuthorized: false
-        };
-
-        // Keep a wider base circle so contacts are predicted sooner and actors
-        // separate without vibrating while trying to occupy the same lane.
-        this.collisionRadius = 0.42;
-        // Actors whose roots differ more than this are on separate vertical
-        // layers and must not block or push one another in the XZ circle solver.
-        this.collisionHeight = 1.2;
-        // Navigation owns two different things: the current route and the
-        // actor's intent. A route may be cancelled/rebuilt by traffic or
-        // collision recovery without silently discarding the requested target.
-        // Autonomous controllers may opt into "replaceable" so their behavior
-        // can abandon a failed task and choose another one after a timeout.
-        this.navigationIntentPolicy = "persistent";
-        this.navigationCapabilities = {
-            maxSlope: THREE.MathUtils.degToRad(35),
-            stairs: true
-        };
-
-    }
-
-    // -----------------------------
-    // Visual setup
-    // -----------------------------
-
-    setVisual(visual, { floorOffset = 0 } = {}) {
-
-        if (this.visual) this.object3D.remove(this.visual);
-
-        this.visual = visual;
-        this.visual.position.y = floorOffset;
-        this.object3D.add(this.visual);
-        this.animation = new AnimationController(this.visual);
-
-    }
-
-    // -----------------------------
-    // Navigation commands
-    // -----------------------------
-
-    followWaypoints(waypoints, options = {}) {
-
-        if (waypoints.length === 0) {
-
-            this.stop();
-            return;
-
-        }
-
-        this.navigation.setWaypoints(waypoints, options);
-        this.setState(EntityState.WALKING);
-
-    }
-
-    setWaypointReachedHandler(handler) {
-
-        this.waypointReachedHandler = handler;
-
-    }
-
-    setWaypointArrivalGuard(handler) {
-
-        this.waypointArrivalGuard = handler;
-
-    }
-
-    setSegmentRequestedHandler(handler) {
-
-        this.segmentRequestedHandler = handler;
-
-    }
-
-    setLocalPointRequestedHandler(handler) {
-
-        this.localPointRequestedHandler = handler;
-
-    }
-
-    setGrounding(grounding) {
-
-        this.grounding = grounding;
-
-    }
-
-    addForwardHelper({
-        height = 2,
-        length = 0.9,
-        color = 0xffff00
+    constructor({
+        id = null,
+        name = null,
+        kind = "character",
+        color = 0xe2b879,
+        position = {
+            x: 0,
+            y: 0,
+            z: 0,
+        },
+        navigationProfile = {},
+        visual = null,
+        interactive = true,
+        disposeResources = visual === null,
+        turnResponsiveness = 12,
     } = {}) {
+        const profile = createNavigationProfile(navigationProfile)
 
-        if (this.forwardHelper) {
+        const root = new Group()
 
-            this.object3D.remove(this.forwardHelper);
+        const resolvedVisual =
+            visual ??
+            createPrototypeVisual({
+                radius: profile.radius,
+                height: profile.height,
+                color,
+            })
 
+        root.add(resolvedVisual)
+
+        super({
+            id,
+            name,
+            object3D: root,
+            interactive,
+            disposeResources,
+        })
+
+        this.kind = kind
+        this.visual = resolvedVisual
+
+        this.navigationProfile = profile
+        this.navigationState = null
+
+        this.turnResponsiveness = positiveNumber(
+            turnResponsiveness,
+            12,
+            "Character turnResponsiveness",
+        )
+
+        this.targetOrientation = new Quaternion().copy(this.visual.quaternion)
+
+        this.turning = false
+
+        this.motion = {
+            status: "idle",
+
+            displacement: new Vector3(),
+            actualVelocity: new Vector3(),
+            desiredVelocity: new Vector3(),
+
+            actualSpeed: 0,
+            desiredSpeed: 0,
+
+            stoppedElapsed: 0,
+
+            hasDestination: false,
+            reachedDestination: false,
+            targetPathIsPartial: false,
         }
 
-        // Locomotion rotates object3D with lookAt(), whose local forward axis
-        // for a regular Object3D is +Z. Keep this helper on the root so visual
-        // animation never changes the direction it is reporting.
-        this.forwardHelper = new THREE.ArrowHelper(
-            new THREE.Vector3(0, 0, 1),
-            new THREE.Vector3(0, height, 0),
-            length,
-            color,
-            0.28,
-            0.16
-        );
-        this.forwardHelper.name = `${this.name}:ForwardHelper`;
-        this.forwardHelper.line.raycast = () => {};
-        this.forwardHelper.cone.raycast = () => {};
-        this.object3D.add(this.forwardHelper);
+        copyPosition(this.object3D.position, position)
 
-        return this.forwardHelper;
-
+        this.object3D.userData.character = true
+        this.object3D.userData.characterKind = kind
     }
 
-    setLocalConnectionRequestedHandler(handler) {
-
-        this.localConnectionRequestedHandler = handler;
-
-    }
-
-    setDepartureRequestedHandler(handler) {
-
-        this.departureRequestedHandler = handler;
-
-    }
-
-    setNavigationCancelledHandler(handler) {
-
-        this.navigationCancelledHandler = handler;
-
-    }
-
-    pause() {
-
-        this.navigation.pause();
-        this.setState(EntityState.WAITING);
-
-    }
-
-    resume() {
-
-        if (!this.navigation.hasPath()) return;
-
-        this.navigation.resume();
-        this.setState(EntityState.WALKING);
-
-    }
-
-    cancel() {
-
-        this.navigation.cancel();
-        this.navigationCancelledHandler?.(
-            this.navigation.getTraversalState()
-        );
-        this.setState(EntityState.IDLE);
-
-    }
-
-    stop() {
-
-        this.cancel();
-
-    }
-
-    setMovementGuard(handler) {
-
-        this.movementGuard = handler;
-
-    }
-
-    // -----------------------------
-    // Navigation presentation hooks
-    // -----------------------------
-
-    onTrafficWaitStarted(wait) {
-
-        // Future animation hook. Examples by reason:
-        // QUEUE_HEAD / ENDPOINT_WAIT: stop and glance at the passing actor;
-        // LANE_FULL: hesitate and inspect the other lane;
-        // HARD_BLOCKED: react as if the route is unavailable.
-        // Animate `visual`; navigation continues owning object3D.
-        void wait;
-
-    }
-
-    onTrafficWaitTimeout(wait) {
-
-        // Called once per prolonged-wait interval. This is where a Character
-        // may later play "look around", "ask for passage" or one deliberate
-        // step-aside animation. Base Character never moves object3D, cancels
-        // the route or discards the actor's intent here.
-        void wait;
-
-    }
-
-    onTrafficRerouteRequested(wait) {
-
-        // Future animation hook: the autonomous actor has waited long enough
-        // and will now reconsider the route. A glance, sigh or turn-around
-        // animation belongs on `visual`; Traffic preserves topological truth.
-        void wait;
-
-    }
-
-    onTrafficWaitEnded(wait) {
-
-        // Future animation hook: finish the yielding pose before walk resumes.
-        void wait;
-
-    }
-
-    onNodeEvacuationStarted(event) {
-
-        // Emergency node clearance. Navigation may use the opposite (left)
-        // lane when both normal claims would otherwise trap this actor on the
-        // junction. A future animation can glance back or signal passage here.
-        void event;
-
-    }
-
-    onTrafficReservationYielded(event) {
-
-        // This actor had only reserved a lane; an actor physically occupying
-        // the node needed it to leave. Keep the route and retry naturally.
-        // Future presentation may add a short hesitation on `visual`.
-        void event;
-
-    }
-
-    onPriorityPassageRequested({ by, resourceType }) {
-
-        // Future social animation hook: notice `by`, step out of the way and
-        // optionally apologize. Navigation owns the actual evacuation route;
-        // this hook should animate only visual/bones.
-        console.log(
-            `[PriorityPassage] ${this.name} gives ${resourceType} ` +
-            `passage to ${by.name}.`
-        );
-
-    }
-
-    onCollisionYieldStarted({ blocker, strategy }) {
-
-        // Future social animation hook: look at `blocker`, apologize or signal
-        // passage. Navigation moves object3D; bones/visual animate here without
-        // replacing the route or its destination.
-        console.log(
-            `[CollisionSolver] ${this.name} gives way to ${blocker.name} ` +
-            `(${strategy}).`
-        );
-
-    }
-
-    onCollisionYieldEnded({ blocker }) {
-
-        // Future animation hook: finish the yielding pose before the normal
-        // walk cycle resumes toward the unchanged destination.
-        console.log(
-            `[CollisionSolver] ${this.name} resumes after ${blocker.name}.`
-        );
-
-    }
-
-    onCollisionPassStarted({ yieldingActor }) {
-
-        // Future social animation hook for the actor receiving passage: a
-        // nod/glance can play while normal locomotion remains authoritative.
-        console.log(
-            `[CollisionSolver] ${this.name} has right-of-way; ` +
-            `${yieldingActor.name} gives passage.`
-        );
-
-    }
-
-    onCollisionPassEnded({ yieldingActor }) {
-
-        // Finish the acknowledgement layer, if one was playing.
-        void yieldingActor;
-
-    }
-
-    centerVisualForNavigation() {
-
-        if (!this.visual || Math.abs(this.visual.position.x) <= 0.001) {
-            return false;
+    syncNavigationMotion(state) {
+        if (!state) {
+            return false
         }
 
-        AnimationPresets.to(this, {
-            object: this.visual.position,
-            property: "x",
-            to: 0,
-            duration: 0.35,
-            easing: Tween.easeInOutQuad
-        });
-        return true;
+        const previousStatus = this.motion.status
 
-    }
+        const previouslyReached = this.motion.reachedDestination
 
-    // -----------------------------
-    // Lifecycle
-    // -----------------------------
+        this.navigationState = state
 
-    update(delta) {
+        this.motion.status = state.status
 
-        // Compatibility entry point for callers that update an isolated
-        // Character. Scene uses the explicit phases below and never calls this
-        // method for registered characters.
-        this.updateAnimation(delta);
+        this.motion.displacement.copy(state.displacement)
 
-    }
+        this.motion.actualVelocity.copy(state.actualVelocity)
 
-    authorizeMovementTraffic() {
+        this.motion.desiredVelocity.copy(state.desiredVelocity)
 
-        const frame = this.movementFrame;
-        const waypoint = this.navigation.getCurrentWaypoint();
+        this.motion.actualSpeed = state.actualSpeed
 
-        frame.waypoint = null;
-        frame.trafficAuthorized = false;
-        frame.collisionAuthorized = false;
+        this.motion.desiredSpeed = state.desiredSpeed
 
-        if (!waypoint || this.navigation.isPaused()) return false;
+        this.motion.stoppedElapsed = state.stoppedElapsed
 
-        // prepareTraversalTo() is the only part of Character allowed to ask
-        // NavigationTrafficSystem for a node/lane/interaction authorization.
-        // Scene calls it during the traffic phase, before any body can move.
-        if (!this.prepareTraversalTo(waypoint)) return false;
+        this.motion.hasDestination = state.hasDestination
 
-        frame.waypoint = waypoint;
-        frame.trafficAuthorized = true;
-        return true;
+        this.motion.reachedDestination = state.reachedDestination
 
-    }
+        this.motion.targetPathIsPartial = state.targetPathIsPartial
 
-    prepareMovement() {
-
-        this.locomotion.beginFrame();
-
-        const frame = this.movementFrame;
-
-        // A traffic callback may replace or pause the route. Never apply an
-        // authorization issued for a waypoint that is no longer current.
-        if (!frame.trafficAuthorized ||
-            frame.waypoint !== this.navigation.getCurrentWaypoint() ||
-            this.navigation.isPaused()) {
-
-            frame.waypoint = null;
-            return false;
-
+        if (previousStatus !== this.motion.status) {
+            this.dispatchEvent({
+                type: "navigationstatuschange",
+                previousStatus,
+                status: this.motion.status,
+                state,
+            })
         }
 
-        return true;
-
-    }
-
-    evaluateMovementGuard(delta) {
-
-        const frame = this.movementFrame;
-        const waypoint = frame.waypoint;
-
-        if (!waypoint) return false;
-
-        // CharacterCollisionFailsafe is a boolean brake. It may deny this
-        // frame, but it cannot insert a waypoint, choose a lane or mutate the
-        // route prepared by NavigationGraph/NavigationTrafficSystem.
-        frame.collisionAuthorized = this.movementGuard?.(
-            waypoint.position,
-            delta
-        ) ?? true;
-
-        if (!frame.collisionAuthorized) {
-
-            this.setState(EntityState.WAITING);
-            return false;
-
+        if (!previouslyReached && this.motion.reachedDestination) {
+            this.dispatchEvent({
+                type: "destinationreached",
+                state,
+            })
         }
 
-        return true;
-
+        return true
     }
 
-    updateMovement(delta) {
+    clearNavigationMotion(state = null) {
+        if (state && this.navigationState !== state) {
+            return false
+        }
 
-        const frame = this.movementFrame;
-        const waypoint = frame.waypoint;
+        const previousStatus = this.motion.status
 
-        if (!waypoint ||
-            !frame.trafficAuthorized ||
-            !frame.collisionAuthorized ||
-            this.navigation.isPaused()) return;
+        this.navigationState = null
 
-        // Consume this authorization once. The next frame must revalidate the
-        // current route against traffic and collision state.
-        frame.trafficAuthorized = false;
-        frame.collisionAuthorized = false;
+        this.motion.status = "idle"
 
-        const movementOptions = {
-            // Facing always follows the authored route unless the waypoint
-            // explicitly preserves an interaction pose.
-            rotate: !waypoint.preserveFacing,
-            // Every ordinary walk is surface-following: route owns XZ and
-            // Grounding owns Y. Only explicit jump/fly waypoints are airborne.
-            //
-            // Use { airborne: true } when Navigation must control XYZ itself,
-            // for example during a jump, flight, fall or authored traversal
-            // that intentionally leaves the ground. Do NOT use it for slopes,
-            // stairs or hills: those remain attached to walkable geometry and
-            // must let CharacterGrounding determine their physical height.
-            followSurface: waypoint.airborne !== true
-        };
-        const reached = waypoint.routeCurve
-            ? this.locomotion.moveAlongCurve(
-                waypoint.routeCurve,
-                delta,
-                {
-                    ...movementOptions,
-                    startDistance: waypoint.curveStartDistance,
-                    stopDistance: waypoint.curveStopDistance,
-                    finishCurve: waypoint.routeCurveFinal !== false
-                }
+        this.motion.displacement.set(0, 0, 0)
+
+        this.motion.actualVelocity.set(0, 0, 0)
+
+        this.motion.desiredVelocity.set(0, 0, 0)
+
+        this.motion.actualSpeed = 0
+        this.motion.desiredSpeed = 0
+        this.motion.stoppedElapsed = 0
+
+        this.motion.hasDestination = false
+
+        this.motion.reachedDestination = false
+
+        this.motion.targetPathIsPartial = false
+
+        if (previousStatus !== "idle") {
+            this.dispatchEvent({
+                type: "navigationstatuschange",
+                previousStatus,
+                status: "idle",
+                state: null,
+            })
+        }
+
+        return true
+    }
+
+    setPosition(position) {
+        copyPosition(this.object3D.position, position)
+
+        return this
+    }
+
+    setFacingDirection(direction, { immediate = false } = {}) {
+        if (
+            !direction ||
+            !Number.isFinite(direction.x) ||
+            !Number.isFinite(direction.z)
+        ) {
+            throw new TypeError(
+                "Facing direction must contain finite x and z values.",
             )
-            : this.locomotion.moveTo(
-                waypoint.position,
-                delta,
-                movementOptions
-            );
-
-        if (this.isState(EntityState.WAITING) &&
-            this.locomotion.getMotionState().moving) {
-
-            this.setState(EntityState.WALKING);
-
         }
 
-        if (!reached) {
+        const horizontalLengthSquared =
+            direction.x * direction.x + direction.z * direction.z
 
-            if (this.locomotion.isBlockedBySlope()) {
-
-                this.pause();
-
-            }
-
-            return;
-
+        if (horizontalLengthSquared <= MIN_FACING_SPEED_SQUARED) {
+            return false
         }
 
-        // Position and facing are both part of arriving at authored animation
-        // marks such as approach and terminal interaction points. The callback runs only
-        // after the smooth locomotion rotation has also finished.
-        if (waypoint.arrivalDirection &&
-            !this.locomotion.alignToDirection(
-                waypoint.arrivalDirection,
-                delta
-            )) return;
+        const yaw = Math.atan2(direction.x, direction.z)
 
-        const traversalBeforeArrival = this.navigation.getTraversalState();
-        const completedConnection = waypoint.id
-            ? traversalBeforeArrival.currentConnection
-            : null;
-        const canAcceptArrival = this.waypointArrivalGuard?.(
-            waypoint,
-            completedConnection,
-        ) ?? true;
+        this.targetOrientation.setFromAxisAngle(UP_AXIS, yaw)
 
-        if (!canAcceptArrival) return;
+        if (immediate) {
+            this.visual.quaternion.copy(this.targetOrientation)
 
-        if (waypoint.id) this.navigation.reachNode(waypoint.id);
+            this.turning = false
 
-        const completedRouteRevision = this.navigation.getRouteRevision();
-
-        const waypointAccepted = this.waypointReachedHandler?.(
-            waypoint,
-            completedConnection,
-            { afterArrival: true }
-        );
-
-        // Arrival ownership can change while the actor is on the connection.
-        // Keep this waypoint current until its node can actually be occupied.
-        if (waypointAccepted === false) return;
-
-        // The callback is allowed to create a follow-up route. Advancing here
-        // would skip its first waypoint, possibly asking NavigationGraph for a
-        // connection between non-neighbouring nodes.
-        if (this.navigation.getRouteRevision() !== completedRouteRevision) {
-
-            this.locomotion.resetCurve();
-            return;
-
+            return true
         }
 
-        const result = this.navigation.advance();
-        const nextWaypoint = this.navigation.getCurrentWaypoint();
+        this.turning = true
 
-        if (waypoint.routeCurveFinal !== false ||
-            nextWaypoint?.routeCurve !== waypoint.routeCurve) {
-            this.locomotion.resetCurve();
-        }
-
-        if (result.finished) {
-
-            // A waypoint callback may promote arrival to STOPPING or begin an interaction.
-            // Do not overwrite that more specific state with generic IDLE.
-            if (this.isState(EntityState.WALKING)) {
-
-                this.setState(
-                    result.shouldWait
-                        ? EntityState.WAITING
-                        : EntityState.IDLE
-                );
-
-            }
-
-        }
-
+        return true
     }
 
-    updateGrounding() {
+    updateFacing(delta) {
+        const actualVelocity = this.motion.actualVelocity
 
-        this.grounding?.update(this);
+        const desiredVelocity = this.motion.desiredVelocity
 
+        const actualHorizontalSpeedSquared =
+            actualVelocity.x * actualVelocity.x +
+            actualVelocity.z * actualVelocity.z
+
+        const desiredHorizontalSpeedSquared =
+            desiredVelocity.x * desiredVelocity.x +
+            desiredVelocity.z * desiredVelocity.z
+
+        if (actualHorizontalSpeedSquared > MIN_FACING_SPEED_SQUARED) {
+            this.setFacingDirection(actualVelocity)
+        } else if (desiredHorizontalSpeedSquared > MIN_FACING_SPEED_SQUARED) {
+            this.setFacingDirection(desiredVelocity)
+        }
+
+        if (!this.turning) {
+            return false
+        }
+
+        const remainingAngle = this.visual.quaternion.angleTo(
+            this.targetOrientation,
+        )
+
+        if (remainingAngle <= TURN_COMPLETION_EPSILON) {
+            this.visual.quaternion.copy(this.targetOrientation)
+
+            this.turning = false
+
+            return true
+        }
+
+        const safeDelta = Number.isFinite(delta) && delta > 0 ? delta : 0
+
+        const alpha = 1 - Math.exp(-this.turnResponsiveness * safeDelta)
+
+        this.visual.quaternion.slerp(this.targetOrientation, Math.min(alpha, 1))
+
+        this.turning =
+            this.visual.quaternion.angleTo(this.targetOrientation) >
+            TURN_COMPLETION_EPSILON
+
+        return true
     }
 
-    updateAnimation(delta) {
+    onUpdate(delta, context) {
+        this.updateFacing(delta)
 
-        // Entity tweens are presentation/interaction transitions. Updating
-        // them here prevents an animation callback from changing a route in
-        // the middle of the traffic or physics phases.
-        super.update(delta);
-        this.animation?.update(delta, this.locomotion.getMotionState());
+        this.onCharacterUpdate(delta, context)
+    }
 
+    onCharacterUpdate() {}
+
+    getSelectionObject() {
+        return this.visual
     }
 
     requiresContinuousRender() {
-
-        return super.requiresContinuousRender() ||
-            this.locomotion.getMotionState().moving ||
-            Boolean(this.animation?.isVisuallyActive?.());
-
+        return (
+            super.requiresContinuousRender() ||
+            this.turning ||
+            this.motion.actualSpeed > 0.001 ||
+            this.motion.desiredSpeed > 0.001
+        )
     }
 
-    prepareTraversalTo(waypoint) {
-
-        if (waypoint.departureDirection &&
-            !waypoint.departureDirectionApplied) {
-
-            // Departure poses are authored as the exact opposite of entry.
-            // Apply this to the logical root before Locomotion or any Bézier
-            // sample can reuse the old facing. A future animation may hide the
-            // instantaneous logical turn on the visual/bone layer.
-            const direction = waypoint.departureDirection;
-
-            this.object3D.lookAt(
-                this.object3D.position.x + direction.x,
-                this.object3D.position.y,
-                this.object3D.position.z + direction.z
-            );
-            waypoint.departureDirectionApplied = true;
-
+    dispose() {
+        if (this.disposed) {
+            return
         }
 
-        if (waypoint.departureRequest) {
+        super.dispose()
 
-            const allowed = this.departureRequestedHandler?.(
-                waypoint.departureRequest,
-                waypoint
-            ) ?? true;
-
-            if (!allowed) {
-
-                this.pauseIfRouteUnchanged(waypoint);
-                return false;
-
-            }
-
-        }
-
-        if (waypoint.connectionEntry) {
-
-            const allowed = this.localConnectionRequestedHandler?.(
-                waypoint.connectionEntry,
-                waypoint
-            ) ?? true;
-
-            if (!allowed) {
-
-                this.pauseIfRouteUnchanged(waypoint);
-                return false;
-
-            }
-
-        }
-
-        if (waypoint.interactionPoint) {
-
-            waypoint.preserveFacing ??=
-                waypoint.interactionPoint.metadata.preserveFacing === true;
-
-            if (!waypoint.preserveFacing) {
-
-                waypoint.arrivalDirection ??=
-                    waypoint.interactionPoint.getWorldDirection();
-
-            }
-
-            const allowed = this.localPointRequestedHandler?.(
-                waypoint.interactionPoint
-            ) ?? true;
-
-            if (!allowed) {
-
-                this.pauseIfRouteUnchanged(waypoint);
-                return false;
-
-            }
-
-        }
-
-        if (!waypoint.id) return true;
-
-        const traversal = this.navigation.getTraversalState();
-
-        if (traversal.currentNodeId === waypoint.id) return true;
-
-        if (traversal.currentConnection) {
-
-            const isEndpoint =
-                traversal.currentConnection.fromId === waypoint.id ||
-                traversal.currentConnection.toId === waypoint.id;
-
-            if (isEndpoint) return true;
-
-        }
-
-        if (!traversal.currentNodeId) return false;
-
-        const allowed = this.segmentRequestedHandler?.(
-            traversal.currentNodeId,
-            waypoint.id,
-            waypoint
-        ) ?? true;
-
-        if (!allowed) {
-
-            this.pauseIfRouteUnchanged(waypoint);
-            return false;
-
-        }
-
-        this.navigation.beginConnection(
-            traversal.currentNodeId,
-            waypoint.id
-        );
-
-        return true;
-
+        this.visual = null
+        this.navigationProfile = null
+        this.navigationState = null
+        this.targetOrientation = null
+        this.motion = null
     }
-
-    pauseIfRouteUnchanged(requestedWaypoint) {
-
-        // Traffic handlers return false both for a real wait and after they
-        // insert curve samples before the requested waypoint. Only the former
-        // should pause navigation.
-        if (this.navigation.getCurrentWaypoint() === requestedWaypoint) {
-
-            this.pause();
-
-        }
-
-    }
-
-    onStateChanged(previous, current) {
-
-        this.animation?.play(current);
-
-    }
-
 }
